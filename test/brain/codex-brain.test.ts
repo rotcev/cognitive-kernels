@@ -158,14 +158,14 @@ describe("CodexBrain", () => {
     const brain = new CodexBrain({});
 
     brain.startThread({
-      model: "gpt-5.4",
+      model: "gpt-5.3-codex",
       workingDirectory: "/tmp/non-git-workspace",
       sandboxMode: "workspace-write",
     });
 
     expect(startThreadMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: "gpt-5.4",
+        model: "gpt-5.3-codex",
         workingDirectory: "/tmp/non-git-workspace",
         sandboxMode: "workspace-write",
         skipGitRepoCheck: true,
@@ -186,7 +186,7 @@ describe("CodexBrain", () => {
     const brain = new CodexBrain({});
 
     brain.startThread({
-      model: "gpt-5.4",
+      model: "gpt-5.3-codex",
       workingDirectory: "/tmp/git-workspace",
       skipGitRepoCheck: false,
     });

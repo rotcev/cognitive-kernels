@@ -35,14 +35,14 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
   const provider: "codex" | "claude" = input.provider
     ?? (codexSection?.provider === "codex" ? "codex" : "claude");
 
-  // When using Codex SDK, default all model fields to gpt-5.4 unless explicitly set in TOML
+  // When using Codex SDK, default all model fields to gpt-5.3-codex unless explicitly set in TOML
   if (provider === "codex") {
     const osRaw = (osConfigRaw ?? {}) as Record<string, unknown>;
     const kernelRaw = (osRaw.kernel ?? {}) as Record<string, unknown>;
     const awarenessRaw = (osRaw.awareness ?? {}) as Record<string, unknown>;
     const ephemeralRaw = (osRaw.ephemeral ?? {}) as Record<string, unknown>;
     const observationRaw = (osRaw.observation ?? {}) as Record<string, unknown>;
-    const codexDefault = "gpt-5.4";
+    const codexDefault = "gpt-5.3-codex";
 
     if (!kernelRaw.metacogModel) osConfig.kernel.metacogModel = codexDefault;
     if (!kernelRaw.processModel) osConfig.kernel.processModel = codexDefault;

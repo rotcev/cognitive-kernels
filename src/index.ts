@@ -42,4 +42,13 @@ export {
   createCognitiveKernelsMcpServer,
   startCognitiveKernelsMcpServer,
 } from "./mcp/control-plane.js";
+export { createRunsApiApp } from "./api/app.js";
+export {
+  createRunSchema,
+  eventsQuerySchema,
+  runIdParamsSchema,
+  runsApiSchemas,
+} from "./api/schemas.js";
+export { createRunsApiServer } from "./api/server.js";
+export type * from "./api/types.js";
 export type * from "./os/types.js";

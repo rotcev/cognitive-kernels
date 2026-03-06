@@ -16,7 +16,7 @@ function makeProcess(overrides: Partial<OsProcess>): OsProcess {
     lastActiveAt: overrides.lastActiveAt ?? "2026-03-05T00:00:01.000Z",
     tickCount: overrides.tickCount ?? 4,
     tokensUsed: overrides.tokensUsed ?? 100,
-    model: overrides.model ?? "gpt-5.4",
+    model: overrides.model ?? "gpt-5.3-codex",
     workingDir: overrides.workingDir ?? "/repo",
     children: overrides.children ?? [],
     onParentDeath: overrides.onParentDeath ?? "orphan",

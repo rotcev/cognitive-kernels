@@ -42,7 +42,7 @@ describe("runOsMode", () => {
     runMock.mockClear();
   });
 
-  test("defaults codex provider models to gpt-5.4", async () => {
+  test("defaults codex provider models to gpt-5.3-codex", async () => {
     await runOsMode({
       goal: "test goal",
       cwd: "/tmp/workspace",
@@ -50,11 +50,11 @@ describe("runOsMode", () => {
     });
 
     expect(capture.brainConfig.provider).toBe("codex");
-    expect(capture.osConfig.kernel.metacogModel).toBe("gpt-5.4");
-    expect(capture.osConfig.kernel.processModel).toBe("gpt-5.4");
-    expect(capture.osConfig.awareness.model).toBe("gpt-5.4");
-    expect(capture.osConfig.ephemeral.defaultModel).toBe("gpt-5.4");
-    expect(capture.osConfig.observation.defaultModel).toBe("gpt-5.4");
+    expect(capture.osConfig.kernel.metacogModel).toBe("gpt-5.3-codex");
+    expect(capture.osConfig.kernel.processModel).toBe("gpt-5.3-codex");
+    expect(capture.osConfig.awareness.model).toBe("gpt-5.3-codex");
+    expect(capture.osConfig.ephemeral.defaultModel).toBe("gpt-5.3-codex");
+    expect(capture.osConfig.observation.defaultModel).toBe("gpt-5.3-codex");
   });
 
   test("preserves explicit codex provider model settings from config", async () => {
@@ -77,9 +77,9 @@ provider = "codex"
 
     expect(capture.brainConfig.provider).toBe("codex");
     expect(capture.osConfig.kernel.metacogModel).toBe("custom-metacog");
-    expect(capture.osConfig.kernel.processModel).toBe("gpt-5.4");
-    expect(capture.osConfig.awareness.model).toBe("gpt-5.4");
+    expect(capture.osConfig.kernel.processModel).toBe("gpt-5.3-codex");
+    expect(capture.osConfig.awareness.model).toBe("gpt-5.3-codex");
     expect(capture.osConfig.ephemeral.defaultModel).toBe("custom-ephemeral");
-    expect(capture.osConfig.observation.defaultModel).toBe("gpt-5.4");
+    expect(capture.osConfig.observation.defaultModel).toBe("gpt-5.3-codex");
   });
 });

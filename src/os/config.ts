@@ -11,7 +11,7 @@ const osKernelSchema = z.object({
   metacogCadence: z.number().int().positive().default(3),
   metacogModel: z.string().default("claude-sonnet-4-6"),
   processModel: z.string().default("claude-sonnet-4-6"),
-  tokenBudget: z.number().int().positive().default(1000000),
+  tokenBudget: z.number().int().positive().default(100000000),
   processTokenBudgetEnabled: z.boolean().default(false),
   wallTimeLimitMs: z.number().int().nonnegative().default(0),  // 0 = no limit (long-horizon work)
   telemetryEnabled: z.boolean().default(true),

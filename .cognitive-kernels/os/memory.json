@@ -1,0 +1,57 @@
+{
+  "heuristics": [
+    {
+      "id": "6f97f459-46b5-4b2f-acbc-3619c33656c5",
+      "heuristic": "Avoid spawning exploratory scout workers in this project/runtime configuration with unsupported external model defaults; prefer the known-supported default executor or reuse existing scout outputs unless a new scout is strictly necessary.",
+      "confidence": 0.5,
+      "context": "Three scout processes failed with the same unsupported-model error while contract planning succeeded from existing outputs; repeated retries would waste tokens without advancing the goal.",
+      "source": {
+        "runId": "0205e1a0-b855-44fa-9357-a50d3b6c7687"
+      },
+      "reinforcementCount": 0,
+      "learnedAt": "2026-03-06T06:18:57.377Z",
+      "reinforcedAt": "2026-03-06T06:18:57.377Z",
+      "scope": "local"
+    },
+    {
+      "id": "b0b9e618-beb9-4e38-93d2-ec281c476cd6",
+      "heuristic": "When a worker has already published a namespace-complete artifact set (for example `contract:*` or `contract:phase2:*`), do not allow another live producer to keep owning the same namespace; collapse to one producer and proceed to observation.",
+      "confidence": 0.5,
+      "context": "Repeated duplicate-producer collisions on contract namespaces caused control-plane inflation without improving artifacts.",
+      "source": {
+        "runId": "0205e1a0-b855-44fa-9357-a50d3b6c7687"
+      },
+      "reinforcementCount": 0,
+      "learnedAt": "2026-03-06T07:14:05.633Z",
+      "reinforcedAt": "2026-03-06T07:14:05.633Z",
+      "scope": "local"
+    },
+    {
+      "id": "a4568d22-178b-46c5-8a5d-5e56a81c6aef",
+      "heuristic": "Treat observation boundaries like artifact namespaces: exactly one authoritative observer should own a given phase boundary at a time, and if all observers for a produced boundary are removed, immediately respawn one before allowing downstream work.",
+      "confidence": 0.5,
+      "context": "Repeated duplicate-observer churn and accidental elimination of all observers on the Phase 2 contract boundary.",
+      "source": {
+        "runId": "0205e1a0-b855-44fa-9357-a50d3b6c7687"
+      },
+      "reinforcementCount": 0,
+      "learnedAt": "2026-03-06T07:18:42.326Z",
+      "reinforcedAt": "2026-03-06T07:18:42.326Z",
+      "scope": "local"
+    },
+    {
+      "id": "eb203eb7-c0eb-4da6-82d2-2c60a91e1d33",
+      "heuristic": "Ownership conservation guardrail: when removing duplicate producers or observers, preserve exactly one authoritative owner for each required namespace or boundary; never prune a required boundary to zero owners.",
+      "confidence": 0.5,
+      "context": "Repeated overshoot after duplicate cleanup removed all live observers for an already-produced Phase 2 boundary.",
+      "source": {
+        "runId": "0205e1a0-b855-44fa-9357-a50d3b6c7687"
+      },
+      "reinforcementCount": 0,
+      "learnedAt": "2026-03-06T07:21:37.359Z",
+      "reinforcedAt": "2026-03-06T07:21:37.359Z",
+      "scope": "local"
+    }
+  ],
+  "promotionLog": []
+}
