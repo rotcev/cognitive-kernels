@@ -175,6 +175,8 @@ export class OsKernel {
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   /** Periodic metacog evaluation timer. */
   private metacogTimer: ReturnType<typeof setInterval> | null = null;
+  /** Count of ephemerals currently executing (fire-and-forget, not in inflight map). */
+  private activeEphemeralCount = 0;
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
   constructor(
@@ -1603,7 +1605,8 @@ export class OsKernel {
     this.router.setStrategiesSnapshot(applicable);
 
     // Stall detection — in event-driven model, "selected.length === 0" becomes "inflight.size === 0"
-    if (this.inflight.size === 0) {
+    // Also skip if ephemerals are running — they're fire-and-forget, not in inflight map
+    if (this.inflight.size === 0 && this.activeEphemeralCount === 0) {
       this.consecutiveIdleTicks += 1;
       if (this.consecutiveIdleTicks >= 3) {
         const idleProcs = this.table.getByState("idle");
@@ -1629,7 +1632,7 @@ export class OsKernel {
       const livingChildren = this.table.getAll().filter(
         p => p.parentPid === orchestrator.pid && p.state !== "dead"
       );
-      const pendingEphemerals = this.pendingEphemerals.length;
+      const pendingEphemerals = this.pendingEphemerals.length + this.activeEphemeralCount;
       if (livingChildren.length === 0 && pendingEphemerals === 0) {
         const pendingDeferrals = this.deferrals.size;
         const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
@@ -2196,6 +2199,23 @@ export class OsKernel {
     const maxConcurrent = this.config.ephemeral.maxConcurrent;
 
     const runOne = async (desc: typeof pending[0]): Promise<void> => {
+      this.activeEphemeralCount++;
+      try { await this.runOneEphemeral(desc); } finally { this.activeEphemeralCount--; }
+    };
+
+    // Run with concurrency control — classic self-removing pool pattern
+    const pool: Promise<void>[] = [];
+    for (const desc of pending) {
+      const p = runOne(desc).then(() => { pool.splice(pool.indexOf(p), 1); });
+      pool.push(p);
+      if (pool.length >= maxConcurrent) {
+        await Promise.race(pool);
+      }
+    }
+    await Promise.all(pool);
+  }
+
+  private async runOneEphemeral(desc: { pid: string; ephemeralId: string; tablePid: string; name: string; model: string; prompt: string; workingDir: string; startTime: number }): Promise<void> {
       try {
         const ephThread = this.client.startThread({
           model: desc.model,
@@ -2252,6 +2272,7 @@ export class OsKernel {
             if (p && p.state === "idle") this.supervisor.activate(pid);
           }
           this.dagEngine.buildFromProcesses(this.table.getAll());
+          this.emitter?.writeLiveState(this.snapshot());
           if (this.shouldHalt()) { this.haltResolve?.(); return; }
           this.doSchedulingPass();
         } finally {
@@ -2308,24 +2329,13 @@ export class OsKernel {
             if (p && p.state === "idle") this.supervisor.activate(pid);
           }
           this.dagEngine.buildFromProcesses(this.table.getAll());
+          this.emitter?.writeLiveState(this.snapshot());
           if (this.shouldHalt()) { this.haltResolve?.(); return; }
           this.doSchedulingPass();
         } finally {
           release();
         }
       }
-    };
-
-    // Run with concurrency control — classic self-removing pool pattern
-    const pool: Promise<void>[] = [];
-    for (const desc of pending) {
-      const p = runOne(desc).then(() => { pool.splice(pool.indexOf(p), 1); });
-      pool.push(p);
-      if (pool.length >= maxConcurrent) {
-        await Promise.race(pool);
-      }
-    }
-    await Promise.all(pool);
   }
 
   /**
