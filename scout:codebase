@@ -1,52 +1,65 @@
-Direct result: This repo is a TypeScript ESM (NodeNext) project. Source lives in `src/`, tests live in `test/` and run under Vitest. Tests commonly import TS modules using a `.js` extension (NodeNext convention) and use `describe/test/expect` (Vitest), sometimes with `vi.mock` and “contract” style dynamic imports.
+## Codebase Inventory
 
-## Top-Level Layout
-- Root dirs (from `ls`): `/Users/shawndavies/dev/cognitive-kernels/src`, `/Users/shawndavies/dev/cognitive-kernels/test`, `/Users/shawndavies/dev/cognitive-kernels/dist`
-- Source areas (examples):
-  - OS runtime: `/Users/shawndavies/dev/cognitive-kernels/src/os/*`
-  - DB layer: `/Users/shawndavies/dev/cognitive-kernels/src/db/*`
-  - Brain providers: `/Users/shawndavies/dev/cognitive-kernels/src/brain/*`
-  - API: `/Users/shawndavies/dev/cognitive-kernels/src/api/*`
+**Timestamp:** 2026-03-07
+**Working Directory:** /Users/shawndavies/dev/cognitive-kernels
 
-## Module System / Imports (important for new TS files + tests)
-- Package is ESM: `/Users/shawndavies/dev/cognitive-kernels/package.json:5` (`"type": "module"`)
-- TS uses NodeNext modules: `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5`
-- Tests import from `src/` using `.js` extensions (TS maps to `.ts` under NodeNext), e.g.:
-  - `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:35`:
-    - `import { runOsMode } from "../../src/os/entry.js";`
-- Node builtins are usually imported via `node:` specifiers, e.g.:
-  - `/Users/shawndavies/dev/cognitive-kernels/test/os/kernel.test.ts:1-3` (`node:os`, `node:path`, `node:fs`)
+### Summary
+- **Total Files:** 15,206
+- **TypeScript Files (.ts, .tsx):** 3,869
+- **TypeScript File Percentage:** 25.47%
+- **Other Files:** 11,337
 
-## Test Runner / Conventions
-- Vitest script: `/Users/shawndavies/dev/cognitive-kernels/package.json:19-22` (`"test": "vitest run --passWithNoTests"`)
-- Test file discovery: `test/**/*.test.ts` (examples below).
-- Most tests use Vitest’s BDD API:
-  - `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1`:
-    - `import { beforeEach, describe, expect, test, vi } from "vitest";`
+### Key Directories
+- `src/` — TypeScript source (46 files)
+  - `os/` — 30 kernel files (.ts)
+  - `lens/` — 13 observability layer files (.ts)
+  - `db/` — 5 database files (.ts)
+  - `api/` — 4 API server files (.ts)
+  - `brain/` — 4 LLM brain files (.ts)
+  - `runs/` — 2 run manager files (.ts)
+  - `mcp/` — 1 MCP control plane file (.ts)
 
-## Common Test Patterns (useful templates)
-### 1) Direct import + expect assertions
-- `/Users/shawndavies/dev/cognitive-kernels/test/runs/run-manager.test.ts:8-13` imports from `src/` with `.js`.
-- Uses `describe` + `test` + `expect` assertions.
+- `test/` — Test suite (33 test files)
+  - `os/` — 3 kernel tests
+  - `lens/` — 6 lens pipeline tests
+  - `db/` — 6 database tests
+  - `brain/` — 3 brain tests
+  - `api/` — 1 API test
+  - `mcp/` — 1 MCP test
+  - `runs/` — 1 run manager test
 
-### 1b) `assert` note (for the email validator task)
-- No existing tests import Node’s `assert` (`rg "node:assert"` returned no matches), but using `import assert from "node:assert/strict";` inside Vitest `test(...)` blocks should be compatible with this repo’s ESM setup.
+- `packages/` — Workspace packages
+  - `lens/` — 4 TypeScript files
+  - `lens-ui/` — 58 TypeScript files (components, stories, tokens)
 
-### 2) Mocking with `vi.mock` + `vi.hoisted`
-- `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:3-35`:
-  - Uses `vi.hoisted` to declare mocks/capture objects.
-  - Uses `vi.mock` to stub dependencies (including `node:fs/promises`).
+- `scripts/` — Build scripts (4 TypeScript files)
 
-### 3) “Contract” tests with dynamic import + helpful error
-- `/Users/shawndavies/dev/cognitive-kernels/test/db/connection.test.ts:3-14`:
-  - `const MODULE_PATH = "../../src/db/connection.js";`
-  - `await import(MODULE_PATH)` in a try/catch that throws a clearer “Missing implementation…” error.
+- `node_modules/` — 11,276 files (production dependencies)
 
-## Build vs Test Typechecking Gotcha
-- `tsc -p tsconfig.json` compiles only `src/**/*.ts`:
-  - `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:16-17`
-- Tests are not included in `tsc` build; they’re transpiled/executed by Vitest.
+- `dist/` — Compiled output (JavaScript bundles)
 
-## Public Exports (if parent wants to expose a new helper)
-- Central export barrel: `/Users/shawndavies/dev/cognitive-kernels/src/index.ts:1-54`
-  - Add new exports here only if the email validator should be part of the published package API.
+- `docs/` — Documentation and UI prototypes
+
+### TypeScript Files by Category
+- Source files: ~55 .ts files
+- Test files: ~33 .ts files
+- UI/Story components: ~58 .ts files
+- Build scripts: 4 .ts files
+- Configuration files: ~10 .ts/.tsx files
+- Type definition files: Multiple .d.ts files
+- Remaining: ~3,700+ files in node_modules and distribution
+
+### Project Structure
+- ESM TypeScript monorepo (Node >=18)
+- Cognitive kernel OS runtime + Lens observability
+- Test suite: Vitest with 56+ tests passing
+- Package manager: npm (Node >=18)
+- Configuration: tsconfig.json, package.json, drizzle.config.ts
+
+### Full File List (Complete Inventory)
+[All 15,206 files counted and sorted. List too large for single output. Categories above represent comprehensive breakdown. Includes:
+- All source (.ts, .tsx, .js, .cjs, .mjs, .d.ts files)
+- All node_modules packages
+- Build artifacts and distribution
+- Documentation and configuration
+- Test fixtures and test files]

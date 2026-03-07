@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-03-07T00:00:00Z",
+  "blackboardKey": "scout:dependencies",
+  "projectRoot": "/Users/shawndavies/dev/cognitive-kernels",
+
+  "testRunner": {
+    "type": "vitest",
+    "version": "3.0.8",
+    "scriptCommand": "vitest run --passWithNoTests",
+    "configLocations": [
+      "vitest config likely in vite.config.ts or tsconfig.json (inherited from root)"
+    ]
+  },
+
+  "typescript": {
+    "version": "5.8.2",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": true,
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "compilerFlags": {
+      "esModuleInterop": true,
+      "forceConsistentCasingInFileNames": true,
+      "skipLibCheck": true,
+      "resolveJsonModule": true
+    },
+    "typeCheckingEnabled": true
+  },
+
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+
+  "packageMetadata": {
+    "name": "cognitive-kernels",
+    "version": "0.1.0",
+    "type": "module",
+    "engines": "node >=18"
+  },
+
+  "keyDependencies": {
+    "runtime": {
+      "@anthropic-ai/claude-agent-sdk": "0.2.50",
+      "@modelcontextprotocol/sdk": "^1.26.0",
+      "@neondatabase/serverless": "^1.0.2",
+      "@openai/codex-sdk": "0.104.0",
+      "drizzle-orm": "^0.45.1",
+      "hono": "^4.12.5",
+      "ws": "^8.19.0",
+      "zod": "^4.0.0",
+      "dotenv": "^17.3.1",
+      "smol-toml": "1.3.4"
+    },
+    "devDependencies": {
+      "typescript": "5.8.2",
+      "vitest": "3.0.8",
+      "@types/node": "22.13.10",
+      "@types/ws": "^8.18.1",
+      "drizzle-kit": "^0.31.9"
+    }
+  },
+
+  "projectStructure": {
+    "mainEntryPoints": {
+      "cliEntry": "dist/cli.js",
+      "mcpEntry": "dist/mcp-cli.js",
+      "moduleEntry": "dist/index.js",
+      "lensExport": "dist/lens/index.js"
+    },
+    "sourceDir": "src/",
+    "outputDir": "dist/",
+    "workspaces": "packages/*"
+  },
+
+  "relevantForTask": {
+    "testingSetup": "vitest available, ready for unit tests with 'npm test'",
+    "tsCompilation": "TypeScript strict mode enabled; compile with 'npm run build'",
+    "nodeTarget": "ES2022 with NodeNext modules — compatible with modern Node 18+",
+    "memozationDeps": "zod available for schema validation; no built-in memoization library (can implement custom or use npm install lodash.memoize)",
+    "notes": "Project uses workspaces; ensure fibonacci utility added to correct workspace or root src/"
+  }
+}

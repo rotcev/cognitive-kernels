@@ -131,6 +131,8 @@ export class OsKernel {
   private awarenessDaemon: AwarenessDaemon | null = null;
   /** Pending notes from awareness daemon to inject into next metacog context. */
   private pendingAwarenessNotes: string[] = [];
+  /** Tracks cumulative line count per shell stream to emit only deltas. */
+  private shellOutputCursors = new Map<string, number>();
   /** Count of metacog evaluations — used to determine awareness cadence. */
   private metacogEvalCount = 0;
   /** Rolling history of metacog decisions for awareness daemon context. */
@@ -537,6 +539,10 @@ export class OsKernel {
               status: "completed",
               agentId: cmd.pid,
               message: `watchdog_kill: ${cmd.reason}`,
+              detail: {
+                trigger: "watchdog",
+                reason: cmd.reason,
+              },
             });
           } else {
             // Non-kill commands can be executed normally
@@ -580,6 +586,19 @@ export class OsKernel {
               this.applyAwarenessAdjustment(adj);
             }
           }
+          this.emitter?.emit({
+            action: "os_awareness_eval",
+            status: "completed",
+            agentName: "awareness-daemon",
+            message: `watchdog awareness eval: ${awarenessResp.notes.length} notes, ${awarenessResp.adjustments.length} adjustments, ${awarenessResp.flaggedHeuristics.length} flagged heuristics`,
+            detail: {
+              source: "watchdog",
+              notes: awarenessResp.notes,
+              adjustments: awarenessResp.adjustments,
+              flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
+              tick: this.scheduler.tickCount,
+            },
+          });
         } catch {
           // Awareness eval failed — non-critical, continue
         }
@@ -785,6 +804,14 @@ export class OsKernel {
             action: "os_blueprint_selected",
             status: "completed",
             message: `blueprint=${novelBp.name} id=${novelBp.id} source=novel`,
+            detail: {
+              blueprintId: novelBp.id,
+              blueprintName: novelBp.name,
+              source: "orchestrator",
+              adapted: true,
+              roles: novelBp.roles.map((r) => r.name),
+              successRate: 0,
+            },
           });
         } else {
           const bp = this.memoryStore.getBlueprint(bpValue);
@@ -803,6 +830,15 @@ export class OsKernel {
               action: "os_blueprint_selected",
               status: "completed",
               message: `blueprint=${bp.name} id=${bp.id} source=${bp.source}`,
+              detail: {
+                blueprintId: bp.id,
+                blueprintName: bp.name,
+                source: bp.source,
+                adapted: false,
+                roles: bp.roles.map((r) => r.name),
+                successRate: bp.stats?.uses ? bp.stats.successes / bp.stats.uses : 0,
+                uses: bp.stats?.uses ?? 0,
+              },
             });
           }
         }
@@ -1061,6 +1097,20 @@ export class OsKernel {
           for (const adj of awarenessResp.adjustments) {
             this.applyAwarenessAdjustment(adj);
           }
+
+          // Emit awareness evaluation event for Lens observability
+          this.emitter?.emit({
+            action: "os_awareness_eval",
+            status: "completed",
+            agentName: "awareness-daemon",
+            message: `awareness eval: ${awarenessResp.notes.length} notes, ${awarenessResp.adjustments.length} adjustments, ${awarenessResp.flaggedHeuristics.length} flagged heuristics`,
+            detail: {
+              notes: awarenessResp.notes,
+              adjustments: awarenessResp.adjustments,
+              flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
+              tick: this.scheduler.tickCount,
+            },
+          });
         } catch {
           // Awareness eval failed — continue without notes
         }
@@ -1127,6 +1177,22 @@ export class OsKernel {
               }
             }
           }
+
+          // Emit intervention outcome for Lens observability
+          this.emitter?.emit({
+            action: "os_intervention_outcome",
+            status: "completed",
+            message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
+            detail: {
+              commandKind: iv.commandKind,
+              outcome: iv.outcome,
+              interventionTick: iv.tick,
+              evaluationTick: evalTick,
+              preSnapshot: pre,
+              postSnapshot: post,
+              causalAttributions: iv.causalAttributions ?? [],
+            },
+          });
         }
       }
       this.pendingInterventions = this.pendingInterventions.filter(
@@ -1663,6 +1729,36 @@ export class OsKernel {
                   writingProc.blackboardKeysWritten.push(cmd.key);
                 }
               }
+
+              // Emit shell output as protocol events so they flow through the
+              // stream segmenter and appear in live terminal views.
+              // The bb_write value is the CUMULATIVE ring buffer, so we track
+              // last-emitted line count and only emit the delta.
+              if (writingProc?.backend?.kind === "system" && typeof cmd.value === "string") {
+                const isStdout = cmd.key.endsWith(":stdout");
+                const isStderr = cmd.key.endsWith(":stderr");
+                if (isStdout || isStderr) {
+                  const allLines = cmd.value.split("\n");
+                  const cursorKey = `${pid}:${isStderr ? "stderr" : "stdout"}`;
+                  const lastCount = this.shellOutputCursors.get(cursorKey) ?? 0;
+                  const newLines = allLines.slice(lastCount);
+                  this.shellOutputCursors.set(cursorKey, allLines.length);
+                  if (newLines.length > 0) {
+                    this.emitter?.emit({
+                      action: "os_shell_output",
+                      status: "completed",
+                      agentId: pid,
+                      agentName: writingProc.name,
+                      message: newLines.join("\n"),
+                      detail: {
+                        stream: isStderr ? "stderr" : "stdout",
+                        key: cmd.key,
+                        lineCount: newLines.length,
+                      },
+                    });
+                  }
+                }
+              }
             }
             break;
 
@@ -1796,6 +1892,13 @@ export class OsKernel {
               agentId: sysChild.pid,
               agentName: sysChild.name,
               message: `command=${cmd.command} parent=${pid}`,
+              detail: {
+                trigger: "process",
+                command: cmd.command,
+                args: cmd.args,
+                parentPid: pid,
+                objective: sysChild.objective,
+              },
             });
             break;
           }
@@ -1854,6 +1957,12 @@ export class OsKernel {
               agentId: kernelChild.pid,
               agentName: kernelChild.name,
               message: `goal=${cmd.goal} parent=${pid}`,
+              detail: {
+                trigger: "process",
+                goal: cmd.goal,
+                parentPid: pid,
+                maxTicks: cmd.maxTicks,
+              },
             });
             break;
           }
@@ -1968,6 +2077,15 @@ export class OsKernel {
                 agentId: pid,
                 agentName: reportingProc.name,
                 message: `self_report efficiency=${cmd.efficiency} pressure=${cmd.resourcePressure} action=${cmd.suggestedAction}${cmd.blockers.length > 0 ? ' blockers=' + cmd.blockers.join(',') : ''}`,
+                detail: {
+                  kind: "self_report",
+                  efficiency: cmd.efficiency,
+                  resourcePressure: cmd.resourcePressure,
+                  suggestedAction: cmd.suggestedAction,
+                  blockers: cmd.blockers,
+                  reason: cmd.reason,
+                  tick: reportingProc.tickCount,
+                },
               });
             }
             break;
@@ -2000,6 +2118,18 @@ export class OsKernel {
       action: "os_metacog",
       status: "completed",
       message: `assessment=${parsed.assessment ?? "none"} commands=${parsed.commands.length}`,
+      detail: {
+        assessment: parsed.assessment ?? "",
+        commands: parsed.commands.map((c: { kind: string; reason?: string; pid?: string; descriptor?: { name?: string }; heuristic?: string; confidence?: number }) => ({
+          kind: c.kind,
+          reason: c.reason,
+          targetPid: c.pid,
+          targetName: c.descriptor?.name,
+          ...(c.kind === "learn" ? { heuristic: c.heuristic, confidence: c.confidence } : {}),
+        })),
+        citedHeuristicIds: parsed.citedHeuristicIds,
+        commandCount: parsed.commands.length,
+      },
     });
 
     // Record metacog decision in history for awareness daemon analysis
@@ -2141,6 +2271,13 @@ export class OsKernel {
           agentId: proc.pid,
           agentName: proc.name,
           message: `metacog_spawn`,
+          detail: {
+            trigger: "metacog",
+            objective: cmd.descriptor.objective,
+            type: cmd.descriptor.type,
+            priority: cmd.descriptor.priority,
+            model: cmd.descriptor.model,
+          },
         });
         break;
       }
@@ -2176,6 +2313,14 @@ export class OsKernel {
           action: "os_defer",
           status: "started",
           message: `registered id=${ds.id} name=${cmd.descriptor.name} condition=${JSON.stringify(cmd.condition)} reason="${cmd.reason}"`,
+          detail: {
+            deferralId: ds.id,
+            processName: cmd.descriptor.name,
+            condition: cmd.condition,
+            reason: cmd.reason,
+            maxWaitTicks: cmd.maxWaitTicks,
+            registeredAtTick: this.scheduler.tickCount,
+          },
         });
         break;
       }
@@ -2272,7 +2417,17 @@ export class OsKernel {
           action: "os_process_kill",
           status: "completed",
           agentId: cmd.pid,
+          agentName: targetProc?.name,
           message: `metacog_kill: ${cmd.reason}`,
+          detail: {
+            trigger: "metacog",
+            reason: cmd.reason,
+            cascade: cmd.cascade,
+            targetName: targetProc?.name,
+            targetTokensUsed: targetProc?.tokensUsed,
+            targetTickCount: targetProc?.tickCount,
+            targetPriority: targetProc?.priority,
+          },
         });
         break;
       }
@@ -2306,6 +2461,13 @@ export class OsKernel {
           agentId: sysProc.pid,
           agentName: sysProc.name,
           message: `metacog_spawn_system command=${cmd.command}`,
+          detail: {
+            trigger: "metacog",
+            command: cmd.command,
+            args: cmd.args,
+            objective: cmd.objective,
+            priority: cmd.priority,
+          },
         });
         break;
       }
@@ -2348,6 +2510,12 @@ export class OsKernel {
           agentId: kernelProc.pid,
           agentName: kernelProc.name,
           message: `metacog_spawn_kernel goal=${cmd.goal}`,
+          detail: {
+            trigger: "metacog",
+            goal: cmd.goal,
+            maxTicks: cmd.maxTicks,
+            priority: cmd.priority,
+          },
         });
         break;
       }
@@ -2370,6 +2538,17 @@ export class OsKernel {
           undefined,
           cmd.scope,
         );
+        this.emitter?.emit({
+          action: "os_heuristic_learned",
+          status: "completed",
+          message: `heuristic learned: "${cmd.heuristic.slice(0, 80)}" confidence=${cmd.confidence} scope=${cmd.scope ?? "local"}`,
+          detail: {
+            heuristic: cmd.heuristic,
+            confidence: cmd.confidence,
+            context: cmd.context,
+            scope: cmd.scope ?? "local",
+          },
+        });
         break;
 
       case "define_blueprint": {

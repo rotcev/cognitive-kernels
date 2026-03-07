@@ -7,14 +7,19 @@ import type { RuntimeProtocolEvent } from "../types.js";
 import type { LensTerminalLine, LensTerminalLevel } from "./types.js";
 
 const DEFAULT_BUFFER_SIZE = 500;
+const DEFAULT_GLOBAL_BUFFER_SIZE = 2000;
 
 export class StreamSegmenter {
   private buffers = new Map<string, LensTerminalLine[]>();
+  /** Global ring buffer — all lines across all processes, ordered by seq. */
+  private globalBuffer: LensTerminalLine[] = [];
   private maxPerProcess: number;
+  private maxGlobal: number;
   private seq = 0;
 
-  constructor(maxPerProcess = DEFAULT_BUFFER_SIZE) {
+  constructor(maxPerProcess = DEFAULT_BUFFER_SIZE, maxGlobal = DEFAULT_GLOBAL_BUFFER_SIZE) {
     this.maxPerProcess = maxPerProcess;
+    this.maxGlobal = maxGlobal;
   }
 
   /**
@@ -28,15 +33,21 @@ export class StreamSegmenter {
     const line = this.classify(event);
     if (!line) return null;
 
+    // Per-process buffer
     let buf = this.buffers.get(pid);
     if (!buf) {
       buf = [];
       this.buffers.set(pid, buf);
     }
-
     buf.push(line);
     if (buf.length > this.maxPerProcess) {
       buf.splice(0, buf.length - this.maxPerProcess);
+    }
+
+    // Global buffer (all processes interleaved)
+    this.globalBuffer.push(line);
+    if (this.globalBuffer.length > this.maxGlobal) {
+      this.globalBuffer.splice(0, this.globalBuffer.length - this.maxGlobal);
     }
 
     return line;
@@ -69,10 +80,49 @@ export class StreamSegmenter {
   }
 
   /**
+   * Get all lines across all processes (global terminal view).
+   */
+  getAllLines(limit?: number): LensTerminalLine[] {
+    if (limit && limit < this.globalBuffer.length) {
+      return this.globalBuffer.slice(-limit);
+    }
+    return [...this.globalBuffer];
+  }
+
+  /**
+   * Get all lines since a given sequence number (global).
+   */
+  getAllLinesSince(sinceSeq: number): LensTerminalLine[] {
+    return this.globalBuffer.filter((line) => line.seq > sinceSeq);
+  }
+
+  /**
+   * Filter lines by level, optionally scoped to a PID.
+   */
+  filterByLevel(levels: LensTerminalLevel[], pid?: string): LensTerminalLine[] {
+    const levelSet = new Set(levels);
+    const source = pid ? (this.buffers.get(pid) ?? []) : this.globalBuffer;
+    return source.filter((line) => levelSet.has(line.level));
+  }
+
+  /**
+   * Filter lines by multiple PIDs (e.g. "show me all shell processes").
+   */
+  filterByPids(pids: string[], limit?: number): LensTerminalLine[] {
+    const pidSet = new Set(pids);
+    const filtered = this.globalBuffer.filter((line) => pidSet.has(line.pid));
+    if (limit && limit < filtered.length) {
+      return filtered.slice(-limit);
+    }
+    return filtered;
+  }
+
+  /**
    * Clear all buffers.
    */
   clear(): void {
     this.buffers.clear();
+    this.globalBuffer.length = 0;
     this.seq = 0;
   }
 
@@ -100,6 +150,10 @@ export class StreamSegmenter {
 
     if (action.includes("spawn") || action.includes("kill") || action.includes("checkpoint") || action.includes("exit")) {
       return "system";
+    }
+    if (action === "os_shell_output") {
+      const stream = event.detail?.stream;
+      return stream === "stderr" ? "error" : "output";
     }
     if (action === "os_llm_stream") {
       // Parse the inner StreamEvent to determine type
@@ -129,7 +183,28 @@ export class StreamSegmenter {
       try {
         const inner = JSON.parse(event.message);
         if (inner.type === "text_delta") return inner.text ?? "";
-        if (inner.type === "tool_started") return `tool_started: ${inner.toolName}`;
+        if (inner.type === "tool_started") {
+          const args = inner.argumentsSummary;
+          let detail = "";
+          if (args && typeof args === "object") {
+            const a = args as Record<string, unknown>;
+            // Show the most useful field per tool
+            const name = inner.toolName ?? "";
+            if (name === "Bash" || name === "bash") detail = String(a.command ?? a.cmd ?? "");
+            else if (name === "Read" || name === "Write" || name === "Edit") detail = String(a.file_path ?? a.path ?? "");
+            else if (name === "Grep" || name === "grep") detail = `/${a.pattern ?? ""}/ ${a.path ?? ""}`;
+            else if (name === "Glob" || name === "glob") detail = String(a.pattern ?? "");
+            else {
+              for (const [, v] of Object.entries(a)) {
+                if (typeof v === "string" && v.length > 0) { detail = v; break; }
+              }
+            }
+          } else if (typeof args === "string") {
+            detail = args;
+          }
+          if (detail.length > 200) detail = detail.slice(0, 200) + "…";
+          return `tool_started: ${inner.toolName}${detail ? " — " + detail : ""}`;
+        }
         if (inner.type === "tool_completed") {
           const summary = inner.resultSummary;
           const preview = typeof summary === "string" ? summary.slice(0, 200) : "";

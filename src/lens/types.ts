@@ -197,11 +197,18 @@ export interface LensProcessDelta {
 
 // ── WebSocket Protocol ────────────────────────────────────────────
 
+export type LensTerminalFilter = {
+  pids?: string[];
+  levels?: LensTerminalLevel[];
+};
+
 export type LensClientMessage =
   | { type: "subscribe"; runId: string }
   | { type: "unsubscribe"; runId: string }
   | { type: "subscribe_process"; runId: string; pid: string }
   | { type: "unsubscribe_process"; runId: string; pid: string }
+  | { type: "subscribe_terminal"; runId: string; filter?: LensTerminalFilter }
+  | { type: "unsubscribe_terminal"; runId: string }
   | { type: "command_query"; runId: string; question: string }
   | { type: "send_message"; runId: string; pid: string; text: string };
 
@@ -209,6 +216,7 @@ export type LensServerMessage =
   | { type: "snapshot"; runId: string; snapshot: LensSnapshot }
   | { type: "delta"; runId: string; delta: LensSnapshotDelta }
   | { type: "event"; runId: string; event: import("../types.js").RuntimeProtocolEvent }
+  | { type: "cognitive_event"; runId: string; cognitiveEvent: import("./cognitive-events.js").LensCognitiveEvent }
   | { type: "terminal_line"; runId: string; pid: string; line: LensTerminalLine }
   | { type: "run_end"; runId: string; reason: string }
   | { type: "narrative"; runId: string; text: string }

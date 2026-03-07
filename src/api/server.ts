@@ -62,6 +62,17 @@ export async function createRunsApiServer(options: CreateRunsApiServerOptions): 
   });
 
   const server = createServer((req, res) => {
+    // CORS headers for cross-origin UI access
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
     void handleNodeRequest(app.fetch.bind(app), req, res);
   });
 

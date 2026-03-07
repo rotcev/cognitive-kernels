@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cognitive Lens</title>
+  <link rel="stylesheet" href="/src/tokens/tokens.css" />
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; background: #000000; }
+  </style>
+</head>
+<body>
+  <lens-dashboard id="mock-mode"></lens-dashboard>
+  <script type="module" src="/src/index.ts"></script>
+  <script type="module">
+    // To connect to a real lens server, add ?ws=ws://localhost:3200 to the URL
+    const params = new URLSearchParams(location.search);
+    const wsUrl = params.get('ws');
+    if (wsUrl) {
+      document.getElementById('mock-mode').remove();
+      const app = document.createElement('lens-app');
+      app.setAttribute('url', wsUrl);
+      // API runs on a different port than WebSocket — pass it explicitly
+      const apiUrl = params.get('api') || wsUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/:3200/, ':3100');
+      app.setAttribute('apiUrl', apiUrl);
+      document.body.prepend(app);
+    }
+  </script>
+</body>
+</html>

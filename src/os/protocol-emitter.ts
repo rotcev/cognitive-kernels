@@ -13,6 +13,7 @@ export type OsProtocolEventInput = {
   message?: string;
   agentId?: string;
   agentName?: string;
+  detail?: Record<string, unknown>;
 };
 
 export type OsProtocolEmitterStorageBackend = {
@@ -91,6 +92,7 @@ export class OsProtocolEmitter {
       agentId: input.agentId,
       agentName: input.agentName,
       eventSource: "os",
+      detail: input.detail,
     };
 
     this.stream?.write(`${JSON.stringify(event)}\n`);

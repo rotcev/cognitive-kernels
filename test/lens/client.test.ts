@@ -272,6 +272,37 @@ describe("LensClient", () => {
     client.disconnect();
   });
 
+  test("receives cognitive events", async () => {
+    const client = createClient();
+    await client.connect();
+    client.subscribe("run-1");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const cogPromise = client.waitFor("cognitive_event");
+    serverSend({
+      type: "cognitive_event",
+      runId: "run-1",
+      cognitiveEvent: {
+        timestamp: new Date().toISOString(),
+        category: "decision",
+        action: "shell_spawn",
+        summary: 'Shell "linter": eslint --fix src/',
+        detail: {
+          trigger: "process",
+          command: "eslint",
+          args: ["--fix", "src/"],
+          objective: "Lint source code",
+        },
+      } as any,
+    });
+    const result = await cogPromise;
+    expect(result.cognitiveEvent.category).toBe("decision");
+    expect(result.cognitiveEvent.action).toBe("shell_spawn");
+    expect(result.cognitiveEvent.summary).toContain("eslint");
+
+    client.disconnect();
+  });
+
   test("delta adds new processes", async () => {
     const client = createClient();
     await client.connect();

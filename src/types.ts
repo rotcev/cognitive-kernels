@@ -100,6 +100,8 @@ export type RuntimeProtocolEvent = {
   dependencyIds?: string[];
   message?: string;
   eventSource?: string;
+  /** Structured detail — carries typed cognitive data alongside the human-readable message. */
+  detail?: Record<string, unknown>;
 };
 
 export type KernelRunStatus =

@@ -28,5 +28,23 @@ export type { NarrativeGenerateFn, NarrativeGeneratorOptions, NarrativeResult } 
 export { LensClient } from "./client.js";
 export type { LensClientOptions, LensClientEventMap } from "./client.js";
 
+// Cognitive events
+export { extractCognitiveEvent } from "./cognitive-events.js";
+export type {
+  LensCognitiveEvent,
+  LensCognitiveCategory,
+  LensCognitiveDecisionSpawn,
+  LensCognitiveDecisionKill,
+  LensCognitiveDecisionDefer,
+  LensCognitiveDecisionShellSpawn,
+  LensCognitiveDecisionSubkernelSpawn,
+  LensCognitivePlanningBlueprint,
+  LensCognitiveObservationAwareness,
+  LensCognitiveObservationSelfReport,
+  LensCognitiveInterventionMetacog,
+  LensCognitiveInterventionOutcome,
+  LensCognitiveLearningHeuristic,
+} from "./cognitive-events.js";
+
 // Types
 export type * from "./types.js";

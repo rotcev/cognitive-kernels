@@ -1,0 +1,5 @@
+[     105ms] [WARNING] Lit is in dev mode. Not recommended for production! See https://lit.dev/msg/dev-mode for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=32c444d0:93
+[     137ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:5199/favicon.ico:0
+[   42861ms] [WARNING] Lit is in dev mode. Not recommended for production! See https://lit.dev/msg/dev-mode for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=32c444d0:93
+[   87942ms] [WARNING] Lit is in dev mode. Not recommended for production! See https://lit.dev/msg/dev-mode for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=32c444d0:93
+[  120073ms] [WARNING] Lit is in dev mode. Not recommended for production! See https://lit.dev/msg/dev-mode for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=32c444d0:93

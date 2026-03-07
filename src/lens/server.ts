@@ -22,17 +22,27 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer } from "node:http";
 import type { LensEventBus, LensBusEvent } from "./event-bus.js";
-import type { LensSnapshot, LensSnapshotDelta, LensTerminalLine, LensServerMessage, LensClientMessage } from "./types.js";
+import type { LensSnapshot, LensSnapshotDelta, LensTerminalLine, LensTerminalLevel, LensTerminalFilter, LensServerMessage, LensClientMessage } from "./types.js";
 import { buildLensSnapshot } from "./view-models.js";
 import { diffSnapshots } from "./snapshot-differ.js";
 import { StreamSegmenter } from "./stream-segmenter.js";
+import { extractCognitiveEvent } from "./cognitive-events.js";
 import type { NarrativeGenerator } from "./narrative.js";
 import type { OsSystemSnapshot } from "../os/types.js";
+
+interface TerminalSubscription {
+  filter?: LensTerminalFilter;
+  /** Precomputed sets for fast matching. */
+  pidSet?: Set<string>;
+  levelSet?: Set<LensTerminalLevel>;
+}
 
 interface ClientState {
   ws: WebSocket;
   subscribedRuns: Set<string>;
   subscribedProcesses: Map<string, Set<string>>; // runId → Set<pid>
+  /** Global terminal subscription per run (all processes, with optional filter). */
+  terminalSubs: Map<string, TerminalSubscription>; // runId → filter
 }
 
 interface RunState {
@@ -137,6 +147,7 @@ export class LensServer {
       ws,
       subscribedRuns: new Set(),
       subscribedProcesses: new Map(),
+      terminalSubs: new Map(),
     };
 
     this.clients.add(client);
@@ -194,6 +205,33 @@ export class LensServer {
         if (pids) pids.delete(msg.pid);
         break;
       }
+      case "subscribe_terminal": {
+        const sub: TerminalSubscription = {};
+        if (msg.filter?.pids?.length) sub.pidSet = new Set(msg.filter.pids);
+        if (msg.filter?.levels?.length) sub.levelSet = new Set(msg.filter.levels);
+        sub.filter = msg.filter;
+        client.terminalSubs.set(msg.runId, sub);
+        // Send existing lines that match the filter
+        const termRun = this.runs.get(msg.runId);
+        if (termRun) {
+          let lines: import("./types.js").LensTerminalLine[];
+          if (sub.pidSet) {
+            lines = termRun.segmenter.filterByPids([...sub.pidSet]);
+          } else {
+            lines = termRun.segmenter.getAllLines();
+          }
+          if (sub.levelSet) {
+            lines = lines.filter(l => sub.levelSet!.has(l.level));
+          }
+          for (const line of lines) {
+            this.send(client, { type: "terminal_line", runId: msg.runId, pid: line.pid, line });
+          }
+        }
+        break;
+      }
+      case "unsubscribe_terminal":
+        client.terminalSubs.delete(msg.runId);
+        break;
       default:
         this.send(client, { type: "error", message: `Unknown message type: ${(msg as { type: string }).type}` });
     }
@@ -224,14 +262,31 @@ export class LensServer {
     // Broadcast raw event to subscribed clients
     this.broadcastToRun(runId, { type: "event", runId, event });
 
+    // Extract and broadcast cognitive event if present
+    const cognitiveEvent = extractCognitiveEvent(event);
+    if (cognitiveEvent) {
+      this.broadcastToRun(runId, { type: "cognitive_event", runId, cognitiveEvent });
+    }
+
     // If the event has an agentId, send terminal line to process subscribers
+    // and global terminal subscribers
     if (event.agentId) {
       const lines = run.segmenter.getLines(event.agentId);
       const lastLine = lines[lines.length - 1];
       if (lastLine) {
         for (const client of this.clients) {
+          // Per-process subscription
           const pids = client.subscribedProcesses.get(runId);
           if (pids?.has(event.agentId)) {
+            this.send(client, { type: "terminal_line", runId, pid: event.agentId, line: lastLine });
+            continue; // Don't double-send if also has terminal sub
+          }
+
+          // Global terminal subscription with filter
+          const termSub = client.terminalSubs.get(runId);
+          if (termSub) {
+            if (termSub.pidSet && !termSub.pidSet.has(lastLine.pid)) continue;
+            if (termSub.levelSet && !termSub.levelSet.has(lastLine.level)) continue;
             this.send(client, { type: "terminal_line", runId, pid: event.agentId, line: lastLine });
           }
         }

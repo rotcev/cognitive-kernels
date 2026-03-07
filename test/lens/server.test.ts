@@ -276,6 +276,243 @@ describe("lens:server", () => {
     ws.close();
   });
 
+  test("shell output events produce terminal lines with output/error levels", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "shell-run" }));
+    ws.send(JSON.stringify({ type: "subscribe_process", runId: "shell-run", pid: "shell-1" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Send shell stdout output
+    const msgs = collectMessages(ws, 2);
+    bus.emit({
+      type: "event",
+      runId: "shell-run",
+      event: {
+        action: "os_shell_output",
+        status: "completed",
+        timestamp: new Date().toISOString(),
+        agentId: "shell-1",
+        agentName: "my-linter",
+        message: "src/index.ts: no issues found",
+        eventSource: "os",
+        detail: { stream: "stdout", key: "shell:my-linter:stdout", lineCount: 1 },
+      },
+    });
+    const received = await msgs;
+
+    const lineMsg = received.find((m) => m.type === "terminal_line");
+    expect(lineMsg).toBeDefined();
+    if (lineMsg?.type === "terminal_line") {
+      expect(lineMsg.pid).toBe("shell-1");
+      expect(lineMsg.line.level).toBe("output");
+      expect(lineMsg.line.text).toContain("no issues found");
+    }
+
+    ws.close();
+  });
+
+  test("shell stderr events produce error-level terminal lines", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "shell-err-run" }));
+    ws.send(JSON.stringify({ type: "subscribe_process", runId: "shell-err-run", pid: "shell-2" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const msgs = collectMessages(ws, 2);
+    bus.emit({
+      type: "event",
+      runId: "shell-err-run",
+      event: {
+        action: "os_shell_output",
+        status: "completed",
+        timestamp: new Date().toISOString(),
+        agentId: "shell-2",
+        agentName: "build-proc",
+        message: "Error: cannot find module 'foo'",
+        eventSource: "os",
+        detail: { stream: "stderr", key: "shell:build-proc:stderr", lineCount: 1 },
+      },
+    });
+    const received = await msgs;
+
+    const lineMsg = received.find((m) => m.type === "terminal_line");
+    expect(lineMsg).toBeDefined();
+    if (lineMsg?.type === "terminal_line") {
+      expect(lineMsg.line.level).toBe("error");
+    }
+
+    ws.close();
+  });
+
+  test("cognitive events are broadcast alongside raw events", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "cog-run" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const msgs = collectMessages(ws, 2);
+    bus.emit({
+      type: "event",
+      runId: "cog-run",
+      event: {
+        action: "os_metacog",
+        status: "completed",
+        timestamp: new Date().toISOString(),
+        agentId: "metacog-1",
+        agentName: "metacog-daemon",
+        message: "metacog eval completed",
+        eventSource: "os",
+        detail: {
+          assessment: "System is stalling, two workers idle",
+          commands: [{ kind: "kill", reason: "stalled", target: "worker-3" }],
+          citedHeuristicIds: ["h-1"],
+        },
+      },
+    });
+    const received = await msgs;
+
+    const rawEvent = received.find((m) => m.type === "event");
+    const cogEvent = received.find((m) => m.type === "cognitive_event");
+
+    expect(rawEvent).toBeDefined();
+    expect(cogEvent).toBeDefined();
+    if (cogEvent?.type === "cognitive_event") {
+      expect(cogEvent.cognitiveEvent.category).toBe("intervention");
+      expect(cogEvent.cognitiveEvent.action).toBe("metacog");
+      expect(cogEvent.cognitiveEvent.summary).toContain("stalling");
+    }
+
+    ws.close();
+  });
+
+  test("subkernel spawn produces cognitive event", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "sk-run" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const msgs = collectMessages(ws, 2);
+    bus.emit({
+      type: "event",
+      runId: "sk-run",
+      event: {
+        action: "os_subkernel_spawn",
+        status: "completed",
+        timestamp: new Date().toISOString(),
+        agentId: "sk-1",
+        agentName: "research-kernel",
+        message: "metacog_spawn_kernel goal=deep research",
+        eventSource: "os",
+        detail: {
+          trigger: "metacog",
+          goal: "Investigate architecture patterns",
+          maxTicks: 15,
+        },
+      },
+    });
+    const received = await msgs;
+
+    const cogEvent = received.find((m) => m.type === "cognitive_event");
+    expect(cogEvent).toBeDefined();
+    if (cogEvent?.type === "cognitive_event") {
+      expect(cogEvent.cognitiveEvent.category).toBe("decision");
+      expect(cogEvent.cognitiveEvent.action).toBe("subkernel_spawn");
+      expect(cogEvent.cognitiveEvent.summary).toContain("research-kernel");
+    }
+
+    ws.close();
+  });
+
+  test("global terminal subscription receives lines from all processes", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "glob-term" }));
+    ws.send(JSON.stringify({ type: "subscribe_terminal", runId: "glob-term" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Send events from two different processes
+    const msgs = collectMessages(ws, 4); // 2 raw events + 2 terminal lines
+    bus.emit({
+      type: "event", runId: "glob-term",
+      event: makeEvent("os_shell_output", "shell-A"),
+    });
+    bus.emit({
+      type: "event", runId: "glob-term",
+      event: makeEvent("os_process_spawn", "worker-B"),
+    });
+    const received = await msgs;
+
+    const lines = received.filter((m) => m.type === "terminal_line");
+    expect(lines.length).toBe(2);
+    const pids = lines.map((m) => m.type === "terminal_line" ? m.pid : "").sort();
+    expect(pids).toEqual(["shell-A", "worker-B"]);
+
+    ws.close();
+  });
+
+  test("terminal subscription with level filter", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "level-filt" }));
+    ws.send(JSON.stringify({
+      type: "subscribe_terminal",
+      runId: "level-filt",
+      filter: { levels: ["error"] },
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const msgs = collectMessages(ws, 3, 500); // 2 raw events, expect only 1 terminal line
+    bus.emit({
+      type: "event", runId: "level-filt",
+      event: {
+        ...makeEvent("os_shell_output", "sh-1"),
+        detail: { stream: "stderr" },
+      },
+    });
+    bus.emit({
+      type: "event", runId: "level-filt",
+      event: {
+        ...makeEvent("os_shell_output", "sh-1"),
+        detail: { stream: "stdout" },
+      },
+    });
+    const received = await msgs;
+
+    const lines = received.filter((m) => m.type === "terminal_line");
+    // Only stderr (level=error) should come through
+    expect(lines.length).toBe(1);
+    if (lines[0]?.type === "terminal_line") {
+      expect(lines[0].line.level).toBe("error");
+    }
+
+    ws.close();
+  });
+
+  test("terminal subscription with pid filter", async () => {
+    const ws = await connectClient();
+    ws.send(JSON.stringify({ type: "subscribe", runId: "pid-filt" }));
+    ws.send(JSON.stringify({
+      type: "subscribe_terminal",
+      runId: "pid-filt",
+      filter: { pids: ["only-this"] },
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const msgs = collectMessages(ws, 3, 500); // 2 raw events, expect only 1 terminal line
+    bus.emit({
+      type: "event", runId: "pid-filt",
+      event: makeEvent("os_process_spawn", "only-this"),
+    });
+    bus.emit({
+      type: "event", runId: "pid-filt",
+      event: makeEvent("os_process_spawn", "not-this"),
+    });
+    const received = await msgs;
+
+    const lines = received.filter((m) => m.type === "terminal_line");
+    expect(lines.length).toBe(1);
+    if (lines[0]?.type === "terminal_line") {
+      expect(lines[0].pid).toBe("only-this");
+    }
+
+    ws.close();
+  });
+
   test("sends cached snapshot on late subscribe", async () => {
     // Push a snapshot before anyone subscribes
     bus.emit({ type: "snapshot", runId: "cached-run", snapshot: makeSnapshot(5, { runId: "cached-run" }) });
