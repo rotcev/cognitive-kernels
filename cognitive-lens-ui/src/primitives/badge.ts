@@ -1,7 +1,9 @@
 import { html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { LensElement, lensBaseStyles } from "../tokens/base.js";
-import type { ProcessState, ProcessRole } from "../mock/types.js";
+import type { LensProcessRole } from "../mock/types.js";
+
+type ProcessState = "running" | "sleeping" | "idle" | "dead" | "checkpoint" | "suspended";
 
 @customElement("lens-badge")
 export class LensBadge extends LensElement {
@@ -88,7 +90,7 @@ export class LensBadge extends LensElement {
 
   @property({ reflect: true }) variant: "state" | "role" = "state";
   @property({ reflect: true }) state?: ProcessState;
-  @property({ attribute: "role-type", reflect: true }) roleType?: ProcessRole;
+  @property({ attribute: "role-type", reflect: true }) roleType?: LensProcessRole;
 
   protected override render() {
     if (this.variant === "state" && this.state) {

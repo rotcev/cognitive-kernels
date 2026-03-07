@@ -1,9 +1,9 @@
 import { html, css, nothing } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
 import { LensElement, lensBaseStyles } from "../tokens/base.js";
-import type { LensTerminalLine, TerminalLevel } from "../mock/types.js";
+import type { LensTerminalLine, LensTerminalLevel } from "../mock/types.js";
 
-const levelColors: Record<TerminalLevel, string> = {
+const levelColors: Record<LensTerminalLevel, string> = {
   system: "var(--lens-amber)",
   info: "var(--lens-text-secondary)",
   thinking: "var(--lens-magenta)",

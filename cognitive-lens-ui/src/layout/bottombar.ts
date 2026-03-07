@@ -54,6 +54,10 @@ export class LensBottombar extends LensElement {
     runningCount: 0,
     sleepingCount: 0,
     deadCount: 0,
+    checkpointedCount: 0,
+    suspendedCount: 0,
+    dagDepth: 0,
+    dagEdgeCount: 0,
     wallTimeElapsedMs: 0,
     tickCount: 0,
   };

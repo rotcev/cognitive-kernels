@@ -15,6 +15,9 @@ export function mockProcesses(): LensProcess[] {
       spawnedAt: new Date(Date.now() - 175000).toISOString(),
       lastActiveAt: new Date(Date.now() - 3000).toISOString(),
       children: ["proc-arch-002", "proc-impl-003", "proc-test-006"],
+      backendKind: "llm",
+      selfReports: [{tick: 38, summary: "Architecture phase complete. Implementation 60% done."}],
+      blackboardIO: [],
     },
     {
       pid: "proc-arch-002", type: "lifecycle", state: "dead", name: "architect",
@@ -25,6 +28,9 @@ export function mockProcesses(): LensProcess[] {
       spawnedAt: new Date(Date.now() - 170000).toISOString(),
       lastActiveAt: new Date(Date.now() - 120000).toISOString(),
       children: [], exitCode: 0, exitReason: "Architecture design committed to blackboard",
+      backendKind: "llm",
+      selfReports: [],
+      blackboardIO: [{key: "auth.architecture", direction: "write", value: {jwt_strategy: "RS256"}, valuePreview: '{"jwt_strategy":"RS256",...}'}],
     },
     {
       pid: "proc-impl-003", type: "lifecycle", state: "running", name: "implementer",
@@ -35,6 +41,9 @@ export function mockProcesses(): LensProcess[] {
       spawnedAt: new Date(Date.now() - 115000).toISOString(),
       lastActiveAt: new Date(Date.now() - 5000).toISOString(),
       children: ["proc-jwt-004", "proc-middleware-005"],
+      backendKind: "kernel",
+      selfReports: [{tick: 27, summary: "Middleware 80% done."}],
+      blackboardIO: [],
     },
     {
       pid: "proc-jwt-004", type: "lifecycle", state: "checkpoint", name: "jwt-handler",
@@ -46,6 +55,9 @@ export function mockProcesses(): LensProcess[] {
       lastActiveAt: new Date(Date.now() - 30000).toISOString(),
       children: [],
       checkpoint: { reason: "Paused for test validation", savedAt: new Date(Date.now() - 30000).toISOString() },
+      backendKind: "llm",
+      selfReports: [],
+      blackboardIO: [{key: "auth.token_schema", direction: "write", value: {accessToken: "string"}, valuePreview: '{"accessToken":"string",...}'}],
     },
     {
       pid: "proc-middleware-005", type: "lifecycle", state: "running", name: "auth-middleware",
@@ -56,6 +68,9 @@ export function mockProcesses(): LensProcess[] {
       spawnedAt: new Date(Date.now() - 80000).toISOString(),
       lastActiveAt: new Date(Date.now() - 8000).toISOString(),
       children: [],
+      backendKind: "llm",
+      selfReports: [],
+      blackboardIO: [],
     },
     {
       pid: "proc-test-006", type: "lifecycle", state: "sleeping", name: "test-writer",
@@ -66,6 +81,10 @@ export function mockProcesses(): LensProcess[] {
       spawnedAt: new Date(Date.now() - 110000).toISOString(),
       lastActiveAt: new Date(Date.now() - 45000).toISOString(),
       children: [],
+      wakeOnSignals: ["auth.jwt_module_status"],
+      backendKind: "llm",
+      selfReports: [],
+      blackboardIO: [],
     },
   ];
 }
@@ -118,6 +137,8 @@ export function mockMetrics(): LensMetrics {
   return {
     totalTokens: 27101, tokenRate: 48, processCount: 6,
     runningCount: 3, sleepingCount: 1, deadCount: 1,
+    checkpointedCount: 1, suspendedCount: 0,
+    dagDepth: 3, dagEdgeCount: 7,
     wallTimeElapsedMs: 178000, tickCount: 42,
   };
 }

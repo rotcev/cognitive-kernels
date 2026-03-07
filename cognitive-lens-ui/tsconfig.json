@@ -8,6 +8,9 @@
     "declarationDir": "dist",
     "outDir": "dist",
     "rootDir": "src",
+    "paths": {
+      "cognitive-kernels/lens": ["../dist/lens/index.d.ts"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

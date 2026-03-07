@@ -11,6 +11,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./lens": {
+      "import": "./dist/lens/index.js",
+      "types": "./dist/lens/index.d.ts"
     }
   },
   "files": [

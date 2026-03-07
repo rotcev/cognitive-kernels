@@ -1,11 +1,11 @@
 import { html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { LensElement, lensBaseStyles } from "../tokens/base.js";
-import type { LensProcess, ProcessRole } from "../mock/types.js";
+import type { LensProcess, LensProcessRole } from "../mock/types.js";
 
 type DrawerTab = "info" | "terminal" | "blackboard" | "messages";
 
-const roleColors: Record<ProcessRole, { fg: string; bg: string; border: string }> = {
+const roleColors: Record<LensProcessRole, { fg: string; bg: string; border: string }> = {
   kernel: { fg: "var(--lens-accent)", bg: "var(--lens-accent-dim)", border: "var(--lens-accent)" },
   "sub-kernel": { fg: "var(--lens-cyan)", bg: "var(--lens-cyan-dim)", border: "var(--lens-cyan)" },
   worker: { fg: "var(--lens-gray)", bg: "var(--lens-gray-dim)", border: "var(--lens-gray)" },

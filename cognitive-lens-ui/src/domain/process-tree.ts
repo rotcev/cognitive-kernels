@@ -1,7 +1,9 @@
 import { html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { LensElement, lensBaseStyles } from "../tokens/base.js";
-import type { LensProcess, ProcessState, ProcessRole } from "../mock/types.js";
+import type { LensProcess, LensProcessRole } from "../mock/types.js";
+
+type ProcessState = "running" | "sleeping" | "idle" | "dead" | "checkpoint" | "suspended";
 
 interface TreeNode {
   process: LensProcess;
@@ -18,7 +20,7 @@ const stateColors: Record<ProcessState, { fg: string; bg: string }> = {
   suspended: { fg: "var(--lens-magenta)", bg: "var(--lens-magenta-dim)" },
 };
 
-const roleColors: Record<ProcessRole, { fg: string; bg: string; border: string }> = {
+const roleColors: Record<LensProcessRole, { fg: string; bg: string; border: string }> = {
   kernel: { fg: "var(--lens-accent)", bg: "var(--lens-accent-dim)", border: "var(--lens-accent)" },
   "sub-kernel": { fg: "var(--lens-cyan)", bg: "var(--lens-cyan-dim)", border: "var(--lens-cyan)" },
   worker: { fg: "var(--lens-gray)", bg: "var(--lens-gray-dim)", border: "var(--lens-gray)" },
@@ -179,7 +181,7 @@ export class LensProcessTree extends LensElement {
     const p = node.process;
     const hasChildren = node.children.length > 0;
     const isCollapsed = this._collapsed.has(p.pid);
-    const sc = stateColors[p.state];
+    const sc = stateColors[p.state as ProcessState] ?? stateColors.idle;
     const rc = roleColors[p.role];
 
     return html`

@@ -1,8 +1,11 @@
 // Tokens
 export { LensElement, lensBaseStyles } from "./tokens/base.js";
 
-// Types
+// Types (re-exported from kernel)
 export type * from "./mock/types.js";
+
+// Client (re-exported from kernel's lens layer)
+export { LensClient } from "./mock/types.js";
 
 // Mock data
 export {

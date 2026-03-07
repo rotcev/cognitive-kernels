@@ -1,76 +1,49 @@
-export type ProcessState = "running" | "sleeping" | "idle" | "dead" | "checkpoint" | "suspended";
-export type ProcessRole = "kernel" | "sub-kernel" | "worker" | "shell";
-export type ProcessType = "lifecycle" | "daemon" | "event";
-export type TerminalLevel = "system" | "info" | "thinking" | "tool" | "output" | "error";
+/**
+ * Re-export all Lens types from the kernel package.
+ * UI components import from here — single source of truth.
+ */
+
+// Core lens types — re-exported from kernel's lens subpath
+export type {
+  LensProcess,
+  LensProcessRole,
+  LensSelfReport,
+  LensBBIOEntry,
+  LensBBEntry,
+  LensDagNode,
+  LensEdge,
+  LensMetrics,
+  LensHeuristic,
+  LensDeferral,
+  LensTerminalLine,
+  LensTerminalLevel,
+  LensSnapshot,
+  LensSnapshotDelta,
+  LensProcessDelta,
+  LensTerminalFilter,
+  LensServerMessage,
+  LensClientMessage,
+} from "cognitive-kernels/lens";
+
+// Cognitive events
+export type {
+  LensCognitiveEvent,
+  LensCognitiveCategory,
+} from "cognitive-kernels/lens";
+
+// Client
+export { LensClient } from "cognitive-kernels/lens";
+export type {
+  LensClientEventMap,
+  LensClientOptions,
+} from "cognitive-kernels/lens";
+
+// ── UI-only types (not in kernel) ───────────────────────────────
+
 export type ConnectionStatus = "connected" | "reconnecting" | "disconnected";
 export type RunStatus = "running" | "completed" | "failed" | "paused" | "canceled";
 
-export interface LensProcess {
-  pid: string;
-  name: string;
-  type: ProcessType;
-  state: ProcessState;
-  role: ProcessRole;
-  parentPid: string | null;
-  children: string[];
-  objective: string;
-  priority: number;
-  tickCount: number;
-  tokensUsed: number;
-  tokenBudget: number | null;
-  model: string;
-  spawnedAt: string;
-  lastActiveAt: string;
-  exitCode?: number;
-  exitReason?: string;
-  checkpoint?: { reason: string; savedAt: string };
-}
-
-export interface LensMetrics {
-  totalTokens: number;
-  tokenRate: number;
-  processCount: number;
-  runningCount: number;
-  sleepingCount: number;
-  deadCount: number;
-  wallTimeElapsedMs: number;
-  tickCount: number;
-}
-
-export interface LensBBEntry {
-  key: string;
-  value: unknown;
-  writer: string;
-  readBy: string[];
-}
-
-export interface LensHeuristic {
-  id: string;
-  heuristic: string;
-  confidence: number;
-  context: string;
-  scope: "global" | "local";
-  reinforcementCount: number;
-}
-
-export interface LensDeferral {
-  id: string;
-  name: string;
-  conditionType: string;
-  conditionKey: string;
-  waitedTicks: number;
-  reason: string;
-}
-
-export interface LensTerminalLine {
-  seq: number;
-  timestamp: string;
-  pid: string;
-  processName: string;
-  level: TerminalLevel;
-  text: string;
-}
-
+/** Simplified event for the event feed (derived from protocol events). */
 export interface LensEvent {
   action: string;
   status: string;
@@ -79,23 +52,7 @@ export interface LensEvent {
   message: string;
 }
 
-export interface LensDagNode {
-  pid: string;
-  name: string;
-  type: ProcessType;
-  state: ProcessState;
-  role: ProcessRole;
-  priority: number;
-  parentPid: string | null;
-}
-
-export interface LensDagEdge {
-  from: string;
-  to: string;
-  relation: "parent-child" | "dependency";
-  label?: string;
-}
-
+/** Run summary for the sidebar. */
 export interface LensRun {
   id: string;
   status: RunStatus;
@@ -104,15 +61,10 @@ export interface LensRun {
   elapsed: number;
 }
 
-export interface LensSnapshot {
-  runId: string;
-  tick: number;
-  goal: string;
-  elapsed: number;
-  processes: LensProcess[];
-  dag: { nodes: LensDagNode[]; edges: LensDagEdge[] };
-  blackboard: Record<string, LensBBEntry>;
-  heuristics: LensHeuristic[];
-  deferrals: LensDeferral[];
-  metrics: LensMetrics;
+/** DAG edge as used by UI components (simplified from OsDagEdge). */
+export interface LensDagEdge {
+  from: string;
+  to: string;
+  relation: "parent-child" | "dependency";
+  label?: string;
 }
