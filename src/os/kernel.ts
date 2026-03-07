@@ -173,6 +173,8 @@ export class OsKernel {
   private housekeepTimer: ReturnType<typeof setInterval> | null = null;
   /** Periodic snapshot timer. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  /** Periodic metacog evaluation timer. */
+  private metacogTimer: ReturnType<typeof setInterval> | null = null;
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
   constructor(
@@ -432,6 +434,10 @@ export class OsKernel {
         this.safeSnapshotWrite();
       }, 10_000);
 
+      this.metacogTimer = setInterval(() => {
+        void this.safeMetacogCheck();
+      }, 15_000);
+
       this.startWatchdog();
 
       // Initial housekeep + scheduling pass
@@ -443,6 +449,7 @@ export class OsKernel {
   private stopEventLoop(): void {
     if (this.housekeepTimer) { clearInterval(this.housekeepTimer); this.housekeepTimer = null; }
     if (this.snapshotTimer) { clearInterval(this.snapshotTimer); this.snapshotTimer = null; }
+    if (this.metacogTimer) { clearInterval(this.metacogTimer); this.metacogTimer = null; }
     this.stopWatchdog();
   }
 
@@ -478,6 +485,244 @@ export class OsKernel {
       this.emitter?.saveSnapshot(snap);
     } catch {
       // Non-critical
+    }
+  }
+
+  /**
+   * Periodic metacog evaluation — runs on wall-clock timer.
+   * Evaluates system state, applies metacog commands, runs awareness daemon.
+   */
+  private async doMetacogCheck(): Promise<void> {
+    if (this.metacogInFlight) return;
+
+    // Metacog overdue safety net — ensure metacog evaluates during critical periods
+    // even if cadence/triggers don't fire naturally.
+    const ticksSinceMetacog = this.scheduler.tickCount - this.lastMetacogTick;
+    if (ticksSinceMetacog > 5 && this.scheduler.tickCount > 0) {
+      const hasLivingGoalWork = this.table.getAll().some(
+        p => p.state !== "dead" && p.type !== "daemon"
+      );
+      if (hasLivingGoalWork) {
+        this.addTrigger("goal_drift");
+      }
+    }
+
+    if (!this.shouldConsultMetacog()) return;
+
+    this.metacogInFlight = true;
+    try {
+      // Rebuild ranked blueprints (in tick() this came from an earlier step)
+      const rankedBlueprints = this.memoryStore.queryBlueprints(this.goal);
+
+      this.metacog.setProcessSnapshot(this.table.getAll());
+      this.metacog.setBlueprintsSnapshot(rankedBlueprints);
+      this.metacog.setSelectedBlueprint(this.selectedBlueprintInfo);
+      this.metacog.setEphemeralStats({
+        spawns: this.telemetryCollector.ephemeralSpawns,
+        successes: this.telemetryCollector.ephemeralSuccesses,
+        failures: this.telemetryCollector.ephemeralFailures,
+        totalDurationMs: this.telemetryCollector.ephemeralTotalDurationMs,
+      });
+      const context = this.buildMetacogContext();
+
+      // (1) Push current system state snapshot to IPC channel 'metacog:system-state'
+      this.ipcBus.bbWrite("metacog:system-state", context, "kernel");
+
+      // The metacog-daemon process reads the state, evaluates, and writes commands back.
+      const metacogDaemonProc = this.table.getAll().find(
+        (p) => p.name === "metacog-daemon" && p.state !== "dead",
+      );
+      if (metacogDaemonProc) {
+        this.supervisor.activate(metacogDaemonProc.pid);
+        const stateEntry = this.ipcBus.bbRead("metacog:system-state", metacogDaemonProc.pid);
+        if (stateEntry) {
+          try {
+            const response = await this.metacog.evaluate(stateEntry.value as MetacogContext);
+            // Push commands to IPC channel 'metacog:commands'
+            this.ipcBus.bbWrite("metacog:commands", response, metacogDaemonProc.pid);
+          } catch {
+            // Daemon evaluation failed — continue without it
+          }
+        }
+        // Return daemon to idle after its turn
+        this.supervisor.idle(metacogDaemonProc.pid, {});
+      }
+
+      this.lastMetacogTick = this.scheduler.tickCount;
+      this.pendingTriggers = [];
+
+      // (2) Read all pending items from 'metacog:commands' channel
+      // (3) Apply each MetacogCommand via executeMetacogCommand()
+      const cmdEntry = this.ipcBus.bbRead("metacog:commands", "kernel");
+      if (cmdEntry && typeof cmdEntry.value === "string") {
+        this.parseMetacogResponse(cmdEntry.value);
+        this.ipcBus.bbDelete("metacog:commands");
+      }
+      this.ipcBus.bbDelete("metacog:system-state");
+
+      // Track metacog evaluation count
+      this.metacogEvalCount += 1;
+
+      // Record progress snapshot for awareness context
+      this.recordProgressSnapshot();
+
+      // Run awareness daemon at configured cadence
+      if (this.shouldConsultAwareness() && this.awarenessDaemon) {
+        // Activate awareness process in table for observability
+        const awarenessProc = this.table.getAll().find(
+          (p) => p.name === "awareness-daemon" && p.state !== "dead",
+        );
+        if (awarenessProc) {
+          this.supervisor.activate(awarenessProc.pid);
+        }
+
+        const awarenessCtx = this.buildAwarenessContext();
+        try {
+          const awarenessResp = await this.awarenessDaemon.evaluate(awarenessCtx);
+          this.pendingAwarenessNotes = awarenessResp.notes;
+          this.lastAwarenessTick = this.scheduler.tickCount;
+
+          // Update process table entry with tick/token accounting
+          if (awarenessProc) {
+            awarenessProc.tickCount += 1;
+            awarenessProc.lastActiveAt = new Date().toISOString();
+          }
+
+          if (awarenessResp.flaggedHeuristics.length > 0) {
+            this.ipcBus.bbWrite("awareness:heuristic-flags", awarenessResp.flaggedHeuristics, "awareness-daemon");
+          }
+          if (awarenessResp.adjustments.length > 0) {
+            this.ipcBus.bbWrite("awareness:adjustments", awarenessResp.adjustments, "awareness-daemon");
+          }
+
+          // Process adjustments — close the feedback loop
+          for (const adj of awarenessResp.adjustments) {
+            this.applyAwarenessAdjustment(adj);
+          }
+
+          // Emit awareness evaluation event for Lens observability
+          this.emitter?.emit({
+            action: "os_awareness_eval",
+            status: "completed",
+            agentName: "awareness-daemon",
+            message: `awareness eval: ${awarenessResp.notes.length} notes, ${awarenessResp.adjustments.length} adjustments, ${awarenessResp.flaggedHeuristics.length} flagged heuristics`,
+            detail: {
+              notes: awarenessResp.notes,
+              adjustments: awarenessResp.adjustments,
+              flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
+              tick: this.scheduler.tickCount,
+            },
+          });
+        } catch {
+          // Awareness eval failed — continue without notes
+        }
+
+        // Return awareness process to idle
+        if (awarenessProc) {
+          this.supervisor.idle(awarenessProc.pid, {});
+        }
+      }
+
+      // Evaluate pending interventions whose deadline has passed
+      {
+        const evalTick = this.scheduler.tickCount;
+        const evalProcs = this.table.getAll();
+        const currentPost: InterventionSnapshot = {
+          totalTokensUsed: evalProcs.reduce((s, p) => s + p.tokensUsed, 0),
+          activeProcessCount: evalProcs.filter(p => p.state === 'running').length,
+          stalledProcessCount: evalProcs.filter(p => p.state === 'sleeping' || p.state === 'idle').length,
+          deadCount: evalProcs.filter(p => p.state === 'dead').length,
+        };
+        for (const iv of this.pendingInterventions) {
+          if (!iv.postSnapshot) iv.postSnapshot = currentPost;
+          if (evalTick >= iv.tick + iv.ticksToEvaluate && !iv.outcome) {
+            const pre = iv.preSnapshot;
+            const post = iv.postSnapshot;
+            if (post.activeProcessCount > pre.activeProcessCount || post.stalledProcessCount < pre.stalledProcessCount) {
+              iv.outcome = 'improved';
+              this.memoryStore.learn(
+                `${iv.commandKind} improved system: active +${post.activeProcessCount - pre.activeProcessCount}, stalled -${pre.stalledProcessCount - post.stalledProcessCount}`,
+                0.7, `intervention:${iv.commandKind}`, this.runId,
+              );
+            } else if (post.stalledProcessCount > pre.stalledProcessCount || post.deadCount > pre.deadCount + 1) {
+              iv.outcome = 'degraded';
+              this.memoryStore.learn(
+                `${iv.commandKind} degraded system: stalled +${post.stalledProcessCount - pre.stalledProcessCount}`,
+                0.6, `intervention:${iv.commandKind}`, this.runId,
+              );
+            } else {
+              iv.outcome = 'neutral';
+            }
+
+            // Compute causal attributions from topology snapshot at intervention time
+            if (iv.causalFactors && !iv.causalAttributions) {
+              const corr = iv.outcome === 'improved' ? 'positive' as const
+                : iv.outcome === 'degraded' ? 'negative' as const
+                : 'neutral' as const;
+              iv.causalAttributions = (Object.entries(iv.causalFactors) as Array<[string, number]>).map(([factor, value]) => ({
+                factor,
+                value,
+                correlation: corr,
+                confidence: 0.6,
+              }));
+              for (const attr of iv.causalAttributions) {
+                try {
+                  this.memoryStore.learn(
+                    `${iv.commandKind} in conditions ${attr.factor}=${attr.value.toFixed(2)} correlates with ${iv.outcome}`,
+                    0.6,
+                    `causal:${iv.commandKind}:${attr.factor}`,
+                    this.runId,
+                  );
+                } catch {
+                  // Max heuristics reached — skip gracefully
+                }
+              }
+            }
+
+            // Emit intervention outcome for Lens observability
+            this.emitter?.emit({
+              action: "os_intervention_outcome",
+              status: "completed",
+              message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
+              detail: {
+                commandKind: iv.commandKind,
+                outcome: iv.outcome,
+                interventionTick: iv.tick,
+                evaluationTick: evalTick,
+                preSnapshot: pre,
+                postSnapshot: post,
+                causalAttributions: iv.causalAttributions ?? [],
+              },
+            });
+          }
+        }
+        this.pendingInterventions = this.pendingInterventions.filter(
+          iv => iv.outcome === undefined || evalTick - (iv.tick + iv.ticksToEvaluate) < 20
+        );
+      }
+    } finally {
+      this.metacogInFlight = false;
+    }
+  }
+
+  /**
+   * Safe wrapper for metacog timer — acquires mutex, runs metacog, reschedules.
+   */
+  private async safeMetacogCheck(): Promise<void> {
+    if (this.halted) return;
+    const release = await this.mutex.acquire();
+    try {
+      await this.doMetacogCheck();
+      if (this.shouldHalt()) { this.haltResolve?.(); return; }
+      this.doSchedulingPass();
+    } catch (err) {
+      this.emitter?.emit({
+        action: "os_process_event",
+        status: "failed",
+        message: `metacog error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      release();
     }
   }
 
@@ -1965,31 +2210,47 @@ export class OsKernel {
           tokensEstimate: Math.ceil(ephTurnResult.finalResponse.length / 4),
         };
 
-        this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
-        this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
-        this.tickSignals.push("ephemeral:ready");
+        // Wrap state mutations in mutex for proper wake + reschedule
+        const release = await this.mutex.acquire();
+        try {
+          this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
+          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
+          this.tickSignals.push("ephemeral:ready");
 
-        // Kill the process table entry so it shows as dead in topology
-        this.supervisor.kill(desc.tablePid, false, "ephemeral completed");
-        this.emitter?.emit({
-          action: "os_process_exit",
-          status: "completed",
-          agentId: desc.tablePid,
-          agentName: desc.name,
-          message: `completed duration=${ephDurationMs}ms`,
-        });
+          // Kill the process table entry so it shows as dead in topology
+          this.supervisor.kill(desc.tablePid, false, "ephemeral completed");
+          this.emitter?.emit({
+            action: "os_process_exit",
+            status: "completed",
+            agentId: desc.tablePid,
+            agentName: desc.name,
+            message: `completed duration=${ephDurationMs}ms`,
+          });
 
-        if (this.config.kernel.telemetryEnabled) {
-          this.telemetryCollector.onEphemeralComplete(ephResult);
+          if (this.config.kernel.telemetryEnabled) {
+            this.telemetryCollector.onEphemeralComplete(ephResult);
+          }
+
+          this.emitter?.emit({
+            action: "os_ephemeral_spawn",
+            status: "completed",
+            agentId: desc.ephemeralId,
+            agentName: desc.name,
+            message: `parent=${desc.pid} model=${desc.model} duration=${ephDurationMs}ms`,
+          });
+
+          // Flush IPC + wake + reschedule
+          const { wokenPids } = this.ipcBus.flush();
+          for (const pid of wokenPids) {
+            const p = this.table.get(pid);
+            if (p && p.state === "idle") this.supervisor.activate(pid);
+          }
+          this.dagEngine.buildFromProcesses(this.table.getAll());
+          if (this.shouldHalt()) { this.haltResolve?.(); return; }
+          this.doSchedulingPass();
+        } finally {
+          release();
         }
-
-        this.emitter?.emit({
-          action: "os_ephemeral_spawn",
-          status: "completed",
-          agentId: desc.ephemeralId,
-          agentName: desc.name,
-          message: `parent=${desc.pid} model=${desc.model} duration=${ephDurationMs}ms`,
-        });
       } catch (err) {
         const ephDurationMs = Date.now() - desc.startTime;
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -2005,31 +2266,47 @@ export class OsKernel {
           tokensEstimate: 0,
         };
 
-        this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
-        this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
-        this.tickSignals.push("ephemeral:ready");
+        // Wrap state mutations in mutex for proper wake + reschedule
+        const release = await this.mutex.acquire();
+        try {
+          this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
+          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
+          this.tickSignals.push("ephemeral:ready");
 
-        // Kill the process table entry so it shows as dead in topology
-        this.supervisor.kill(desc.tablePid, false, `ephemeral failed: ${errorMsg}`);
-        this.emitter?.emit({
-          action: "os_process_exit",
-          status: "failed",
-          agentId: desc.tablePid,
-          agentName: desc.name,
-          message: `failed: ${errorMsg}`,
-        });
+          // Kill the process table entry so it shows as dead in topology
+          this.supervisor.kill(desc.tablePid, false, `ephemeral failed: ${errorMsg}`);
+          this.emitter?.emit({
+            action: "os_process_exit",
+            status: "failed",
+            agentId: desc.tablePid,
+            agentName: desc.name,
+            message: `failed: ${errorMsg}`,
+          });
 
-        if (this.config.kernel.telemetryEnabled) {
-          this.telemetryCollector.onEphemeralComplete(ephResult);
+          if (this.config.kernel.telemetryEnabled) {
+            this.telemetryCollector.onEphemeralComplete(ephResult);
+          }
+
+          this.emitter?.emit({
+            action: "os_ephemeral_spawn",
+            status: "failed",
+            agentId: desc.ephemeralId,
+            agentName: desc.name,
+            message: `parent=${desc.pid} error=${errorMsg}`,
+          });
+
+          // Flush IPC + wake + reschedule
+          const { wokenPids } = this.ipcBus.flush();
+          for (const pid of wokenPids) {
+            const p = this.table.get(pid);
+            if (p && p.state === "idle") this.supervisor.activate(pid);
+          }
+          this.dagEngine.buildFromProcesses(this.table.getAll());
+          if (this.shouldHalt()) { this.haltResolve?.(); return; }
+          this.doSchedulingPass();
+        } finally {
+          release();
         }
-
-        this.emitter?.emit({
-          action: "os_ephemeral_spawn",
-          status: "failed",
-          agentId: desc.ephemeralId,
-          agentName: desc.name,
-          message: `parent=${desc.pid} error=${errorMsg}`,
-        });
       }
     };
 
