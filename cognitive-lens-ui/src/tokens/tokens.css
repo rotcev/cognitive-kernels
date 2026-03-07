@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=DM+Sans:wght@400;500;600&display=swap');
+
+:host, :root {
+  /* Background scale */
+  --lens-bg-root: #000000;
+  --lens-bg-panel: #050505;
+  --lens-bg-surface: #0a0a0a;
+  --lens-bg-elevated: #111111;
+  --lens-bg-hover: #1a1a1a;
+  --lens-bg-active: #0d1f14;
+
+  /* Borders */
+  --lens-border: #1a1a1a;
+  --lens-border-bright: #2a2a2a;
+
+  /* Accent */
+  --lens-accent: #00ff88;
+  --lens-accent-dim: rgba(0,255,136,0.15);
+  --lens-accent-glow: rgba(0,255,136,0.06);
+
+  /* Text */
+  --lens-text: #e0e0e0;
+  --lens-text-secondary: #707070;
+  --lens-text-dim: #484848;
+
+  /* Status colors */
+  --lens-green: #00ff88;
+  --lens-green-dim: #0a3d22;
+  --lens-amber: #ffb020;
+  --lens-amber-dim: #3d2e0a;
+  --lens-cyan: #00d4ff;
+  --lens-cyan-dim: #0a2a3d;
+  --lens-magenta: #ff44cc;
+  --lens-magenta-dim: #3d0a2e;
+  --lens-red: #ff4444;
+  --lens-red-dim: #3d0a0a;
+  --lens-blue: #4488ff;
+  --lens-blue-dim: #0a1a3d;
+  --lens-gray: #555555;
+  --lens-gray-dim: #1a1a1a;
+
+  /* Typography */
+  --lens-font-mono: 'IBM Plex Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --lens-font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+
+  /* Layout */
+  --lens-topbar-h: 40px;
+  --lens-bottombar-h: 32px;
+  --lens-sidebar-w: 280px;
+  --lens-rightpanel-w: 360px;
+  --lens-narrative-h: 36px;
+
+  /* Radius */
+  --lens-radius-sm: 2px;
+  --lens-radius-md: 4px;
+
+  /* Transitions */
+  --lens-transition-fast: 150ms ease;
+  --lens-transition-med: 200ms ease;
+}
