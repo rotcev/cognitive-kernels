@@ -85,6 +85,7 @@ export class LensDashboard extends LensElement {
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        padding: 0 12px;
       }
 
       .right-area {
@@ -94,6 +95,7 @@ export class LensDashboard extends LensElement {
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        padding: 0 8px;
       }
 
       .bottombar-area {
@@ -110,6 +112,7 @@ export class LensDashboard extends LensElement {
       .tab-content.active {
         display: flex;
         flex-direction: column;
+        padding-top: 8px;
       }
 
       .heuristics-scroll, .deferrals-scroll {

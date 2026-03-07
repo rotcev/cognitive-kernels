@@ -2686,6 +2686,8 @@ export class OsKernel {
               model: ephModel,
               prompt: [
                 "You are a single-turn helper process. You run once, return findings, then terminate.",
+                "IMPORTANT: You have NO blackboard access. Do NOT claim to write to any blackboard key (scout:*, ephemeral:*, etc.).",
+                "Your text response IS your output — the kernel captures it and delivers it to your parent automatically.",
                 "Your work directly unblocks your parent — accuracy and completeness matter.",
                 "",
                 "## Context",
@@ -2709,8 +2711,6 @@ export class OsKernel {
                 "",
                 "## Constraints",
                 "- Single turn only — you cannot spawn processes or continue after this response",
-                "- You have NO access to the kernel blackboard — do not claim to write BB keys or reference BB paths",
-                "- Your entire text response will be captured and delivered to your parent process automatically",
                 "- Stay focused on the task above — do not explore tangents",
               ].join("\n"),
               workingDir: ephProc.workingDir,
