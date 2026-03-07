@@ -79,6 +79,7 @@ export class OsKernel {
   private haltReason = "";
   private startTime = 0;
   private lastMetacogTick = 0;
+  private lastMetacogWakeAt = 0;
   private pendingTriggers: OsMetacogTrigger[] = [];
   private readonly client: Brain;
   private readonly workingDir: string;
@@ -174,9 +175,11 @@ export class OsKernel {
   /** Periodic snapshot timer. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   /** Periodic metacog evaluation timer. */
-  private metacogTimer: ReturnType<typeof setInterval> | null = null;
+  private metacogTimer: ReturnType<typeof setTimeout> | null = null;
   /** Count of ephemerals currently executing (fire-and-forget, not in inflight map). */
   private activeEphemeralCount = 0;
+  /** Active ephemeral threads keyed by tablePid — abort these on kill to stop wasting tokens. */
+  private ephemeralThreads: Map<string, import("../types.js").BrainThread> = new Map();
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
   constructor(
@@ -418,6 +421,8 @@ export class OsKernel {
   private async eventLoop(): Promise<void> {
     return new Promise<void>((resolve) => {
       this.haltResolve = () => {
+        if (this.halted) return; // prevent duplicate halt sequences
+        this.halted = true;
         this.stopEventLoop();
         // Wait for any in-flight processes to settle, then resolve
         if (this.inflight.size > 0) {
@@ -431,14 +436,17 @@ export class OsKernel {
       this.housekeepTimer = setInterval(() => {
         void this.safeHousekeep();
       }, this.config.kernel.housekeepIntervalMs ?? 500);
+      (this.housekeepTimer as NodeJS.Timeout).unref?.();
 
       this.snapshotTimer = setInterval(() => {
         this.safeSnapshotWrite();
       }, this.config.kernel.snapshotIntervalMs ?? 10_000);
+      (this.snapshotTimer as NodeJS.Timeout).unref?.();
 
-      this.metacogTimer = setInterval(() => {
-        void this.safeMetacogCheck();
-      }, this.config.kernel.metacogIntervalMs ?? 15_000);
+      // Self-scheduling metacog: fires once at boot, then reschedules based on
+      // metacog's own nextWakeMs (capped at metacogIntervalMs as fallback max).
+      this.scheduleNextMetacog(120_000); // first check 2min after boot — scouts need time
+
 
       this.startWatchdog();
 
@@ -451,7 +459,7 @@ export class OsKernel {
   private stopEventLoop(): void {
     if (this.housekeepTimer) { clearInterval(this.housekeepTimer); this.housekeepTimer = null; }
     if (this.snapshotTimer) { clearInterval(this.snapshotTimer); this.snapshotTimer = null; }
-    if (this.metacogTimer) { clearInterval(this.metacogTimer); this.metacogTimer = null; }
+    if (this.metacogTimer) { clearTimeout(this.metacogTimer); this.metacogTimer = null; }
     this.stopWatchdog();
   }
 
@@ -495,8 +503,8 @@ export class OsKernel {
    * Periodic metacog evaluation — runs on wall-clock timer.
    * Evaluates system state, applies metacog commands, runs awareness daemon.
    */
-  private async doMetacogCheck(): Promise<void> {
-    if (this.metacogInFlight) return;
+  private async doMetacogCheck(): Promise<number | undefined> {
+    if (this.metacogInFlight) return undefined;
 
     // Metacog overdue safety net — ensure metacog evaluates during critical periods
     // even if cadence/triggers don't fire naturally.
@@ -510,9 +518,16 @@ export class OsKernel {
       }
     }
 
-    if (!this.shouldConsultMetacog()) return;
+    if (!this.shouldConsultMetacog()) return undefined;
+
+    const wakeNow = Date.now();
+    const sinceLastWakeSec = this.lastMetacogWakeAt > 0
+      ? Math.round((wakeNow - this.lastMetacogWakeAt) / 1000)
+      : 0;
+    this.lastMetacogWakeAt = wakeNow;
 
     this.metacogInFlight = true;
+    let nextWakeMs: number | undefined;
     try {
       // Rebuild ranked blueprints (in tick() this came from an earlier step)
       const rankedBlueprints = this.memoryStore.queryBlueprints(this.goal);
@@ -527,6 +542,9 @@ export class OsKernel {
         totalDurationMs: this.telemetryCollector.ephemeralTotalDurationMs,
       });
       const context = this.buildMetacogContext();
+
+      // Temporal awareness: tell metacog how long since its last evaluation
+      context.sinceLastWakeSec = sinceLastWakeSec;
 
       // (1) Push current system state snapshot to IPC channel 'metacog:system-state'
       this.ipcBus.bbWrite("metacog:system-state", context, "kernel");
@@ -558,7 +576,7 @@ export class OsKernel {
       // (3) Apply each MetacogCommand via executeMetacogCommand()
       const cmdEntry = this.ipcBus.bbRead("metacog:commands", "kernel");
       if (cmdEntry && typeof cmdEntry.value === "string") {
-        this.parseMetacogResponse(cmdEntry.value);
+        nextWakeMs = this.parseMetacogResponse(cmdEntry.value);
         this.ipcBus.bbDelete("metacog:commands");
       }
       this.ipcBus.bbDelete("metacog:system-state");
@@ -682,21 +700,23 @@ export class OsKernel {
               }
             }
 
-            // Emit intervention outcome for Lens observability
-            this.emitter?.emit({
-              action: "os_intervention_outcome",
-              status: "completed",
-              message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
-              detail: {
-                commandKind: iv.commandKind,
-                outcome: iv.outcome,
-                interventionTick: iv.tick,
-                evaluationTick: evalTick,
-                preSnapshot: pre,
-                postSnapshot: post,
-                causalAttributions: iv.causalAttributions ?? [],
-              },
-            });
+            // Only emit protocol events for non-neutral outcomes to avoid log spam
+            if (iv.outcome !== 'neutral') {
+              this.emitter?.emit({
+                action: "os_intervention_outcome",
+                status: "completed",
+                message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
+                detail: {
+                  commandKind: iv.commandKind,
+                  outcome: iv.outcome,
+                  interventionTick: iv.tick,
+                  evaluationTick: evalTick,
+                  preSnapshot: pre,
+                  postSnapshot: post,
+                  causalAttributions: iv.causalAttributions ?? [],
+                },
+              });
+            }
           }
         }
         this.pendingInterventions = this.pendingInterventions.filter(
@@ -706,6 +726,21 @@ export class OsKernel {
     } finally {
       this.metacogInFlight = false;
     }
+    return nextWakeMs;
+  }
+
+  /**
+   * Schedule the next metacog evaluation after `delayMs`.
+   * Uses setTimeout (not setInterval) so metacog controls its own cadence.
+   */
+  private scheduleNextMetacog(delayMs: number): void {
+    if (this.metacogTimer) { clearTimeout(this.metacogTimer); this.metacogTimer = null; }
+    const maxInterval = this.config.kernel.metacogIntervalMs ?? 60_000;
+    const clamped = Math.max(1000, Math.min(delayMs, maxInterval));
+    this.metacogTimer = setTimeout(() => {
+      void this.safeMetacogCheck();
+    }, clamped);
+    (this.metacogTimer as NodeJS.Timeout).unref?.();
   }
 
   /**
@@ -714,8 +749,9 @@ export class OsKernel {
   private async safeMetacogCheck(): Promise<void> {
     if (this.halted) return;
     const release = await this.mutex.acquire();
+    let nextWakeMs: number | undefined;
     try {
-      await this.doMetacogCheck();
+      nextWakeMs = await this.doMetacogCheck();
       this.emitter?.writeLiveState(this.snapshot());
       if (this.shouldHalt()) { this.haltResolve?.(); return; }
       this.doSchedulingPass();
@@ -727,6 +763,11 @@ export class OsKernel {
       });
     } finally {
       release();
+      // Reschedule: use metacog's requested delay, or fallback max interval
+      if (!this.halted) {
+        const fallback = this.config.kernel.metacogIntervalMs ?? 60_000;
+        this.scheduleNextMetacog(nextWakeMs ?? fallback);
+      }
     }
   }
 
@@ -850,87 +891,91 @@ export class OsKernel {
         // Non-JSON response — no action
       }
 
-      if (parsed && typeof parsed === "object" && Array.isArray(parsed.commands)) {
-        for (const cmd of parsed.commands) {
-          if (cmd.kind === "kill") {
-            // Kill in process table unconditionally — don't require an active turn
-            this.supervisor.kill(cmd.pid, cmd.cascade, cmd.reason);
-            this.executor.disposeThread(cmd.pid);
-            this.router.disposeThread(cmd.pid);
-            // If there's an active LLM turn, abort it
-            const killCb = this.turnKillCallbacks.get(cmd.pid);
-            if (killCb) {
-              killCb();
+      // Serialize state mutations through the mutex — the LLM eval above was
+      // intentionally outside the mutex for throughput, but kills/spawns/IPC
+      // writes must not race with onProcessComplete or housekeep.
+      const wdRelease = await this.mutex.acquire();
+      try {
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.commands)) {
+          for (const cmd of parsed.commands) {
+            if (cmd.kind === "kill") {
+              this.supervisor.kill(cmd.pid, cmd.cascade, cmd.reason);
+              this.executor.disposeThread(cmd.pid);
+              this.router.disposeThread(cmd.pid);
+              // Abort ephemeral thread if this PID is an in-flight ephemeral
+              this.ephemeralThreads.get(cmd.pid)?.abort();
+              this.ephemeralThreads.delete(cmd.pid);
+              const killCb = this.turnKillCallbacks.get(cmd.pid);
+              if (killCb) {
+                killCb();
+              }
+              this.emitter?.emit({
+                action: "os_process_kill",
+                status: "completed",
+                agentId: cmd.pid,
+                agentName: this.table.get(cmd.pid)?.name ?? cmd.pid,
+                message: `watchdog_kill: ${cmd.reason}`,
+                detail: {
+                  trigger: "watchdog",
+                  reason: cmd.reason,
+                },
+              });
+            } else {
+              try {
+                this.executeMetacogCommand(cmd);
+              } catch {
+                // Individual command failure shouldn't stop others
+              }
+            }
+          }
+        }
+        this.metacogEvalCount += 1;
+        this.recordProgressSnapshot();
+
+        if (this.shouldConsultAwareness() && this.awarenessDaemon) {
+          const awarenessProc = this.table.getAll().find(
+            (p) => p.name === "awareness-daemon" && p.state !== "dead",
+          );
+          if (awarenessProc) {
+            this.supervisor.activate(awarenessProc.pid);
+          }
+          const awarenessCtx = this.buildAwarenessContext();
+          try {
+            const awarenessResp = await this.awarenessDaemon.evaluate(awarenessCtx);
+            this.pendingAwarenessNotes = awarenessResp.notes;
+            this.lastAwarenessTick = this.scheduler.tickCount;
+            if (awarenessProc) {
+              awarenessProc.tickCount += 1;
+              awarenessProc.lastActiveAt = new Date().toISOString();
+            }
+            if (awarenessResp.flaggedHeuristics.length > 0) {
+              this.ipcBus.bbWrite("awareness:heuristic-flags", awarenessResp.flaggedHeuristics, "awareness-daemon");
+            }
+            if (awarenessResp.adjustments.length > 0) {
+              this.ipcBus.bbWrite("awareness:adjustments", awarenessResp.adjustments, "awareness-daemon");
+              for (const adj of awarenessResp.adjustments) {
+                this.applyAwarenessAdjustment(adj);
+              }
             }
             this.emitter?.emit({
-              action: "os_process_kill",
+              action: "os_awareness_eval",
               status: "completed",
-              agentId: cmd.pid,
-              agentName: this.table.get(cmd.pid)?.name ?? cmd.pid,
-              message: `watchdog_kill: ${cmd.reason}`,
+              agentName: "awareness-daemon",
+              message: `watchdog awareness eval: ${awarenessResp.notes.length} notes, ${awarenessResp.adjustments.length} adjustments, ${awarenessResp.flaggedHeuristics.length} flagged heuristics`,
               detail: {
-                trigger: "watchdog",
-                reason: cmd.reason,
+                source: "watchdog",
+                notes: awarenessResp.notes,
+                adjustments: awarenessResp.adjustments,
+                flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
+                tick: this.scheduler.tickCount,
               },
             });
-          } else {
-            // Non-kill commands can be executed normally
-            try {
-              this.executeMetacogCommand(cmd);
-            } catch {
-              // Individual command failure shouldn't stop others
-            }
+          } catch {
+            // Awareness eval failed — non-critical, continue
           }
         }
-      }
-      // Watchdog metacog counts toward awareness cadence too
-      this.metacogEvalCount += 1;
-
-      // Record progress snapshot for awareness context (dedup: one per tick)
-      this.recordProgressSnapshot();
-
-      // Run awareness at cadence
-      if (this.shouldConsultAwareness() && this.awarenessDaemon) {
-        const awarenessProc = this.table.getAll().find(
-          (p) => p.name === "awareness-daemon" && p.state !== "dead",
-        );
-        if (awarenessProc) {
-          this.supervisor.activate(awarenessProc.pid);
-        }
-        const awarenessCtx = this.buildAwarenessContext();
-        try {
-          const awarenessResp = await this.awarenessDaemon.evaluate(awarenessCtx);
-          this.pendingAwarenessNotes = awarenessResp.notes;
-          this.lastAwarenessTick = this.scheduler.tickCount;
-          if (awarenessProc) {
-            awarenessProc.tickCount += 1;
-            awarenessProc.lastActiveAt = new Date().toISOString();
-          }
-          if (awarenessResp.flaggedHeuristics.length > 0) {
-            this.ipcBus.bbWrite("awareness:heuristic-flags", awarenessResp.flaggedHeuristics, "awareness-daemon");
-          }
-          if (awarenessResp.adjustments.length > 0) {
-            this.ipcBus.bbWrite("awareness:adjustments", awarenessResp.adjustments, "awareness-daemon");
-            for (const adj of awarenessResp.adjustments) {
-              this.applyAwarenessAdjustment(adj);
-            }
-          }
-          this.emitter?.emit({
-            action: "os_awareness_eval",
-            status: "completed",
-            agentName: "awareness-daemon",
-            message: `watchdog awareness eval: ${awarenessResp.notes.length} notes, ${awarenessResp.adjustments.length} adjustments, ${awarenessResp.flaggedHeuristics.length} flagged heuristics`,
-            detail: {
-              source: "watchdog",
-              notes: awarenessResp.notes,
-              adjustments: awarenessResp.adjustments,
-              flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
-              tick: this.scheduler.tickCount,
-            },
-          });
-        } catch {
-          // Awareness eval failed — non-critical, continue
-        }
+      } finally {
+        wdRelease();
       }
     } catch {
       // Watchdog metacog eval failed — silently continue, try again next interval
@@ -1228,7 +1273,7 @@ export class OsKernel {
       const livingChildren = this.table.getAll().filter(
         p => p.parentPid === orchestrator.pid && p.state !== "dead"
       );
-      const pendingEphemerals = this.pendingEphemerals.length;
+      const pendingEphemerals = this.pendingEphemerals.length + this.activeEphemeralCount;
       if (livingChildren.length === 0 && pendingEphemerals === 0) {
         const pendingDeferrals = this.deferrals.size;
         const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
@@ -1508,21 +1553,23 @@ export class OsKernel {
             }
           }
 
-          // Emit intervention outcome for Lens observability
-          this.emitter?.emit({
-            action: "os_intervention_outcome",
-            status: "completed",
-            message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
-            detail: {
-              commandKind: iv.commandKind,
-              outcome: iv.outcome,
-              interventionTick: iv.tick,
-              evaluationTick: evalTick,
-              preSnapshot: pre,
-              postSnapshot: post,
-              causalAttributions: iv.causalAttributions ?? [],
-            },
-          });
+          // Only emit protocol events for non-neutral outcomes to avoid log spam
+          if (iv.outcome !== 'neutral') {
+            this.emitter?.emit({
+              action: "os_intervention_outcome",
+              status: "completed",
+              message: `intervention ${iv.commandKind} outcome=${iv.outcome} (tick ${iv.tick} → ${evalTick})`,
+              detail: {
+                commandKind: iv.commandKind,
+                outcome: iv.outcome,
+                interventionTick: iv.tick,
+                evaluationTick: evalTick,
+                preSnapshot: pre,
+                postSnapshot: post,
+                causalAttributions: iv.causalAttributions ?? [],
+              },
+            });
+          }
         }
       }
       this.pendingInterventions = this.pendingInterventions.filter(
@@ -1607,8 +1654,12 @@ export class OsKernel {
     this.router.setStrategiesSnapshot(applicable);
 
     // Stall detection — in event-driven model, "selected.length === 0" becomes "inflight.size === 0"
-    // Also skip if ephemerals are running — they're fire-and-forget, not in inflight map
-    if (this.inflight.size === 0 && this.activeEphemeralCount === 0) {
+    // Also skip if ephemerals are running — but only count ephemerals whose process table
+    // entries are still alive (not killed by metacog while their LLM call is still inflight)
+    const liveEphemeralCount = this.table.getAll().filter(
+      p => p.type === "event" && p.state !== "dead"
+    ).length;
+    if (this.inflight.size === 0 && liveEphemeralCount === 0) {
       this.consecutiveIdleTicks += 1;
       if (this.consecutiveIdleTicks >= 3) {
         const idleProcs = this.table.getByState("idle");
@@ -1631,25 +1682,32 @@ export class OsKernel {
     // Phase-transition deadlock detection
     const orchestrator = this.table.getAll().find(p => !p.parentPid && p.type === "lifecycle");
     if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
-      const livingChildren = this.table.getAll().filter(
-        p => p.parentPid === orchestrator.pid && p.state !== "dead"
+      // Check ALL living non-daemon, non-orchestrator processes — not just direct children.
+      // Metacog can spawn processes that aren't parented to the orchestrator.
+      const allLivingWork = this.table.getAll().filter(
+        p => p.pid !== orchestrator.pid && p.state !== "dead" && p.type !== "daemon"
       );
-      const pendingEphemerals = this.pendingEphemerals.length + this.activeEphemeralCount;
-      if (livingChildren.length === 0 && pendingEphemerals === 0) {
+      // Count only ephemerals that are still alive in the process table — killed ephemerals
+      // may have LLM calls still inflight (activeEphemeralCount) but shouldn't block recovery
+      const pendingEphemerals = this.pendingEphemerals.length + liveEphemeralCount;
+      if (allLivingWork.length === 0 && pendingEphemerals === 0) {
         const pendingDeferrals = this.deferrals.size;
         const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
         const bbChanged = currentBbKeys !== this.bbKeysAtLastForceWake;
         const ticksSinceLastForceWake = this.scheduler.tickCount - this.lastOrchestratorForceWakeTick;
         const cooldownExpired = ticksSinceLastForceWake >= 5;
 
-        if (pendingDeferrals === 0 || bbChanged || cooldownExpired) {
+        // Always force-wake when nothing is left (no deferrals, no work) — skip cooldown
+        const nothingLeft = pendingDeferrals === 0 && allLivingWork.length === 0;
+
+        if (nothingLeft || bbChanged || cooldownExpired) {
           this.supervisor.activate(orchestrator.pid);
           this.lastOrchestratorForceWakeTick = this.scheduler.tickCount;
           this.bbKeysAtLastForceWake = currentBbKeys;
           this.emitter?.emit({
             action: "os_process_event",
             status: "completed",
-            message: `deadlock_detected: orchestrator idle with 0 living children, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (bbChanged=${bbChanged}, cooldown=${cooldownExpired})`,
+            message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, cooldown=${cooldownExpired})`,
           });
         }
       }
@@ -1660,8 +1718,10 @@ export class OsKernel {
       p => !p.parentPid && p.type === "lifecycle" && p.state === "dead" && p.name === "goal-orchestrator"
     );
     if (deadOrchestrator) {
+      // Only count lifecycle processes as "goal work" — ephemerals (type "event") are
+      // fire-and-forget scouts that don't need an executive to supervise them.
       const livingGoalProcesses = this.table.getAll().filter(
-        p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type !== "daemon"
+        p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type === "lifecycle"
       );
       const hasPendingDeferrals = this.deferrals.size > 0;
 
@@ -1793,8 +1853,10 @@ export class OsKernel {
         }
       }
 
-      // Also check signal-based wakes
-      const recentSignals = this.collectRecentSignalNames();
+      // Also check signal-based wakes — drain tickSignals to prevent
+      // housekeep from clearing them before they're processed
+      const recentSignals = [...this.tickSignals];
+      this.tickSignals = [];
       if (recentSignals.length > 0) {
         this.supervisor.wakeOnCondition(recentSignals);
       }
@@ -2166,18 +2228,18 @@ export class OsKernel {
         c.kind === "spawn_child" || c.kind === "spawn_graph"
       );
 
-      if (!hasLifecycleChildren && hasScoutResults && goingIdle && !spawnsLifecycle) {
-        // Preserve bb_write commands before rejecting
-        const bbWrites = result.commands.filter(c => c.kind === "bb_write");
-        if (bbWrites.length > 0) {
-          await this.executeProcessCommands(proc.pid, bbWrites);
+      if (!hasLifecycleChildren && hasScoutResults && !spawnsLifecycle) {
+        // Preserve bb_write and ephemeral commands before rejecting — don't discard useful work
+        const preservable = result.commands.filter(c => c.kind === "bb_write" || c.kind === "spawn_ephemeral");
+        if (preservable.length > 0) {
+          await this.executeProcessCommands(proc.pid, preservable);
         }
         this.emitter?.emit({
           action: "os_command_rejected",
           status: "completed",
           agentId: proc.pid,
           agentName: proc.name,
-          message: `architect-phase deadlock: scout data available but no lifecycle children spawned — must design topology and spawn Phase 0 (preserved ${bbWrites.length} bb_write commands)`,
+          message: `architect-phase deadlock: scout data available but no lifecycle children spawned — must design topology and spawn Phase 0 (preserved ${preservable.length} commands, rejected idle/exit)`,
         });
         return;
       }
@@ -2243,8 +2305,10 @@ export class OsKernel {
           workingDirectory: desc.workingDir,
           sandboxMode: "danger-full-access",
         });
+        this.ephemeralThreads.set(desc.tablePid, ephThread);
 
         const ephTurnResult = await ephThread.run(desc.prompt);
+        this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
 
         const ephResult: import("./types.js").OsEphemeralResult = {
@@ -2300,6 +2364,7 @@ export class OsKernel {
           release();
         }
       } catch (err) {
+        this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
         const errorMsg = err instanceof Error ? err.message : String(err);
 
@@ -2999,17 +3064,17 @@ export class OsKernel {
    * Parse the metacog response for structured commands and execute them.
    * Gracefully handles non-JSON responses (backward compatible with existing tests).
    */
-  private parseMetacogResponse(response: string): void {
+  private parseMetacogResponse(response: string): number | undefined {
     let parsed: MetacogResponse;
     try {
       parsed = JSON.parse(response);
     } catch {
       // Non-JSON response — graceful no-op (backward compat with mock threads)
-      return;
+      return undefined;
     }
 
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.commands)) {
-      return;
+      return undefined;
     }
 
     this.emitter?.emit({
@@ -3094,6 +3159,11 @@ export class OsKernel {
     if (this.heuristicApplicationLog.length > 200) {
       this.heuristicApplicationLog = this.heuristicApplicationLog.slice(-200);
     }
+
+    // Return metacog's self-scheduled next wake time (if provided)
+    return typeof parsed.nextWakeMs === "number" && parsed.nextWakeMs > 0
+      ? parsed.nextWakeMs
+      : undefined;
   }
 
   /**
@@ -3311,6 +3381,12 @@ export class OsKernel {
         this.supervisor.kill(cmd.pid, cmd.cascade, cmd.reason);
         this.executor.disposeThread(cmd.pid);
         this.router.disposeThread(cmd.pid);
+        // Abort ephemeral thread if this PID is an in-flight ephemeral
+        this.ephemeralThreads.get(cmd.pid)?.abort();
+        this.ephemeralThreads.delete(cmd.pid);
+        // Cancel inflight LLM call if still running (same as watchdog kill path)
+        const killCb = this.turnKillCallbacks.get(cmd.pid);
+        if (killCb) killCb();
         this.emitter?.emit({
           action: "os_process_kill",
           status: "completed",
@@ -3648,6 +3724,8 @@ export class OsKernel {
           this.supervisor.kill(pid, false, 'dag_rewrite');
           this.executor.disposeThread(pid);
           this.router.disposeThread(pid);
+          this.ephemeralThreads.get(pid)?.abort();
+          this.ephemeralThreads.delete(pid);
         }
         // Spawn a single sequential replacement with preserved context
         const contextStr = Object.keys(bbSnapshot).length > 0
@@ -3677,6 +3755,8 @@ export class OsKernel {
         this.supervisor.kill(mutation.sourcePid, false, 'dag_rewrite');
         this.executor.disposeThread(mutation.sourcePid);
         this.router.disposeThread(mutation.sourcePid);
+        this.ephemeralThreads.get(mutation.sourcePid)?.abort();
+        this.ephemeralThreads.delete(mutation.sourcePid);
         // Spawn N workers with shared context
         const contextStr = Object.keys(bbSnapshot).length > 0
           ? `\n\nShared context:\n${JSON.stringify(bbSnapshot, null, 2)}`
@@ -3737,6 +3817,8 @@ export class OsKernel {
           this.supervisor.kill(pid, false, 'dag_rewrite');
           this.executor.disposeThread(pid);
           this.router.disposeThread(pid);
+          this.ephemeralThreads.get(pid)?.abort();
+          this.ephemeralThreads.delete(pid);
         }
         // Spawn one unified replacement with preserved context
         const contextStr = Object.keys(bbSnapshot).length > 0
@@ -4219,13 +4301,19 @@ Example: ["strategy-123", "strategy-456"]`;
   }
 
   halt(reason: string): void {
-    this.halted = true;
     this.haltReason = reason;
     this.emitter?.emit({
       action: "os_halt",
       status: "completed",
       message: reason,
     });
+    if (this.haltResolve) {
+      // Event loop is running — haltResolve sets this.halted, clears timers, resolves
+      this.haltResolve();
+    } else {
+      // No event loop (e.g. unit tests) — set halted directly
+      this.halted = true;
+    }
   }
 
   // ─── Deferred Spawns ────────────────────────────────────────────
@@ -4407,6 +4495,11 @@ Example: ["strategy-123", "strategy-456"]`;
       this.executor.disposeThread(proc.pid);
       this.router.disposeThread(proc.pid);
     }
+    // Abort all in-flight ephemeral threads
+    for (const thread of this.ephemeralThreads.values()) {
+      thread.abort();
+    }
+    this.ephemeralThreads.clear();
 
     // Record blueprint outcome if one was selected
     if (this.selectedBlueprintInfo) {

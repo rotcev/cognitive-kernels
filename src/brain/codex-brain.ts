@@ -260,6 +260,7 @@ import type { Thread } from "@openai/codex-sdk";
 
 export class CodexBrainThread implements BrainThread {
   private readonly thread: Thread;
+  private activeAbort: AbortController | null = null;
 
   constructor(thread: Thread) {
     this.thread = thread;
@@ -269,28 +270,40 @@ export class CodexBrainThread implements BrainThread {
     return this.thread.id;
   }
 
+  abort(): void {
+    this.activeAbort?.abort();
+    this.activeAbort = null;
+  }
+
   async run(
     input: string,
     turnOptions?: { outputSchema?: unknown; agentLogPath?: string; onStreamEvent?: StreamEventCallback },
   ): Promise<TurnResult> {
-    const sdkOpts = turnOptions?.outputSchema !== undefined
-      ? { outputSchema: strictifySchema(turnOptions.outputSchema) }
-      : undefined;
+    const ac = new AbortController();
+    this.activeAbort = ac;
 
-    if (turnOptions?.onStreamEvent) {
-      return this.runWithStreaming(input, sdkOpts, turnOptions.onStreamEvent);
+    try {
+      const sdkOpts = turnOptions?.outputSchema !== undefined
+        ? { outputSchema: strictifySchema(turnOptions.outputSchema), signal: ac.signal }
+        : { signal: ac.signal };
+
+      if (turnOptions?.onStreamEvent) {
+        return await this.runWithStreaming(input, sdkOpts, turnOptions.onStreamEvent);
+      }
+
+      const turn = await this.thread.run(input, sdkOpts);
+      return {
+        finalResponse: turn.finalResponse,
+        usage: turn.usage ? normalizeUsage(turn.usage) : undefined,
+      };
+    } finally {
+      this.activeAbort = null;
     }
-
-    const turn = await this.thread.run(input, sdkOpts);
-    return {
-      finalResponse: turn.finalResponse,
-      usage: turn.usage ? normalizeUsage(turn.usage) : undefined,
-    };
   }
 
   private async runWithStreaming(
     input: string,
-    sdkOpts: { outputSchema?: unknown } | undefined,
+    sdkOpts: { outputSchema?: unknown; signal?: AbortSignal } | undefined,
     onStream: StreamEventCallback,
   ): Promise<TurnResult> {
     const { events } = await this.thread.runStreamed(input, sdkOpts);

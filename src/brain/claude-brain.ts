@@ -2,7 +2,7 @@ import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { WriteStream } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { Options, McpStdioServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, McpStdioServerConfig, Query } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Brain,
   BrainRuntimeConfig,
@@ -173,6 +173,8 @@ function openLogStream(logPath: string): WriteStream | null {
  */
 export class ClaudeBrainThread implements BrainThread {
   private _id: string | null = null;
+  private activeQuery: Query | null = null;
+  private activeAbort: AbortController | null = null;
 
   constructor(
     private readonly options: ExtendedBrainThreadOptions,
@@ -183,11 +185,21 @@ export class ClaudeBrainThread implements BrainThread {
     return this._id;
   }
 
+  abort(): void {
+    this.activeAbort?.abort();
+    this.activeQuery?.close();
+    this.activeAbort = null;
+    this.activeQuery = null;
+  }
+
   async run(input: string, turnOptions?: { outputSchema?: unknown; agentLogPath?: string; onStreamEvent?: StreamEventCallback }): Promise<TurnResult> {
     const logPath = turnOptions?.agentLogPath;
     const log = logPath ? openLogStream(logPath) : null;
     const ts = () => new Date().toISOString();
     const onStream = turnOptions?.onStreamEvent;
+
+    const ac = new AbortController();
+    this.activeAbort = ac;
 
     const sdkOptions: Options = {
       cwd: this.options.workingDirectory,
@@ -233,6 +245,8 @@ export class ClaudeBrainThread implements BrainThread {
       sdkOptions.mcpServers = mergedMcp;
     }
 
+    sdkOptions.abortController = ac;
+
     if (log) {
       sdkOptions.stderr = (data: string) => {
         log.write(`${ts()} [stderr] ${data}`);
@@ -240,6 +254,7 @@ export class ClaudeBrainThread implements BrainThread {
     }
 
     const generator = query({ prompt: input, options: sdkOptions });
+    this.activeQuery = generator;
 
     let lastResult: {
       result: string;
@@ -376,6 +391,8 @@ export class ClaudeBrainThread implements BrainThread {
         }
       }
     } finally {
+      this.activeQuery = null;
+      this.activeAbort = null;
       log?.end();
     }
 

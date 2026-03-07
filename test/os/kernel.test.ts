@@ -10,6 +10,8 @@ import type { Brain, BrainThread, TurnResult } from "../../src/types.js";
 class MockThread implements BrainThread {
   readonly id = "mock-thread";
 
+  abort(): void {}
+
   async run(_input: string): Promise<TurnResult> {
     return { finalResponse: "Acknowledged." };
   }

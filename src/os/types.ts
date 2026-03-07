@@ -463,6 +463,8 @@ export type MetacogContext = {
   recentExitCriteria?: Array<{ pid: string; name: string; criteria: string[]; bbKeysWritten: string[] }>;
   /** Observation results from observer processes (blackboard keys starting with observation:). */
   observationResults?: Array<{ key: string; value: unknown }>;
+  /** Seconds since last metacog wake — gives temporal awareness for self-scheduling. */
+  sinceLastWakeSec?: number;
 };
 
 // ─── Awareness Daemon Types ─────────────────────────────────────
@@ -762,6 +764,8 @@ export type MetacogResponse = {
   commands: MetacogCommand[];
   /** IDs of heuristics that influenced this evaluation's decisions. Used for credit assignment. */
   citedHeuristicIds?: string[];
+  /** Metacog-requested delay (ms) until next evaluation. The kernel caps this at metacogIntervalMs. */
+  nextWakeMs?: number;
 };
 
 // ─── Configuration ───────────────────────────────────────────────

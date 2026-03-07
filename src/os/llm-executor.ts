@@ -1624,9 +1624,14 @@ export class LlmExecutorBackend implements ExecutorBackend, ExecutorContextInjec
 
   /**
    * Dispose thread for a process (on death).
+   * Aborts any in-flight LLM call so we don't waste tokens.
    */
   dispose(pid: string): void {
-    this.threads.delete(pid);
+    const entry = this.threads.get(pid);
+    if (entry) {
+      entry.thread.abort();
+      this.threads.delete(pid);
+    }
   }
 
   /**

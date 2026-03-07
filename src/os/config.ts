@@ -18,7 +18,7 @@ const osKernelSchema = z.object({
   tickSignalCadences: z.array(z.number().int().positive()).default([1, 5, 10]),
   watchdogIntervalMs: z.number().int().positive().default(300000),
   housekeepIntervalMs: z.number().int().positive().default(500),
-  metacogIntervalMs: z.number().int().positive().default(15000),
+  metacogIntervalMs: z.number().int().positive().default(300000),
   snapshotIntervalMs: z.number().int().positive().default(10000),
 }).strict();
 

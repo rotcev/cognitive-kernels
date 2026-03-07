@@ -71,12 +71,14 @@ export class OsMetacognitiveAgent {
       "- **Spawn precisely.** Every process must justify its existence. If two processes could be one,",
       "  they should be one. If a process can be eliminated by writing a better objective for another,",
       "  eliminate it. The minimal topology that achieves the goal is the correct topology.",
-      "- **Kill precisely, not reflexively.** A process with zero blackboard output is not necessarily",
-      "  stalled — check its inference telemetry first. If stream_events > 0 and rate > 0, it is",
-      "  actively thinking and may be mid-turn on a complex generation. Kill processes that are truly",
-      "  stuck (no stream events, zero rate, high elapsed time) or provably producing wrong outputs.",
-      "  Killing a process mid-inference and respawning it resets all progress and burns MORE tokens",
-      "  than letting it finish. The most expensive topology error is a kill-respawn cycle.",
+      "- **Kill precisely, not reflexively.** A process with zero blackboard output is almost certainly",
+      "  still on its first LLM turn. LLM calls routinely take 2-5 minutes, sometimes longer.",
+      "  Check inference telemetry: if stream_events > 0 and rate > 0, the process is actively thinking.",
+      "  NEVER kill a process that has been running for less than 10 minutes unless it has explicit errors.",
+      "  Kill processes that are truly stuck (no stream events, zero rate, AND elapsed time > 10 min)",
+      "  or provably producing wrong outputs. Killing a process mid-inference and respawning it resets",
+      "  ALL progress and burns MORE tokens than letting it finish. The most expensive topology error",
+      "  is a kill-respawn cycle. When in doubt, WAIT. Patience costs nothing; premature kills cost everything.",
       "- **Parallelize only when independent.** Parallel processes that share write targets will",
       "  conflict. Sequential is correct when work has dependencies. Parallel is correct when work",
       "  is genuinely independent. Misdiagnosing this is the most expensive topology error.",
@@ -200,7 +202,12 @@ export class OsMetacognitiveAgent {
       "   to stabilize is worse than a targeted reprioritize or a single surgical kill.",
       "",
       "## Available Commands",
-      "Return structured JSON with an `assessment` string, a `commands` array, and a `citedHeuristicIds` array.",
+      "Return structured JSON with an `assessment` string, a `commands` array, a `citedHeuristicIds` array,",
+      "and an optional `nextWakeMs` number (milliseconds until your next evaluation — you control your own cadence).",
+      "If omitted, a default fallback interval applies. LLM calls typically take 2-5 minutes.",
+      "Set nextWakeMs to 120000-180000 (2-3 min) when you need to monitor active changes,",
+      "or 300000-600000 (5-10 min) when processes are working and you should let them finish.",
+      "IMPORTANT: Be patient. Most processes need several minutes to complete their first turn.",
       "",
       "### Citation — Critical for Learning",
       "The `citedHeuristicIds` field is an array of heuristic IDs (from the Relevant Heuristics section below)",
@@ -309,8 +316,11 @@ export class OsMetacognitiveAgent {
   buildContextPrompt(context: MetacogContext): string {
     const lines: string[] = [];
 
-    lines.push(`## Metacognitive Evaluation Tick`);
+    lines.push(`## Metacognitive Evaluation`);
     lines.push(`Ticks since last eval: ${context.ticksSinceLastEval}`);
+    if (context.sinceLastWakeSec != null && context.sinceLastWakeSec > 0) {
+      lines.push(`Approximate time since last wake: ${context.sinceLastWakeSec}s`);
+    }
 
     if (context.trigger) {
       lines.push(`Trigger: ${context.trigger}`);

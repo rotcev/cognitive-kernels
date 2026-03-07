@@ -79,6 +79,8 @@ export interface BrainThread {
       onStreamEvent?: StreamEventCallback;
     },
   ): Promise<TurnResult>;
+  /** Abort any in-flight LLM call, freeing resources immediately. */
+  abort(): void;
 }
 
 export interface Brain {

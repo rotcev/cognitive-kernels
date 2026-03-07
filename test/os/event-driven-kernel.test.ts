@@ -21,6 +21,8 @@ class MockThread implements BrainThread {
     this.responseFn = responseFn ?? (() => "Acknowledged.");
   }
 
+  abort(): void {}
+
   async run(_input: string): Promise<TurnResult> {
     if (this.delayMs > 0) {
       await new Promise((r) => setTimeout(r, this.delayMs));
