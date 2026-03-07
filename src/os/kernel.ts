@@ -4182,20 +4182,17 @@ Example: ["strategy-123", "strategy-456"]`;
       return false;
     }
 
-    // All goal work is done: only idle/sleeping daemons remain, no lifecycle/event processes alive
+    // All goal work is done: no lifecycle/event processes alive, only daemons remain
     if (livingProcesses.length > 0) {
       const goalProcesses = livingProcesses.filter(
         (p) => p.type === "lifecycle" || p.type === "event",
       );
       if (goalProcesses.length === 0) {
-        // Only daemons remain — check they're all idle/sleeping (not actively running)
-        const activeDaemons = livingProcesses.filter(
-          (p) => p.state === "running",
-        );
-        if (activeDaemons.length === 0) {
-          this.haltReason = "goal_work_complete";
-          return true;
-        }
+        // Only daemons remain — halt regardless of daemon state.
+        // In the event-driven model daemons may be transiently "running"
+        // (metacog/awareness evaluations) but that's not goal work.
+        this.haltReason = "goal_work_complete";
+        return true;
       }
     }
 
