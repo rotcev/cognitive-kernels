@@ -2122,6 +2122,47 @@ export class OsKernel {
    * executeProcesses() for-loop so it can also be called from the
    * event-driven completion handler.
    */
+  private summarizeTurnCommands(commands: import("./types.js").OsProcessCommand[]): string {
+    const parts: string[] = [];
+    for (const cmd of commands) {
+      switch (cmd.kind) {
+        case "bb_write":
+          parts.push(`write(${cmd.key})`);
+          break;
+        case "bb_read":
+          parts.push(`read(${cmd.keys.join(",")})`);
+          break;
+        case "spawn_child":
+          parts.push(`spawn(${cmd.descriptor?.name || "child"})`);
+          break;
+        case "spawn_graph": {
+          const nodes = (cmd as any).nodes || [];
+          const names = nodes.map((n: any) => n.name).join(", ");
+          parts.push(`graph(${nodes.length} nodes: ${names})`);
+          break;
+        }
+        case "spawn_ephemeral":
+          parts.push(`ephemeral(${cmd.name || "scout"})`);
+          break;
+        case "spawn_system":
+          parts.push(`shell(${(cmd as any).command || "cmd"})`);
+          break;
+        case "idle":
+          parts.push(`idle(wake=${((cmd as any).wakeOnSignals || []).join(",")})`);
+          break;
+        case "exit":
+          parts.push(`exit(code=${(cmd as any).code}, ${((cmd as any).reason || "").slice(0, 80)})`);
+          break;
+        case "signal_emit":
+          parts.push(`signal(${(cmd as any).signal})`);
+          break;
+        default:
+          parts.push(cmd.kind);
+      }
+    }
+    return parts.join(" | ");
+  }
+
   private async processOneResult(result: OsProcessTurnResult): Promise<void> {
     const now = new Date().toISOString();
     const proc = this.table.get(result.pid);
@@ -2245,6 +2286,15 @@ export class OsKernel {
       }
     }
 
+    // Emit turn summary so the UI shows what the process decided
+    if (this.emitter && result.commands.length > 0) {
+      const summary = this.summarizeTurnCommands(result.commands);
+      this.emitter.emitStreamEvent(proc.pid, proc.name, {
+        type: "text_delta",
+        text: `Turn ${proc.tickCount} complete → ${summary}\n`,
+      });
+    }
+
     // Execute any commands the process returned
     await this.executeProcessCommands(proc.pid, result.commands);
 
@@ -2342,6 +2392,13 @@ export class OsKernel {
         this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
 
+        // Emit completion summary with response preview
+        const responsePreview = ephTurnResult.finalResponse.slice(0, 200).replace(/\n/g, " ");
+        this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
+          type: "text_delta",
+          text: `✓ Completed in ${Math.round(ephDurationMs / 1000)}s (${Math.ceil(ephTurnResult.finalResponse.length / 4)} tokens)\n${responsePreview}${ephTurnResult.finalResponse.length > 200 ? "..." : ""}\n`,
+        });
+
         const ephResult: import("./types.js").OsEphemeralResult = {
           ephemeralId: desc.ephemeralId,
           name: desc.name,
@@ -2398,6 +2455,12 @@ export class OsKernel {
         this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
         const errorMsg = err instanceof Error ? err.message : String(err);
+
+        // Emit failure summary
+        this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
+          type: "text_delta",
+          text: `✗ Failed after ${Math.round(ephDurationMs / 1000)}s: ${errorMsg.slice(0, 200)}\n`,
+        });
 
         const ephResult: import("./types.js").OsEphemeralResult = {
           ephemeralId: desc.ephemeralId,
