@@ -553,6 +553,7 @@ export class LlmExecutorBackend implements ExecutorBackend, ExecutorContextInjec
         "### CRITICAL",
         "- **PARENT-DEATH CASCADE**: If you exit, ALL living children die immediately. Only exit when ALL phases are done and synthesis is complete.",
         "- If any child is still running, go idle again — do NOT exit or synthesize yet",
+        "- **PRODUCE TANGIBLE OUTPUTS BEFORE EXITING**: The goal asks for something concrete — a file, a report, a result. Plans, contracts, and blackboard entries are intermediate artifacts, NOT the deliverable. Before you exit, ask: has the actual requested output been produced and verified? If the answer is no, you are not done. Spawn workers to produce it.",
       ].join("\n");
     }
 
