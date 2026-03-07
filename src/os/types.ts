@@ -784,6 +784,12 @@ export type OsKernelConfig = {
   parentKernelId?: string;
   /** Watchdog interval for detecting tick stalls (default: 60000ms = 1 min). */
   watchdogIntervalMs?: number;
+  /** Housekeeping timer interval (default: 500ms). */
+  housekeepIntervalMs?: number;
+  /** Metacog evaluation timer interval (default: 15000ms). */
+  metacogIntervalMs?: number;
+  /** Snapshot write timer interval (default: 10000ms). */
+  snapshotIntervalMs?: number;
 };
 
 export type OsSchedulerConfig = {

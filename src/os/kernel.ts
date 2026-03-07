@@ -428,15 +428,15 @@ export class OsKernel {
       // Start background timers
       this.housekeepTimer = setInterval(() => {
         void this.safeHousekeep();
-      }, 500);
+      }, this.config.kernel.housekeepIntervalMs ?? 500);
 
       this.snapshotTimer = setInterval(() => {
         this.safeSnapshotWrite();
-      }, 10_000);
+      }, this.config.kernel.snapshotIntervalMs ?? 10_000);
 
       this.metacogTimer = setInterval(() => {
         void this.safeMetacogCheck();
-      }, 15_000);
+      }, this.config.kernel.metacogIntervalMs ?? 15_000);
 
       this.startWatchdog();
 
