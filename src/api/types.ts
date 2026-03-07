@@ -42,6 +42,7 @@ export type RunsApiOptions = {
   dependencies?: RunsApiDependencies;
   defaultCwd?: string;
   defaultConfigPath?: string;
+  defaultProvider?: "claude" | "codex";
   schemas?: Partial<ApiSchemaSet>;
 };
 

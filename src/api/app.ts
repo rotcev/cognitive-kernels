@@ -43,7 +43,7 @@ export function createRunsApiApp(options: RunsApiOptions = {}): Hono {
       "Starting runs is not implemented in this Phase 1 scaffold.",
     )({
       goal: body.goal,
-      provider: body.provider,
+      provider: body.provider ?? options.defaultProvider,
       cwd: body.cwd ?? options.defaultCwd ?? process.cwd(),
       configPath: body.configPath ?? options.defaultConfigPath,
     });

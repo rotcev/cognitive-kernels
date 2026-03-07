@@ -21,6 +21,7 @@ export type CreateRunsApiServerOptions = {
   runtimeAdapter?: RuntimeAdapter;
   defaultCwd: string;
   defaultConfigPath?: string;
+  defaultProvider?: "claude" | "codex";
   host?: string;
   port?: number;
 };
@@ -34,6 +35,7 @@ export async function createRunsApiServer(options: CreateRunsApiServerOptions): 
   const app = createRunsApiApp({
     defaultCwd: options.defaultCwd,
     defaultConfigPath: options.defaultConfigPath,
+    defaultProvider: options.defaultProvider,
     dependencies: {
       startRun: (input) => options.runManager.startRun(input),
       listRuns: () => options.runManager.listRuns(),

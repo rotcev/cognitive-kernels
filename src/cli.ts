@@ -137,10 +137,13 @@ async function handleServeCommand(flags: Map<string, string | boolean>): Promise
   });
   await runManager.initialize();
 
+  const defaultProvider = readStringFlag(flags, "--provider") as "claude" | "codex" | undefined;
+
   const server = await createRunsApiServer({
     runManager,
     defaultCwd: cwd,
     defaultConfigPath: configPath,
+    defaultProvider,
     host,
     port,
   });
