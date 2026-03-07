@@ -304,7 +304,7 @@ export class OsKernel {
         priority: 20,
         model: this.config.kernel.processModel,
         workingDir: this.workingDir,
-        restartPolicy: "on-failure",
+        restartPolicy: "never",
       });
       this.supervisor.activate(daemonProc.pid);
     } else {
@@ -463,6 +463,7 @@ export class OsKernel {
     const release = await this.mutex.acquire();
     try {
       this.housekeep();
+      this.emitter?.writeLiveState(this.snapshot());
       if (this.shouldHalt()) { this.haltResolve?.(); return; }
       this.doSchedulingPass();
     } catch (err) {
@@ -715,6 +716,7 @@ export class OsKernel {
     const release = await this.mutex.acquire();
     try {
       await this.doMetacogCheck();
+      this.emitter?.writeLiveState(this.snapshot());
       if (this.shouldHalt()) { this.haltResolve?.(); return; }
       this.doSchedulingPass();
     } catch (err) {
