@@ -2307,7 +2307,15 @@ export class OsKernel {
         });
         this.ephemeralThreads.set(desc.tablePid, ephThread);
 
-        const ephTurnResult = await ephThread.run(desc.prompt);
+        const ephTurnResult = await ephThread.run(desc.prompt, {
+          onStreamEvent: this.emitter
+            ? (event) => {
+                this.emitter!.emitStreamEvent(desc.tablePid, desc.name, event);
+                this.lastStreamEventAt.set(desc.tablePid, Date.now());
+                this.streamTokenCount.set(desc.tablePid, (this.streamTokenCount.get(desc.tablePid) ?? 0) + 1);
+              }
+            : undefined,
+        });
         this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
 
