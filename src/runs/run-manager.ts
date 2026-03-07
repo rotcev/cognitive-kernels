@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   KernelRun,
+  KernelRunArtifacts,
   KernelRunInput,
   KernelRunLogChunk,
   KernelRunLogLine,
@@ -18,6 +19,18 @@ import type {
 import type { OsSystemSnapshot } from "../os/types.js";
 
 type SpawnFn = typeof defaultSpawn;
+
+export type KernelRunStorageBackend = {
+  isConnected(): boolean;
+  saveRun?(run: KernelRun): Promise<void> | void;
+  listRuns?(): KernelRun[] | Promise<KernelRun[]>;
+  getRun?(id: string): KernelRun | Promise<KernelRun | undefined> | undefined;
+  getRunEvents?(
+    id: string,
+    options?: ReadRunEventsOptions,
+  ): RuntimeProtocolEvent[] | Promise<RuntimeProtocolEvent[]>;
+  getRunState?(id: string): KernelRunState | Promise<KernelRunState>;
+};
 
 type KernelRunRecord = {
   run: KernelRun;
@@ -31,6 +44,7 @@ export type KernelRunManagerOptions = {
   spawnFn?: SpawnFn;
   scriptPathExistsFn?: (filePath: string) => boolean;
   now?: () => Date;
+  storageBackend?: KernelRunStorageBackend;
 };
 
 export type ReadRunEventsOptions = {
@@ -55,6 +69,7 @@ export class KernelRunManager {
   private readonly spawnFn: SpawnFn;
   private readonly scriptPathExistsFn: (filePath: string) => boolean;
   private readonly now: () => Date;
+  private readonly storageBackend?: KernelRunStorageBackend;
   private readonly records = new Map<string, KernelRunRecord>();
 
   constructor(options: KernelRunManagerOptions = {}) {
@@ -64,23 +79,46 @@ export class KernelRunManager {
     this.spawnFn = options.spawnFn ?? defaultSpawn;
     this.scriptPathExistsFn = options.scriptPathExistsFn ?? existsSync;
     this.now = options.now ?? (() => new Date());
+    this.storageBackend = options.storageBackend;
   }
 
   async initialize(): Promise<void> {
     await mkdir(this.runsRoot, { recursive: true });
+
+    // Load from DB backend first (if available)
+    if (this.storageBackend?.isConnected()) {
+      const backendRuns = this.storageBackend.listRuns?.();
+      if (Array.isArray(backendRuns)) {
+        for (const run of backendRuns) {
+          if (!this.records.has(run.id)) {
+            this.records.set(run.id, { run, child: null });
+          }
+        }
+      }
+    }
+
+    // Then load from filesystem (may add runs not in DB)
     await this.loadPersistedRuns();
     await this.reconcilePersistedRuns();
   }
 
   listRuns(): KernelRun[] {
-    return [...this.records.values()]
-      .map((record) => record.run)
+    const backendRuns = this.readRunsFromBackend();
+    const sourceRuns = backendRuns ?? [...this.records.values()].map((record) => record.run);
+
+    return sourceRuns
+      .slice()
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   getRun(id: string): KernelRun | undefined {
     const exact = this.records.get(id)?.run;
     if (exact) return exact;
+
+    const backendExact = this.readRunFromBackend(id);
+    if (backendExact) {
+      return backendExact;
+    }
 
     if (id.length >= 4) {
       const matches: KernelRun[] = [];
@@ -92,6 +130,48 @@ export class KernelRunManager {
       if (matches.length === 1) {
         return matches[0];
       }
+
+      const backendRuns = this.readRunsFromBackend();
+      if (backendRuns) {
+        const backendMatches = backendRuns.filter((run) => run.id.startsWith(id));
+        if (backendMatches.length === 1) {
+          return backendMatches[0];
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private readRunsFromBackend(): KernelRun[] | null {
+    if (!this.storageBackend?.isConnected() || typeof this.storageBackend.listRuns !== "function") {
+      return null;
+    }
+
+    try {
+      const backendRuns = this.storageBackend.listRuns();
+      if (Array.isArray(backendRuns)) {
+        return backendRuns;
+      }
+    } catch {
+      // Fallback to filesystem/in-memory records.
+    }
+
+    return null;
+  }
+
+  private readRunFromBackend(id: string): KernelRun | undefined {
+    if (!this.storageBackend?.isConnected() || typeof this.storageBackend.getRun !== "function") {
+      return undefined;
+    }
+
+    try {
+      const run = this.storageBackend.getRun(id);
+      if (run && !("then" in run)) {
+        return run;
+      }
+    } catch {
+      // Fallback to filesystem/in-memory records.
     }
 
     return undefined;
@@ -102,21 +182,25 @@ export class KernelRunManager {
 
     const id = randomUUID();
     const createdAt = this.timestamp();
-    const runDir = path.join(this.runsRoot, id);
-    await mkdir(runDir, { recursive: true });
+    const dbOnly = this.storageBackend?.isConnected() === true;
 
-    const artifacts = {
-      runDir,
-      runFilePath: path.join(runDir, "run.json"),
-      outputPath: path.join(runDir, "output.json"),
-      protocolLogPath: path.join(runDir, "protocol.ndjson"),
-      livePath: path.join(runDir, "os-live.json"),
-      snapshotPath: path.join(runDir, "os-snapshot.json"),
-      stdoutPath: path.join(runDir, "stdout.log"),
-      stderrPath: path.join(runDir, "stderr.log"),
-    };
+    let artifacts: KernelRunArtifacts | undefined;
+    if (!dbOnly) {
+      const runDir = path.join(this.runsRoot, id);
+      await mkdir(runDir, { recursive: true });
+      artifacts = {
+        runDir,
+        runFilePath: path.join(runDir, "run.json"),
+        outputPath: path.join(runDir, "output.json"),
+        protocolLogPath: path.join(runDir, "protocol.ndjson"),
+        livePath: path.join(runDir, "os-live.json"),
+        snapshotPath: path.join(runDir, "os-snapshot.json"),
+        stdoutPath: path.join(runDir, "stdout.log"),
+        stderrPath: path.join(runDir, "stderr.log"),
+      };
+    }
 
-    const { command, args, cwd } = this.buildCommand(input, artifacts);
+    const { command, args, cwd } = this.buildCommand(input, id, artifacts);
 
     const run: KernelRun = {
       id,
@@ -134,11 +218,7 @@ export class KernelRunManager {
       artifacts,
     };
 
-    const record: KernelRunRecord = {
-      run,
-      child: null,
-    };
-
+    const record: KernelRunRecord = { run, child: null };
     this.records.set(id, record);
     await this.persistRun(run);
 
@@ -150,11 +230,17 @@ export class KernelRunManager {
 
     record.child = child;
 
-    const stdoutStream = createWriteStream(artifacts.stdoutPath, { flags: "a" });
-    const stderrStream = createWriteStream(artifacts.stderrPath, { flags: "a" });
+    if (artifacts) {
+      const stdoutStream = createWriteStream(artifacts.stdoutPath, { flags: "a" });
+      const stderrStream = createWriteStream(artifacts.stderrPath, { flags: "a" });
+      child.stdout?.pipe(stdoutStream);
+      child.stderr?.pipe(stderrStream);
 
-    child.stdout?.pipe(stdoutStream);
-    child.stderr?.pipe(stderrStream);
+      child.on("exit", () => {
+        stdoutStream.end();
+        stderrStream.end();
+      });
+    }
 
     await this.transitionRun(id, {
       status: "running",
@@ -174,9 +260,7 @@ export class KernelRunManager {
 
     child.on("exit", (code, signal) => {
       const current = this.records.get(id);
-      if (!current) {
-        return;
-      }
+      if (!current) return;
 
       const wasCanceled = current.run.status === "canceled";
       const nextStatus: KernelRunStatus = wasCanceled
@@ -192,8 +276,6 @@ export class KernelRunManager {
         signal,
       });
 
-      stdoutStream.end();
-      stderrStream.end();
       current.child = null;
     });
 
@@ -245,12 +327,27 @@ export class KernelRunManager {
 
   async getRunEvents(id: string, options: ReadRunEventsOptions = {}): Promise<RuntimeProtocolEvent[]> {
     const run = this.requireRecord(id).run;
+    const backendEvents = await this.readRunEventsFromBackend(id, options);
+    if (backendEvents) {
+      return backendEvents;
+    }
+    if (!run.artifacts?.protocolLogPath) return [];
     return readRunEvents(run.artifacts.protocolLogPath, options.limit ?? 200);
   }
 
   async getRunLog(id: string, options: ReadRunLogOptions): Promise<KernelRunLogChunk> {
     const run = this.requireRecord(id).run;
     const filePath = getRunLogPath(run, options.stream);
+    if (!filePath) {
+      return {
+        runId: run.id,
+        stream: options.stream,
+        lines: [],
+        totalLines: 0,
+        nextAfterLine: 0,
+        hasMore: false,
+      };
+    }
     const chunk = await readRunLogChunk(filePath, {
       limit: options.limit,
       afterLine: options.afterLine,
@@ -265,6 +362,15 @@ export class KernelRunManager {
 
   async getRunState(id: string): Promise<KernelRunState> {
     const run = this.requireRecord(id).run;
+    const backendState = await this.readRunStateFromBackend(id);
+    if (backendState) {
+      return backendState;
+    }
+
+    if (!run.artifacts) {
+      return { snapshot: null, source: "missing" };
+    }
+
     try {
       const content = await readFile(run.artifacts.livePath, "utf8");
       return {
@@ -287,6 +393,43 @@ export class KernelRunManager {
     }
   }
 
+  private async readRunEventsFromBackend(
+    id: string,
+    options: ReadRunEventsOptions,
+  ): Promise<RuntimeProtocolEvent[] | null> {
+    if (!this.storageBackend?.isConnected() || typeof this.storageBackend.getRunEvents !== "function") {
+      return null;
+    }
+
+    try {
+      const events = await this.storageBackend.getRunEvents(id, options);
+      if (Array.isArray(events)) {
+        return events;
+      }
+    } catch {
+      // Fallback to filesystem artifact reads.
+    }
+
+    return null;
+  }
+
+  private async readRunStateFromBackend(id: string): Promise<KernelRunState | null> {
+    if (!this.storageBackend?.isConnected() || typeof this.storageBackend.getRunState !== "function") {
+      return null;
+    }
+
+    try {
+      const state = await this.storageBackend.getRunState(id);
+      if (state && (state.source === "live" || state.source === "final" || state.source === "missing")) {
+        return state;
+      }
+    } catch {
+      // Fallback to filesystem artifact reads.
+    }
+
+    return null;
+  }
+
   async getRunSnapshot(id: string): Promise<OsSystemSnapshot | null> {
     const state = await this.getRunState(id);
     return state.snapshot;
@@ -294,10 +437,8 @@ export class KernelRunManager {
 
   private buildCommand(
     input: KernelRunInput,
-    artifacts: {
-      outputPath: string;
-      protocolLogPath: string;
-    },
+    runId: string,
+    artifacts?: { outputPath: string; protocolLogPath: string },
   ): {
     command: string;
     args: string[];
@@ -306,8 +447,14 @@ export class KernelRunManager {
     const cwd = path.resolve(input.cwd);
     const args = [this.scriptPath, "os", "--goal", input.goal, "--json"];
 
-    args.push("--out", artifacts.outputPath);
-    args.push("--protocol-log", artifacts.protocolLogPath);
+    if (artifacts) {
+      args.push("--out", artifacts.outputPath);
+      args.push("--protocol-log", artifacts.protocolLogPath);
+    }
+
+    if (this.storageBackend?.isConnected()) {
+      args.push("--run-id", runId);
+    }
 
     if (input.configPath) {
       args.push("--config", path.resolve(cwd, input.configPath));
@@ -336,7 +483,17 @@ export class KernelRunManager {
   }
 
   private async persistRun(run: KernelRun): Promise<void> {
-    await writeFile(run.artifacts.runFilePath, `${JSON.stringify(run, null, 2)}\n`, "utf8");
+    if (this.storageBackend?.isConnected() && typeof this.storageBackend.saveRun === "function") {
+      try {
+        await this.storageBackend.saveRun(run);
+      } catch {
+        // Filesystem persistence is the source-of-truth fallback.
+      }
+    }
+
+    if (run.artifacts?.runFilePath) {
+      await writeFile(run.artifacts.runFilePath, `${JSON.stringify(run, null, 2)}\n`, "utf8");
+    }
   }
 
   private requireRecord(id: string): KernelRunRecord {
@@ -540,7 +697,8 @@ function resolvePackageRootFromModule(moduleUrl: string): string {
   }
 }
 
-function getRunLogPath(run: KernelRun, stream: KernelRunLogStream): string {
+function getRunLogPath(run: KernelRun, stream: KernelRunLogStream): string | undefined {
+  if (!run.artifacts) return undefined;
   switch (stream) {
     case "stdout":
       return run.artifacts.stdoutPath;

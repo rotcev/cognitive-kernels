@@ -1,5 +1,8 @@
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
 import { startCognitiveKernelsMcpServer } from "./mcp/control-plane.js";
+
+loadDotenv();
 
 type ParsedArgs = {
   flags: Map<string, string | boolean>;

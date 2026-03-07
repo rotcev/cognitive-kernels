@@ -16,6 +16,8 @@ import type {
   RuntimeProtocolEvent,
 } from "../types.js";
 import { KernelRunManager, type KernelRunManagerOptions, type KernelRunState } from "../runs/run-manager.js";
+import { createDbConnection } from "../db/connection.js";
+import { NeonStorageBackend } from "../db/storage-backend.js";
 import {
   buildRunDashboardView,
   buildRunTimelineView,
@@ -563,7 +565,16 @@ export async function createCognitiveKernelsMcpServer(
   controlPlane: CognitiveKernelsControlPlane;
   runManager: KernelRunManager;
 }> {
-  const runManager = new KernelRunManager(options.runManagerOptions);
+  let storageBackend: NeonStorageBackend | undefined;
+  if (process.env.DATABASE_URL) {
+    const db = createDbConnection(process.env.DATABASE_URL);
+    storageBackend = new NeonStorageBackend(db);
+    await storageBackend.connect();
+    await storageBackend.loadRuns();
+    process.stderr.write("MCP: Neon storage backend connected\n");
+  }
+
+  const runManager = new KernelRunManager({ ...options.runManagerOptions, storageBackend });
   await runManager.initialize();
 
   const controlPlane = new CognitiveKernelsControlPlane({

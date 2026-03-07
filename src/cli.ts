@@ -1,7 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
 import { runOsMode } from "./os/entry.js";
+import { KernelRunManager } from "./runs/run-manager.js";
+import { createRunsApiServer } from "./api/server.js";
+import { createDbConnection } from "./db/connection.js";
+import { NeonStorageBackend } from "./db/storage-backend.js";
 import type { BrainProvider } from "./types.js";
+
+loadDotenv();
 
 type ParsedArgs = {
   command?: string;
@@ -19,6 +26,9 @@ async function main(): Promise<void> {
   switch (parsed.command) {
     case "os":
       await handleOsCommand(parsed.flags);
+      return;
+    case "serve":
+      await handleServeCommand(parsed.flags);
       return;
     default:
       printUsage();
@@ -41,6 +51,7 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
 
   const protocolLogPath = protocolLogPathRaw ? path.resolve(cwd, protocolLogPathRaw) : undefined;
   const outPath = outPathRaw ? path.resolve(cwd, outPathRaw) : undefined;
+  const runId = readStringFlag(flags, "--run-id");
 
   const snapshot = await runOsMode({
     goal,
@@ -48,6 +59,7 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
     protocolLogPath,
     cwd,
     provider,
+    runId,
   });
 
   const serialized = JSON.stringify(snapshot, null, 2);
@@ -71,6 +83,44 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
       `Tokens: ${snapshot.progressMetrics.totalTokensUsed}`,
     ].join("\n") + "\n",
   );
+}
+
+async function handleServeCommand(flags: Map<string, string | boolean>): Promise<void> {
+  const cwd = path.resolve(readStringFlag(flags, "--cwd") ?? process.cwd());
+  const configPath = readStringFlag(flags, "--config");
+  const host = readStringFlag(flags, "--host") ?? "127.0.0.1";
+  const port = Number(readStringFlag(flags, "--port") ?? "3100");
+
+  let storageBackend: NeonStorageBackend | undefined;
+  if (process.env.DATABASE_URL) {
+    const db = createDbConnection(process.env.DATABASE_URL);
+    storageBackend = new NeonStorageBackend(db);
+    await storageBackend.connect();
+    await storageBackend.loadRuns();
+    process.stderr.write(`Neon storage backend connected\n`);
+  }
+
+  const runManager = new KernelRunManager({ storageBackend });
+  await runManager.initialize();
+
+  const server = await createRunsApiServer({
+    runManager,
+    defaultCwd: cwd,
+    defaultConfigPath: configPath,
+    host,
+    port,
+  });
+
+  process.stderr.write(`cognitive-kernels API listening on ${server.baseUrl}\n`);
+
+  // Keep alive until SIGINT/SIGTERM
+  const shutdown = async () => {
+    process.stderr.write("\nShutting down...\n");
+    await server.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -126,7 +176,8 @@ function printUsage(): void {
   process.stderr.write(
     [
       "Usage:",
-      "  cognitive-kernels os --goal <text> [--config <path>] [--cwd <path>] [--provider claude|codex] [--protocol-log <path>] [--out <path>] [--json]",
+      "  cognitive-kernels os --goal <text> [--config <path>] [--cwd <path>] [--provider claude|codex] [--protocol-log <path>] [--out <path>] [--run-id <id>] [--json]",
+      "  cognitive-kernels serve [--port <number>] [--host <address>] [--cwd <path>] [--config <path>]",
     ].join("\n") + "\n",
   );
 }

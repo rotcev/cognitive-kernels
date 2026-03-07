@@ -38,6 +38,7 @@ export const PROCESS_TURN_OUTPUT_SCHEMA = {
               "self_report",
               "spawn_system",
               "spawn_kernel",
+              "cancel_defer",
             ],
           },
           // sleep
@@ -138,7 +139,7 @@ export const METACOG_OUTPUT_SCHEMA = {
           kind: {
             type: "string",
             enum: [
-              "spawn", "defer", "kill", "reprioritize", "rewrite_dag", "learn",
+              "spawn", "defer", "cancel_defer", "kill", "reprioritize", "rewrite_dag", "learn",
               "define_blueprint", "fork", "evolve_blueprint", "record_strategy",
               "halt", "noop", "delegate_evaluation",
               "spawn_system", "spawn_kernel",

@@ -1,12 +1,17 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
 import { parse as parseToml } from "smol-toml";
 import { parseOsConfig } from "./config.js";
 import { OsKernel } from "./kernel.js";
 import { OsProtocolEmitter } from "./protocol-emitter.js";
 import { createBrain } from "../brain/create-brain.js";
+import { createDbConnection } from "../db/connection.js";
+import { NeonStorageBackend } from "../db/storage-backend.js";
 import type { OsSystemSnapshot } from "./types.js";
 import type { BrainRuntimeConfig } from "../types.js";
+
+loadDotenv();
 
 export type OsModeInput = {
   goal: string;
@@ -14,6 +19,7 @@ export type OsModeInput = {
   protocolLogPath?: string;
   cwd: string;
   provider?: "claude" | "codex";
+  runId?: string;
 };
 
 export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
@@ -79,10 +85,38 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
   const client = createBrain(brainConfig, browserMcpMap);
 
   let emitter: OsProtocolEmitter | undefined;
-  if (input.protocolLogPath) {
+
+  if (input.protocolLogPath && process.env.DATABASE_URL) {
+    // Dual-write: filesystem + DB
+    const db = createDbConnection(process.env.DATABASE_URL);
+    const backend = new NeonStorageBackend(db);
+    await backend.connect();
     const snapshotPath = path.join(path.dirname(input.protocolLogPath), "os-snapshot.json");
     const livePath = path.join(path.dirname(input.protocolLogPath), "os-live.json");
-    emitter = new OsProtocolEmitter(input.protocolLogPath, snapshotPath, livePath);
+    emitter = new OsProtocolEmitter({
+      protocolLogPath: input.protocolLogPath,
+      snapshotPath,
+      livePath,
+      storageBackend: backend,
+    });
+  } else if (input.protocolLogPath) {
+    // Filesystem only
+    const snapshotPath = path.join(path.dirname(input.protocolLogPath), "os-snapshot.json");
+    const livePath = path.join(path.dirname(input.protocolLogPath), "os-live.json");
+    emitter = new OsProtocolEmitter({
+      protocolLogPath: input.protocolLogPath,
+      snapshotPath,
+      livePath,
+    });
+  } else if (process.env.DATABASE_URL && input.runId) {
+    // DB-only mode
+    const db = createDbConnection(process.env.DATABASE_URL);
+    const backend = new NeonStorageBackend(db);
+    await backend.connect();
+    emitter = new OsProtocolEmitter({
+      storageBackend: backend,
+      runId: input.runId,
+    });
   }
 
   const kernel = new OsKernel(osConfig, client, input.cwd, emitter, browserMcpConfig);

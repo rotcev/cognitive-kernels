@@ -158,5 +158,5 @@ export type KernelRun = {
   command: string;
   args: string[];
   input: KernelRunInput;
-  artifacts: KernelRunArtifacts;
+  artifacts?: KernelRunArtifacts;
 };

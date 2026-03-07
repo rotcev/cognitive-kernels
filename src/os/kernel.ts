@@ -95,6 +95,10 @@ export class OsKernel {
   private readonly counterfactualSim = new CounterfactualSimulator(20);
   /** Consecutive ticks where zero processes were scheduled — stall detection. */
   private consecutiveIdleTicks = 0;
+  /** Tick number of the last orchestrator force-wake — prevents runaway deadlock loops. */
+  private lastOrchestratorForceWakeTick = -1;
+  /** Blackboard key count at the last orchestrator force-wake — detects meaningful progress. */
+  private bbKeysAtLastForceWake = 0;
   /** Pending ephemeral descriptors — fired async, drained after process turns complete. */
   private pendingEphemerals: Array<{
     pid: string;
@@ -391,7 +395,7 @@ export class OsKernel {
 
     this.shutdown();
     const snap = this.snapshot();
-    this.emitter?.writeSnapshot(snap);
+    this.emitter?.saveSnapshot(snap);
     await this.emitter?.close();
     return snap;
   }
@@ -849,6 +853,10 @@ export class OsKernel {
     //         zero living children and zero pending ephemerals, and it's past the boot
     //         phase (tickCount > 1), force-wake it. This catches the case where the
     //         orchestrator advances currentPhase but spawns zero processes for it.
+    //
+    //         Deferral-aware: if there are pending deferrals AND the blackboard hasn't
+    //         changed since the last force-wake, the orchestrator is waiting (not stuck).
+    //         Only force-wake again after a cooldown of 5 ticks or if new BB keys appear.
     const orchestrator = this.table.getAll().find(p => !p.parentPid && p.type === "lifecycle");
     if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
       const livingChildren = this.table.getAll().filter(
@@ -856,12 +864,22 @@ export class OsKernel {
       );
       const pendingEphemerals = this.pendingEphemerals.length;
       if (livingChildren.length === 0 && pendingEphemerals === 0) {
-        this.supervisor.activate(orchestrator.pid);
-        this.emitter?.emit({
-          action: "os_process_event",
-          status: "completed",
-          message: `deadlock_detected: orchestrator idle with 0 living children and 0 pending ephemerals — force-waking`,
-        });
+        const pendingDeferrals = this.deferrals.size;
+        const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
+        const bbChanged = currentBbKeys !== this.bbKeysAtLastForceWake;
+        const ticksSinceLastForceWake = this.scheduler.tickCount - this.lastOrchestratorForceWakeTick;
+        const cooldownExpired = ticksSinceLastForceWake >= 5;
+
+        if (pendingDeferrals === 0 || bbChanged || cooldownExpired) {
+          this.supervisor.activate(orchestrator.pid);
+          this.lastOrchestratorForceWakeTick = this.scheduler.tickCount;
+          this.bbKeysAtLastForceWake = currentBbKeys;
+          this.emitter?.emit({
+            action: "os_process_event",
+            status: "completed",
+            message: `deadlock_detected: orchestrator idle with 0 living children, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (bbChanged=${bbChanged}, cooldown=${cooldownExpired})`,
+          });
+        }
       }
     }
 
@@ -1127,7 +1145,7 @@ export class OsKernel {
 
     if (this.emitter && this.scheduler.tickCount % this.snapshotCadence === 0) {
       this.emitter.emit({ action: "os_snapshot", status: "completed", message: `tick=${this.scheduler.tickCount}` });
-      this.emitter.writeSnapshot(this.snapshot());
+      this.emitter.saveSnapshot(this.snapshot());
     }
   }
 
@@ -1493,12 +1511,26 @@ export class OsKernel {
 
             // Conditional spawn: if condition is present, register as deferral
             if (cmd.condition) {
+              // Dedup: reject if same parent already has a pending deferral with this spawn name
+              const dupDefer = [...this.deferrals.values()].find(
+                d => d.descriptor.name === cmd.descriptor.name && d.registeredByPid === pid
+              );
+              if (dupDefer) {
+                this.emitter?.emit({
+                  action: "os_command_rejected",
+                  status: "completed",
+                  agentId: pid,
+                  message: `defer dedup: "${cmd.descriptor.name}" already has pending deferral id=${dupDefer.id} from same parent`,
+                });
+                break;
+              }
               const ds: DeferEntry = {
                 id: randomUUID(),
                 descriptor: resolvedDescriptor,
                 condition: cmd.condition,
                 registeredAt: new Date().toISOString(),
                 registeredByTick: this.scheduler.tickCount,
+                registeredByPid: pid,
                 reason: `conditional spawn_child from ${pid}: ${cmd.descriptor.name}`,
                 maxWaitTicks: cmd.maxWaitTicks,
               };
@@ -1578,12 +1610,26 @@ export class OsKernel {
                   ? conditions[0]!
                   : { type: "all_of", conditions };
 
+                // Dedup: reject if same parent already has a pending deferral with this spawn name
+                const dupGraphDefer = [...this.deferrals.values()].find(
+                  d => d.descriptor.name === node.name && d.registeredByPid === pid
+                );
+                if (dupGraphDefer) {
+                  this.emitter?.emit({
+                    action: "os_command_rejected",
+                    status: "completed",
+                    agentId: pid,
+                    message: `defer dedup: graph node "${node.name}" already has pending deferral id=${dupGraphDefer.id} from same parent`,
+                  });
+                  continue;
+                }
                 const ds: DeferEntry = {
                   id: randomUUID(),
                   descriptor: nodeDescriptor,
                   condition,
                   registeredAt: new Date().toISOString(),
                   registeredByTick: this.scheduler.tickCount,
+                  registeredByPid: pid,
                   reason: `graph node "${node.name}" after=[${node.after.join(", ")}]`,
                 };
                 this.deferrals.set(ds.id, ds);
@@ -1808,6 +1854,32 @@ export class OsKernel {
               agentId: kernelChild.pid,
               agentName: kernelChild.name,
               message: `goal=${cmd.goal} parent=${pid}`,
+            });
+            break;
+          }
+
+          case "cancel_defer": {
+            // Cancel pending deferrals by spawn name, scoped to this process as registrant
+            const matches = [...this.deferrals.entries()].filter(
+              ([, d]) => d.descriptor.name === cmd.name && d.registeredByPid === pid
+            );
+            if (matches.length === 0) {
+              this.emitter?.emit({
+                action: "os_command_rejected",
+                status: "completed",
+                agentId: pid,
+                message: `cancel_defer: no pending deferral with name "${cmd.name}" from this process`,
+              });
+              break;
+            }
+            for (const [id] of matches) {
+              this.deferrals.delete(id);
+            }
+            this.emitter?.emit({
+              action: "os_defer",
+              status: "completed",
+              agentId: pid,
+              message: `cancel_defer: removed ${matches.length} deferral(s) for "${cmd.name}" reason="${cmd.reason}"`,
             });
             break;
           }
@@ -2074,6 +2146,18 @@ export class OsKernel {
       }
 
       case "defer": {
+        // Dedup: reject if a pending deferral with the same spawn name already exists
+        const dupDefer = [...this.deferrals.values()].find(
+          d => d.descriptor.name === cmd.descriptor.name
+        );
+        if (dupDefer) {
+          this.emitter?.emit({
+            action: "os_command_rejected",
+            status: "completed",
+            message: `defer dedup: "${cmd.descriptor.name}" already has pending deferral id=${dupDefer.id} — use cancel_defer first to replace`,
+          });
+          break;
+        }
         const ds: DeferEntry = {
           id: randomUUID(),
           descriptor: {
@@ -2092,6 +2176,29 @@ export class OsKernel {
           action: "os_defer",
           status: "started",
           message: `registered id=${ds.id} name=${cmd.descriptor.name} condition=${JSON.stringify(cmd.condition)} reason="${cmd.reason}"`,
+        });
+        break;
+      }
+
+      case "cancel_defer": {
+        const matches = [...this.deferrals.entries()].filter(
+          ([, d]) => d.descriptor.name === cmd.name
+        );
+        if (matches.length === 0) {
+          this.emitter?.emit({
+            action: "os_command_rejected",
+            status: "completed",
+            message: `cancel_defer: no pending deferral with name "${cmd.name}"`,
+          });
+          break;
+        }
+        for (const [id] of matches) {
+          this.deferrals.delete(id);
+        }
+        this.emitter?.emit({
+          action: "os_defer",
+          status: "completed",
+          message: `cancel_defer: removed ${matches.length} deferral(s) for "${cmd.name}" reason="${cmd.reason}"`,
         });
         break;
       }
