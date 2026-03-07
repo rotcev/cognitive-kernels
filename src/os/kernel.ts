@@ -2307,15 +2307,38 @@ export class OsKernel {
         });
         this.ephemeralThreads.set(desc.tablePid, ephThread);
 
-        const ephTurnResult = await ephThread.run(desc.prompt, {
-          onStreamEvent: this.emitter
-            ? (event) => {
-                this.emitter!.emitStreamEvent(desc.tablePid, desc.name, event);
-                this.lastStreamEventAt.set(desc.tablePid, Date.now());
-                this.streamTokenCount.set(desc.tablePid, (this.streamTokenCount.get(desc.tablePid) ?? 0) + 1);
-              }
-            : undefined,
+        // Emit a synthetic "started" event so the UI shows immediate feedback
+        this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
+          type: "text_delta",
+          text: `Starting inference (model=${desc.model})...\n`,
         });
+
+        // Heartbeat: emit periodic progress while waiting for LLM response
+        let heartbeatStopped = false;
+        const heartbeatInterval = setInterval(() => {
+          if (heartbeatStopped) return;
+          const elapsed = Math.round((Date.now() - desc.startTime) / 1000);
+          this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
+            type: "text_delta",
+            text: `⏳ Waiting for response... (${elapsed}s elapsed)\n`,
+          });
+        }, 15_000);
+
+        let ephTurnResult: import("../types.js").TurnResult;
+        try {
+          ephTurnResult = await ephThread.run(desc.prompt, {
+            onStreamEvent: this.emitter
+              ? (event) => {
+                  this.emitter!.emitStreamEvent(desc.tablePid, desc.name, event);
+                  this.lastStreamEventAt.set(desc.tablePid, Date.now());
+                  this.streamTokenCount.set(desc.tablePid, (this.streamTokenCount.get(desc.tablePid) ?? 0) + 1);
+                }
+              : undefined,
+          });
+        } finally {
+          heartbeatStopped = true;
+          clearInterval(heartbeatInterval);
+        }
         this.ephemeralThreads.delete(desc.tablePid);
         const ephDurationMs = Date.now() - desc.startTime;
 
