@@ -1719,6 +1719,7 @@ export class OsKernel {
    * Attaches a completion handler that fires when the LLM responds.
    */
   private submitProcess(proc: OsProcess): void {
+    if (this.halted) return;
     if (this.inflight.has(proc.pid)) return;
 
     this.turnStartTimes.set(proc.pid, Date.now());
@@ -1746,12 +1747,16 @@ export class OsKernel {
         this.inflight.delete(proc.pid);
         this.turnStartTimes.delete(proc.pid);
         this.turnKillCallbacks.delete(proc.pid);
+        this.lastStreamEventAt.delete(proc.pid);
+        this.streamTokenCount.delete(proc.pid);
         void this.onProcessComplete(result);
       },
       err => {
         this.inflight.delete(proc.pid);
         this.turnStartTimes.delete(proc.pid);
         this.turnKillCallbacks.delete(proc.pid);
+        this.lastStreamEventAt.delete(proc.pid);
+        this.streamTokenCount.delete(proc.pid);
         void this.onProcessComplete({
           pid: proc.pid, success: false,
           response: err instanceof Error ? err.message : String(err),
@@ -1819,6 +1824,7 @@ export class OsKernel {
    * Non-blocking — returns immediately after submitting.
    */
   private doSchedulingPass(): void {
+    if (this.halted) return;
     // Inject context snapshots into executors
     const bbEntries = this.ipcBus.bbReadAll();
     const bbSnapshot: Record<string, unknown> = {};
