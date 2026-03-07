@@ -59,6 +59,7 @@ import { CounterfactualSimulator } from "./counterfactual-simulator.js";
 import type { KernelAction } from "./counterfactual-simulator.js";
 import type { BlueprintTaskRecord } from "./types.js";
 import { AwarenessDaemon } from "./awareness-daemon.js";
+import { AsyncMutex } from "./async-mutex.js";
 
 
 export class OsKernel {
@@ -162,6 +163,16 @@ export class OsKernel {
   private metacogInFlight = false;
   /** Registry of deferrals — processes waiting for conditions to be met before spawning. */
   private deferrals: Map<string, DeferEntry> = new Map();
+  /** Mutex for serializing state mutations in event-driven mode. */
+  private mutex = new AsyncMutex();
+  /** In-flight LLM execution promises keyed by PID. */
+  private inflight = new Map<string, Promise<OsProcessTurnResult>>();
+  /** Resolve function for the event-loop promise — called when shouldHalt() becomes true. */
+  private haltResolve: (() => void) | null = null;
+  /** Periodic housekeeping timer (replaces tick-based scheduling). */
+  private housekeepTimer: ReturnType<typeof setInterval> | null = null;
+  /** Periodic snapshot timer. */
+  private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
   constructor(
@@ -390,17 +401,84 @@ export class OsKernel {
     // Runs before the first tick so the scheduler has learned strategies from tick 1.
     await this.matchStrategiesAtBoot();
 
-    this.startWatchdog();
-    while (!this.shouldHalt()) {
-      await this.tick();
-    }
-    this.stopWatchdog();
+    // Event-driven loop
+    await this.eventLoop();
 
     this.shutdown();
     const snap = this.snapshot();
     this.emitter?.saveSnapshot(snap);
     await this.emitter?.close();
     return snap;
+  }
+
+  private async eventLoop(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.haltResolve = () => {
+        this.stopEventLoop();
+        // Wait for any in-flight processes to settle, then resolve
+        if (this.inflight.size > 0) {
+          void Promise.allSettled([...this.inflight.values()]).then(() => resolve());
+        } else {
+          resolve();
+        }
+      };
+
+      // Start background timers
+      this.housekeepTimer = setInterval(() => {
+        void this.safeHousekeep();
+      }, 500);
+
+      this.snapshotTimer = setInterval(() => {
+        this.safeSnapshotWrite();
+      }, 10_000);
+
+      this.startWatchdog();
+
+      // Initial housekeep + scheduling pass
+      this.housekeep();
+      this.doSchedulingPass();
+    });
+  }
+
+  private stopEventLoop(): void {
+    if (this.housekeepTimer) { clearInterval(this.housekeepTimer); this.housekeepTimer = null; }
+    if (this.snapshotTimer) { clearInterval(this.snapshotTimer); this.snapshotTimer = null; }
+    this.stopWatchdog();
+  }
+
+  /**
+   * Safe wrapper for housekeep timer — never let an error crash the loop.
+   */
+  private async safeHousekeep(): Promise<void> {
+    if (this.halted) return;
+    const release = await this.mutex.acquire();
+    try {
+      this.housekeep();
+      if (this.shouldHalt()) { this.haltResolve?.(); return; }
+      this.doSchedulingPass();
+    } catch (err) {
+      this.emitter?.emit({
+        action: "os_process_event",
+        status: "failed",
+        message: `housekeep error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      release();
+    }
+  }
+
+  private safeSnapshotWrite(): void {
+    if (this.halted) return;
+    try {
+      const snap = this.snapshot();
+      this.emitter?.emit({
+        action: "os_snapshot", status: "completed",
+        message: `wall_clock_snapshot`,
+      });
+      this.emitter?.saveSnapshot(snap);
+    } catch {
+      // Non-critical
+    }
   }
 
   /** Start the watchdog timer — fires independently of the tick loop. */
@@ -612,6 +690,7 @@ export class OsKernel {
     }
   }
 
+  /** @deprecated Use event-driven loop instead. Kept for test compatibility. */
   async tick(): Promise<void> {
     const tickNum = this.scheduler.tickCount + 1;
     const processCount = this.table.getAll().length;
@@ -1214,6 +1293,443 @@ export class OsKernel {
     if (this.emitter && this.scheduler.tickCount % this.snapshotCadence === 0) {
       this.emitter.emit({ action: "os_snapshot", status: "completed", message: `tick=${this.scheduler.tickCount}` });
       this.emitter.saveSnapshot(this.snapshot());
+    }
+  }
+
+  /**
+   * Periodic housekeeping — runs on a wall-clock timer.
+   * Handles: sleeper wakeup, checkpoint restore, deferral evaluation,
+   * IPC flush + wake, zombie reaping, daemon restarts, DAG rebuild,
+   * strategy application, stall detection, deadlock recovery.
+   */
+  private housekeep(): void {
+    // 0. Reset per-tick state
+    this.tickSignals = [];
+
+    // 1. Scheduler tick (increments pass counter)
+    this.scheduler.tick();
+
+    // 1b. Emit periodic tick cadence signals
+    const tickNum = this.scheduler.tickCount;
+    const cadences = this.config.kernel.tickSignalCadences ?? [1, 5, 10];
+    for (const cadence of cadences) {
+      if (tickNum % cadence === 0) {
+        const signalName = `tick:${cadence}`;
+        this.ipcBus.emitSignal(signalName, "kernel", { tick: tickNum, cadence });
+        this.tickSignals.push(signalName);
+      }
+    }
+
+    // 2. Wake expired sleepers
+    this.supervisor.wakeExpiredSleepers();
+
+    // 2b. Restore checkpointed processes
+    for (const proc of this.table.getByState("checkpoint")) {
+      this.table.transitionState(proc.pid, "running");
+    }
+
+    // 2c. Check deferral conditions
+    this.processDeferrals();
+
+    // 3. Flush IPC bus — get woken PIDs, wake idle processes
+    const { wokenPids } = this.ipcBus.flush();
+    for (const pid of wokenPids) {
+      const proc = this.table.get(pid);
+      if (proc && proc.state === "idle") {
+        this.supervisor.activate(pid);
+      }
+    }
+
+    // 4. Reap zombies
+    this.supervisor.reapZombies();
+
+    // 5. Handle daemon restarts
+    this.supervisor.handleRestarts();
+
+    // 6. Rebuild DAG
+    this.dagEngine.buildFromProcesses(this.table.getAll());
+
+    // 6b. Apply strategies
+    const applicable = this.getApplicableStrategies();
+    if (applicable.length > 0) {
+      this.scheduler.applyStrategies(applicable);
+      this.activeStrategyId = applicable[0]!.id;
+    }
+    this.router.setStrategiesSnapshot(applicable);
+
+    // Stall detection — in event-driven model, "selected.length === 0" becomes "inflight.size === 0"
+    if (this.inflight.size === 0) {
+      this.consecutiveIdleTicks += 1;
+      if (this.consecutiveIdleTicks >= 3) {
+        const idleProcs = this.table.getByState("idle");
+        if (idleProcs.length > 0) {
+          for (const proc of idleProcs) {
+            this.supervisor.activate(proc.pid);
+          }
+          this.emitter?.emit({
+            action: "os_process_event",
+            status: "completed",
+            message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${this.consecutiveIdleTicks} empty housekeep cycles`,
+          });
+          this.consecutiveIdleTicks = 0;
+        }
+      }
+    } else {
+      this.consecutiveIdleTicks = 0;
+    }
+
+    // Phase-transition deadlock detection
+    const orchestrator = this.table.getAll().find(p => !p.parentPid && p.type === "lifecycle");
+    if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
+      const livingChildren = this.table.getAll().filter(
+        p => p.parentPid === orchestrator.pid && p.state !== "dead"
+      );
+      const pendingEphemerals = this.pendingEphemerals.length;
+      if (livingChildren.length === 0 && pendingEphemerals === 0) {
+        const pendingDeferrals = this.deferrals.size;
+        const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
+        const bbChanged = currentBbKeys !== this.bbKeysAtLastForceWake;
+        const ticksSinceLastForceWake = this.scheduler.tickCount - this.lastOrchestratorForceWakeTick;
+        const cooldownExpired = ticksSinceLastForceWake >= 5;
+
+        if (pendingDeferrals === 0 || bbChanged || cooldownExpired) {
+          this.supervisor.activate(orchestrator.pid);
+          this.lastOrchestratorForceWakeTick = this.scheduler.tickCount;
+          this.bbKeysAtLastForceWake = currentBbKeys;
+          this.emitter?.emit({
+            action: "os_process_event",
+            status: "completed",
+            message: `deadlock_detected: orchestrator idle with 0 living children, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (bbChanged=${bbChanged}, cooldown=${cooldownExpired})`,
+          });
+        }
+      }
+    }
+
+    // Dead executive recovery
+    const deadOrchestrator = this.table.getAll().find(
+      p => !p.parentPid && p.type === "lifecycle" && p.state === "dead" && p.name === "goal-orchestrator"
+    );
+    if (deadOrchestrator) {
+      const livingGoalProcesses = this.table.getAll().filter(
+        p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type !== "daemon"
+      );
+      const hasPendingDeferrals = this.deferrals.size > 0;
+
+      if (livingGoalProcesses.length > 0 || hasPendingDeferrals) {
+        const newOrch = this.supervisor.spawn({
+          type: "lifecycle",
+          name: "goal-orchestrator",
+          objective: this.goal,
+          priority: deadOrchestrator.priority,
+          model: deadOrchestrator.model,
+          workingDir: this.workingDir,
+        });
+        this.supervisor.activate(newOrch.pid);
+
+        // Re-parent orphaned lifecycle children so child:done signals route correctly
+        for (const proc of livingGoalProcesses) {
+          if (!proc.parentPid && proc.type === "lifecycle") {
+            proc.parentPid = newOrch.pid;
+            newOrch.children.push(proc.pid);
+          }
+        }
+
+        this.addTrigger("process_failed");
+
+        this.emitter?.emit({
+          action: "os_process_event",
+          status: "completed",
+          message: `dead_executive_recovery: restarted orchestrator as ${newOrch.pid}, reparented ${livingGoalProcesses.filter(p => p.type === "lifecycle").length} orphans, ${this.deferrals.size} deferrals pending`,
+        });
+      }
+    }
+
+    // Telemetry collection + perf analysis (if enabled)
+    if (this.config.kernel.telemetryEnabled) {
+      this.telemetryCollector.onTick(this.snapshot());
+      const telemetrySnap = this.telemetryCollector.getSnapshot();
+      const analyzer = new PerfAnalyzer(telemetrySnap);
+      this.lastPerfRecommendations = analyzer.recommend();
+
+      if (this.lastPerfRecommendations.length > 0) {
+        const selfOpt = new SelfOptimizer(
+          this.lastPerfRecommendations,
+          telemetrySnap,
+          this.config.kernel.tokenBudget,
+        );
+        const optCommands = selfOpt.optimize();
+        for (const cmd of optCommands) {
+          try {
+            this.executeMetacogCommand(cmd);
+          } catch {
+            // Individual command failure shouldn't stop others
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Submit a single process for non-blocking LLM execution.
+   * Attaches a completion handler that fires when the LLM responds.
+   */
+  private submitProcess(proc: OsProcess): void {
+    if (this.inflight.has(proc.pid)) return;
+
+    this.turnStartTimes.set(proc.pid, Date.now());
+
+    const execPromise = (!proc.backend || proc.backend.kind === "llm")
+      ? this.executor.executeOne(proc)
+      : this.router.executeOne(proc);
+
+    // Wrap with kill token for watchdog
+    let killResolve!: (r: OsProcessTurnResult) => void;
+    const killPromise = new Promise<OsProcessTurnResult>(r => { killResolve = r; });
+    this.turnKillCallbacks.set(proc.pid, () => {
+      killResolve({
+        pid: proc.pid, success: false,
+        response: "killed by watchdog metacog",
+        tokensUsed: 0, commands: [],
+      });
+    });
+
+    const racedPromise = Promise.race([execPromise, killPromise]);
+    this.inflight.set(proc.pid, racedPromise);
+
+    racedPromise.then(
+      result => {
+        this.inflight.delete(proc.pid);
+        this.turnStartTimes.delete(proc.pid);
+        this.turnKillCallbacks.delete(proc.pid);
+        void this.onProcessComplete(result);
+      },
+      err => {
+        this.inflight.delete(proc.pid);
+        this.turnStartTimes.delete(proc.pid);
+        this.turnKillCallbacks.delete(proc.pid);
+        void this.onProcessComplete({
+          pid: proc.pid, success: false,
+          response: err instanceof Error ? err.message : String(err),
+          tokensUsed: 0, commands: [],
+        });
+      }
+    );
+  }
+
+  /**
+   * Handle a completed process. Serialized through mutex —
+   * only one result processed at a time.
+   */
+  private async onProcessComplete(result: OsProcessTurnResult): Promise<void> {
+    if (this.halted) return;
+    const release = await this.mutex.acquire();
+    try {
+      await this.processOneResult(result);
+
+      // Fire-and-forget ephemerals spawned by this process's commands
+      void this.drainPendingEphemerals();
+
+      // Flush IPC — wake processes unblocked by bb writes / signals
+      const { wokenPids } = this.ipcBus.flush();
+      for (const pid of wokenPids) {
+        const p = this.table.get(pid);
+        if (p && p.state === "idle") {
+          this.supervisor.activate(pid);
+        }
+      }
+
+      // Also check signal-based wakes
+      const recentSignals = this.collectRecentSignalNames();
+      if (recentSignals.length > 0) {
+        this.supervisor.wakeOnCondition(recentSignals);
+      }
+
+      // Rebuild DAG to reflect new processes / state changes
+      this.dagEngine.buildFromProcesses(this.table.getAll());
+
+      // Detect selected blueprint from blackboard
+      this.detectSelectedBlueprint();
+
+      // Emit live state for Lens
+      this.emitter?.writeLiveState(this.snapshot());
+
+      // Update tickInProgress for watchdog
+      this.tickInProgress = this.inflight.size > 0;
+
+      // Check halt
+      if (this.shouldHalt()) {
+        this.haltResolve?.();
+        return;
+      }
+
+      // Reschedule — new processes may be runnable now
+      this.doSchedulingPass();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Evaluate what's runnable and submit up to maxConcurrent processes.
+   * Non-blocking — returns immediately after submitting.
+   */
+  private doSchedulingPass(): void {
+    // Inject context snapshots into executors
+    const bbEntries = this.ipcBus.bbReadAll();
+    const bbSnapshot: Record<string, unknown> = {};
+    for (const entry of bbEntries) bbSnapshot[entry.key] = entry.value;
+    this.executor.setBlackboardSnapshot(bbSnapshot);
+    this.router.setBlackboardSnapshot(bbSnapshot);
+    this.executor.setProcessTableSnapshot(this.table.getAll());
+    this.router.setProcessTableSnapshot(this.table.getAll());
+
+    const relevantHeuristics = this.memoryStore.query(this.goal);
+    this.executor.setHeuristicsSnapshot(relevantHeuristics);
+    this.router.setHeuristicsSnapshot(relevantHeuristics);
+    this.scheduler.setHeuristics(relevantHeuristics);
+
+    // Inject blueprints
+    const rankedBlueprints = this.memoryStore.queryBlueprints(this.goal);
+    const taskClass = this.extractGoalTags();
+    if (taskClass.length > 0 && rankedBlueprints.length > 1) {
+      try {
+        const recommended = this.memoryStore.recommendBlueprint(taskClass, rankedBlueprints);
+        const reranked = [recommended, ...rankedBlueprints.filter(bp => bp.id !== recommended.id)];
+        this.executor.setBlueprintsSnapshot(reranked);
+        this.router.setBlueprintsSnapshot(reranked);
+      } catch {
+        this.executor.setBlueprintsSnapshot(rankedBlueprints);
+        this.router.setBlueprintsSnapshot(rankedBlueprints);
+      }
+    } else {
+      this.executor.setBlueprintsSnapshot(rankedBlueprints);
+      this.router.setBlueprintsSnapshot(rankedBlueprints);
+    }
+
+    // Process injected commands
+    this.processInjectedCommands();
+
+    // Select runnable
+    const topology = this.dagEngine.currentTopology();
+    const selected = this.scheduler.selectRunnable(
+      this.table.getAll(), topology,
+    );
+
+    // Stamp active strategy
+    if (this.activeStrategyId) {
+      for (const p of selected) p.activeStrategyId = this.activeStrategyId;
+    }
+
+    // Submit (skip already in-flight)
+    for (const proc of selected) {
+      if (this.inflight.has(proc.pid)) continue;
+      if (this.inflight.size >= this.config.kernel.maxConcurrentProcesses) break;
+      this.submitProcess(proc);
+    }
+
+    // Update tickInProgress flag for watchdog
+    this.tickInProgress = this.inflight.size > 0;
+  }
+
+  /**
+   * Detect selected blueprint from blackboard (written by goal-orchestrator).
+   * Extracted from tick step 8a for reuse in event-driven completion handler.
+   */
+  private detectSelectedBlueprint(): void {
+    if (!this.selectedBlueprintInfo) {
+      const bbEntry = this.ipcBus.bbRead("selected_blueprint", "kernel");
+      if (bbEntry && typeof bbEntry.value === "string") {
+        const bpValue = bbEntry.value;
+        if (bpValue.startsWith("novel:")) {
+          const novelName = bpValue.slice("novel:".length) || "novel-topology";
+          const allProcs = this.table.getAll();
+          const novelBp: TopologyBlueprint = {
+            id: randomUUID(),
+            name: novelName,
+            description: `Novel topology auto-registered from run ${this.runId}`,
+            source: "orchestrator",
+            applicability: {
+              goalPatterns: this.extractGoalTags(),
+              minSubtasks: 1,
+              maxSubtasks: Math.max(allProcs.length, 1),
+              requiresSequencing: false,
+            },
+            roles: allProcs
+              .filter((p) => p.type !== "daemon" && p.parentPid !== null)
+              .map((p) => ({
+                name: p.name,
+                type: p.type,
+                cardinality: "one" as const,
+                priorityOffset: p.priority - 50,
+                objectiveTemplate: p.objective.slice(0, 120),
+                spawnTiming: "immediate" as const,
+              })),
+            gatingStrategy: "signal-gate" as BlueprintGatingStrategy,
+            priorityStrategy: "gradient-2pt",
+            stats: {
+              uses: 0,
+              successes: 0,
+              failures: 0,
+              avgTokenEfficiency: 0,
+              avgWallTimeMs: 0,
+              lastUsedAt: "",
+              alpha: 1,
+              beta: 1,
+              tagStats: {},
+            },
+            learnedAt: new Date().toISOString(),
+          };
+          this.memoryStore.addBlueprint(novelBp);
+          this.selectedBlueprintInfo = {
+            id: novelBp.id,
+            name: novelBp.name,
+            source: "orchestrator",
+            successRate: 0,
+            instantiatedRoles: novelBp.roles.map((r) => r.name),
+            adapted: true,
+          };
+          this.emitter?.emit({
+            action: "os_blueprint_selected",
+            status: "completed",
+            message: `blueprint=${novelBp.name} id=${novelBp.id} source=novel`,
+            detail: {
+              blueprintId: novelBp.id,
+              blueprintName: novelBp.name,
+              source: "orchestrator",
+              adapted: true,
+              roles: novelBp.roles.map((r) => r.name),
+              successRate: 0,
+            },
+          });
+        } else {
+          const bp = this.memoryStore.getBlueprint(bpValue);
+          if (bp) {
+            this.selectedBlueprintInfo = {
+              id: bp.id,
+              name: bp.name,
+              source: bp.source,
+              successRate: bp.stats?.uses ? bp.stats.successes / bp.stats.uses : 0,
+              instantiatedRoles: bp.roles.map((r) => r.name),
+              adapted: false,
+            };
+            this.telemetryCollector.onBlueprintSelected(bp.id, this.goal.split(" ").length);
+            this.emitter?.emit({
+              action: "os_blueprint_selected",
+              status: "completed",
+              message: `blueprint=${bp.name} id=${bp.id} source=${bp.source}`,
+              detail: {
+                blueprintId: bp.id,
+                blueprintName: bp.name,
+                source: bp.source,
+                adapted: false,
+                roles: bp.roles.map((r) => r.name),
+                successRate: bp.stats?.uses ? bp.stats.successes / bp.stats.uses : 0,
+                uses: bp.stats?.uses ?? 0,
+              },
+            });
+          }
+        }
+      }
     }
   }
 
