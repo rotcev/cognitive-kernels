@@ -2709,6 +2709,8 @@ export class OsKernel {
                 "",
                 "## Constraints",
                 "- Single turn only — you cannot spawn processes or continue after this response",
+                "- You have NO access to the kernel blackboard — do not claim to write BB keys or reference BB paths",
+                "- Your entire text response will be captured and delivered to your parent process automatically",
                 "- Stay focused on the task above — do not explore tangents",
               ].join("\n"),
               workingDir: ephProc.workingDir,
