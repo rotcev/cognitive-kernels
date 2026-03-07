@@ -1,6 +1,6 @@
-import { pgTable, text, integer, real, jsonb, primaryKey } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, jsonb, primaryKey, serial } from "drizzle-orm/pg-core";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export type JsonObject = Record<string, unknown>;
 
@@ -23,6 +23,16 @@ export const runEvents = pgTable("kernel_run_events", {
 }, (table) => [
   primaryKey({ columns: [table.runId, table.seq] }),
 ]);
+
+export const runSnapshots = pgTable("kernel_run_snapshots", {
+  id: serial("id").primaryKey(),
+  runId: text("run_id").notNull(),
+  tick: integer("tick").notNull(),
+  source: text("source").notNull().$type<"live" | "final">(),
+  data: jsonb("data").notNull().$type<JsonObject>(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
 
 export const heuristics = pgTable("kernel_heuristics", {
   id: text("id").primaryKey(),
@@ -51,6 +61,16 @@ export interface RunEventRow {
   type: string;
   payload: JsonObject;
   createdAt: string;
+}
+
+export interface SnapshotRow {
+  id: number;
+  runId: string;
+  tick: number;
+  source: "live" | "final";
+  data: JsonObject;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface HeuristicRow {
@@ -88,15 +108,41 @@ export function buildSchemaPlan(fromVersion = 0): SchemaPlan {
     };
   }
 
+  const allSteps: SchemaPlanStep[] = [
+    {
+      version: 1,
+      statement:
+        "create table if not exists kernel_runs (id text primary key, status text not null, created_at text not null)",
+    },
+    {
+      version: 2,
+      statement: [
+        "create table if not exists kernel_run_snapshots (",
+        "  id serial primary key,",
+        "  run_id text not null,",
+        "  tick integer not null,",
+        "  source text not null,",
+        "  data jsonb not null,",
+        "  created_at text not null,",
+        "  updated_at text not null",
+        ")",
+      ].join("\n"),
+    },
+    {
+      version: 2,
+      statement:
+        "create unique index if not exists idx_snapshots_run_source on kernel_run_snapshots (run_id, source)",
+    },
+    {
+      version: 2,
+      statement:
+        "create index if not exists idx_events_run_seq on kernel_run_events (run_id, seq)",
+    },
+  ];
+
   return {
     fromVersion: normalizedFromVersion,
     toVersion: CURRENT_SCHEMA_VERSION,
-    steps: [
-      {
-        version: 1,
-        statement:
-          "create table if not exists kernel_runs (id text primary key, status text not null, created_at text not null)",
-      },
-    ],
+    steps: allSteps.filter((s) => s.version > normalizedFromVersion),
   };
 }

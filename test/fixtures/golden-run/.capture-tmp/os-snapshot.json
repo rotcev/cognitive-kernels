@@ -1,0 +1,238 @@
+{
+  "runId": "1e577397-4df5-4eea-a9cd-463f55006982",
+  "tickCount": 1,
+  "goal": "Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert",
+  "processes": [
+    {
+      "pid": "os-proc-656528100b72",
+      "type": "lifecycle",
+      "state": "running",
+      "name": "goal-orchestrator",
+      "parentPid": null,
+      "objective": "Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert",
+      "priority": 45,
+      "spawnedAt": "2026-03-07T04:47:03.206Z",
+      "lastActiveAt": "2026-03-07T04:50:44.927Z",
+      "tickCount": 1,
+      "tokensUsed": 11830,
+      "model": "gpt-5.3-codex",
+      "workingDir": "/Users/shawndavies/dev/cognitive-kernels",
+      "children": [],
+      "onParentDeath": "orphan",
+      "restartPolicy": "never",
+      "ephemeralSpawnCount": 3,
+      "blackboardKeysWritten": [
+        "architecture:plan-draft"
+      ]
+    },
+    {
+      "pid": "os-proc-5ddd54779dec",
+      "type": "daemon",
+      "state": "idle",
+      "name": "metacog-daemon",
+      "parentPid": null,
+      "objective": "Periodically evaluate system state and issue metacognitive commands",
+      "priority": 50,
+      "spawnedAt": "2026-03-07T04:47:03.206Z",
+      "lastActiveAt": "2026-03-07T04:47:03.206Z",
+      "tickCount": 0,
+      "tokensUsed": 0,
+      "model": "gpt-5.3-codex",
+      "workingDir": "/Users/shawndavies/dev/cognitive-kernels",
+      "children": [],
+      "onParentDeath": "orphan",
+      "restartPolicy": "always"
+    },
+    {
+      "pid": "os-proc-aa3289155257",
+      "type": "daemon",
+      "state": "idle",
+      "name": "awareness-daemon",
+      "parentPid": null,
+      "objective": "Monitor metacog decision quality and inject corrective awareness notes",
+      "priority": 30,
+      "spawnedAt": "2026-03-07T04:47:03.206Z",
+      "lastActiveAt": "2026-03-07T04:47:03.206Z",
+      "tickCount": 0,
+      "tokensUsed": 0,
+      "model": "gpt-5.3-codex",
+      "workingDir": "/Users/shawndavies/dev/cognitive-kernels",
+      "children": [],
+      "onParentDeath": "orphan",
+      "restartPolicy": "on-failure"
+    }
+  ],
+  "dagTopology": {
+    "nodes": [
+      {
+        "pid": "os-proc-656528100b72",
+        "name": "goal-orchestrator",
+        "type": "lifecycle",
+        "state": "running",
+        "priority": 90,
+        "parentPid": null
+      },
+      {
+        "pid": "os-proc-5ddd54779dec",
+        "name": "metacog-daemon",
+        "type": "daemon",
+        "state": "idle",
+        "priority": 50,
+        "parentPid": null
+      },
+      {
+        "pid": "os-proc-aa3289155257",
+        "name": "awareness-daemon",
+        "type": "daemon",
+        "state": "idle",
+        "priority": 30,
+        "parentPid": null
+      }
+    ],
+    "edges": []
+  },
+  "dagMetrics": {
+    "nodeCount": 3,
+    "edgeCount": 0,
+    "maxDepth": 0,
+    "runningCount": 1,
+    "stalledCount": 2,
+    "deadCount": 0
+  },
+  "ipcSummary": {
+    "signalCount": 0,
+    "blackboardKeyCount": 5
+  },
+  "progressMetrics": {
+    "activeProcessCount": 1,
+    "stalledProcessCount": 2,
+    "totalTokensUsed": 11830,
+    "tokenBudgetRemaining": 488170,
+    "wallTimeElapsedMs": 221730,
+    "tickCount": 1
+  },
+  "recentEvents": [
+    {
+      "kind": "spawned",
+      "pid": "os-proc-656528100b72",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "type": "lifecycle",
+        "name": "goal-orchestrator"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-656528100b72",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "from": "spawned",
+        "to": "running"
+      }
+    },
+    {
+      "kind": "spawned",
+      "pid": "os-proc-5ddd54779dec",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "type": "daemon",
+        "name": "metacog-daemon"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-5ddd54779dec",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "from": "spawned",
+        "to": "running"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-5ddd54779dec",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "from": "running",
+        "to": "idle"
+      }
+    },
+    {
+      "kind": "spawned",
+      "pid": "os-proc-aa3289155257",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "type": "daemon",
+        "name": "awareness-daemon"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-aa3289155257",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "from": "spawned",
+        "to": "running"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-aa3289155257",
+      "timestamp": "2026-03-07T04:47:03.206Z",
+      "details": {
+        "from": "running",
+        "to": "idle"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-656528100b72",
+      "timestamp": "2026-03-07T04:47:29.909Z",
+      "details": {
+        "from": "running",
+        "to": "idle"
+      }
+    },
+    {
+      "kind": "state_changed",
+      "pid": "os-proc-656528100b72",
+      "timestamp": "2026-03-07T04:50:44.927Z",
+      "details": {
+        "from": "idle",
+        "to": "running"
+      }
+    }
+  ],
+  "recentHeuristics": [],
+  "blackboard": {
+    "system:design-guidelines": "This system solves problems by spawning cognitive sub-processes.\nThe topology (which processes exist, how they coordinate) IS the algorithm.\nDesign the shape of the computation, then let processes execute it.\nKey primitives: spawn, kill, fork, join, checkpoint, restore.\nBlackboard is shared memory — write results there for other processes to read.\nObservation is mandatory: produce → observe → proceed. Never assume success.",
+    "architecture:plan-draft": "Plan draft: implement a small TypeScript email validator function using a practical regex and add exactly 3 assert-based unit tests aligned with existing project test tooling. Waiting on scout:codebase for file locations/patterns, scout:dependencies for runner/toolchain, and scout:domain for regex/test-case guidance.",
+    "ephemeral:dependency-scout:eph-1fbcd67a-2b1": {
+      "ephemeralId": "eph-1fbcd67a-2b1",
+      "name": "dependency-scout",
+      "success": true,
+      "response": "Direct result: TypeScript unit tests are already set up with Vitest; run them with `npm test` (script is `vitest run --passWithNoTests`).\n\nWrote findings to: `/Users/shawndavies/dev/cognitive-kernels/scout:dependencies`\n\n## Key evidence\n- Test script: `/Users/shawndavies/dev/cognitive-kernels/package.json:20-22`\n  - `\"test\": \"vitest run --passWithNoTests\"`\n- Vitest dependency: `/Users/shawndavies/dev/cognitive-kernels/package.json:37-42` (`vitest: 3.0.8`)\n- ESM package: `/Users/shawndavies/dev/cognitive-kernels/package.json:5` (`\"type\": \"module\"`)\n- Node engine: `/Users/shawndavies/dev/cognitive-kernels/package.json:23-25` (`node >=18`)\n- TS config: `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5` (`module/moduleResolution: NodeNext`)\n- Test layout: `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1` (Vitest import); tests live under `/Users/shawndavies/dev/cognitive-kernels/test/` as `*.test.ts`\n\n## Useful commands\n- Full suite: `npm test`\n- Single file: `npx vitest run test/os/entry.test.ts` (or `npm test -- test/os/entry.test.ts`)\n\n## Gotcha\n- `tsc -p tsconfig.json` doesn’t include `test/**` (only `src/**` is included at `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:16`), so tests aren’t built/typechecked by `npm run build`—they still run fine via Vitest.",
+      "durationMs": 86256,
+      "model": "haiku",
+      "tokensEstimate": 329
+    },
+    "ephemeral:domain-scout:eph-630e8962-f59": {
+      "ephemeralId": "eph-630e8962-f59",
+      "name": "domain-scout",
+      "success": true,
+      "response": "scout:domain\n\n## Best-practice (what to validate)\n- OWASP: RFC email syntax is “far more complicated” than most realize; regex-only “proper parsing” is hard; recommended approach is basic syntactic checks + *semantic validation* by sending a verification email. Source excerpt lines: OWASP Input Validation Cheat Sheet HTML `Email Address Validation` section (lines 3405–3425, 3429–3434 of fetched page). Evidence: `/Users/shawndavies/dev/cognitive-kernels` curl output (see command results; key points at lines 3412–3414 and 3422–3425).\n- OWASP also suggests length constraints: local part ≤ 63 and total ≤ 254 (lines 3422–3425).\n\n## Minimal robust regex (pragmatic, widely used)\n- WHATWG HTML spec defines “valid email address” for `<input type=\"email\">` and provides a JS/Perl-compatible regex implementation: (HTML spec fetched `input.html`, lines 2189–2193)\n```js\n/^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/\n```\n- Note from the same spec: this is a “willful violation” of RFC 5322 for practicality (lines 2182–2185).\n\n## Suggested TS usage\n- Use the WHATWG regex as a `RegExp` literal (keeps escaping correct for `/`):  \n  `const EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+\\\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;`\n- Optional (OWASP-aligned) prechecks before regex: `trim()`, total length ≤ 254, local-part length ≤ 63.\n\n## 3 unit-test cases (match the WHATWG regex)\n- Valid: `simple@example.com`\n- Valid: `user.name+tag_123@example.co.uk`\n- Invalid: `user@-example.com` (domain label cannot start with `-`; fails regex)",
+      "durationMs": 90463,
+      "model": "haiku",
+      "tokensEstimate": 421
+    },
+    "ephemeral:codebase-scout:eph-6667de2a-81b": {
+      "ephemeralId": "eph-6667de2a-81b",
+      "name": "codebase-scout",
+      "success": true,
+      "response": "Direct result: Wrote repo structure + test/import conventions to `/Users/shawndavies/dev/cognitive-kernels/scout:codebase`.\n\n## Key findings (for email validator + 3 tests)\n- Test runner is Vitest via `/Users/shawndavies/dev/cognitive-kernels/package.json:19-22` (`\"test\": \"vitest run --passWithNoTests\"`).\n- Repo is ESM + NodeNext (`/Users/shawndavies/dev/cognitive-kernels/package.json:5`, `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5`).\n- Tests commonly import TS modules using `.js` extensions (NodeNext mapping), e.g. `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:35`.\n- Existing tests use `describe/test/expect` from Vitest; mocking uses `vi.mock` + `vi.hoisted` (see `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1-35`).\n- No current usage of Node `assert` in tests (`rg \"node:assert\"` found no matches), but `import assert from \"node:assert/strict\";` inside Vitest tests should fit this ESM setup (noted in `scout:codebase`).\n- Public export barrel is `/Users/shawndavies/dev/cognitive-kernels/src/index.ts:1-54` (only needed if the helper should be part of package API).",
+      "durationMs": 195018,
+      "model": "haiku",
+      "tokensEstimate": 283
+    }
+  }
+}

@@ -1,0 +1,32 @@
+Direct result: This repo already has TypeScript unit testing set up via Vitest and can run `*.test.ts` files under `test/` with `npm test` (or `npx vitest`).
+
+## Test Runner / Commands
+- Vitest is installed (devDependency): `/Users/shawndavies/dev/cognitive-kernels/package.json:41`
+- NPM test script: `/Users/shawndavies/dev/cognitive-kernels/package.json:19-22`
+  - `"test": "vitest run --passWithNoTests"`
+- Common commands:
+  - Run full suite: `npm test`
+  - Run a single file: `npx vitest run test/os/entry.test.ts`
+  - Run with npm script + file filter: `npm test -- test/os/entry.test.ts`
+  - Watch mode: `npx vitest`
+
+## TypeScript / Module System
+- TypeScript compiler is installed: `/Users/shawndavies/dev/cognitive-kernels/package.json:40` (`typescript@5.8.2`)
+- Package is ESM: `/Users/shawndavies/dev/cognitive-kernels/package.json:5` (`"type": "module"`)
+- TS config uses NodeNext modules: `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5`
+
+## Node Version
+- Declared engine: `/Users/shawndavies/dev/cognitive-kernels/package.json:23-25` (`node >=18`)
+- Verified locally (in this workspace):
+  - `node -v` => `v22.14.0`
+  - `npx vitest --version` => `vitest/3.0.8 darwin-arm64 node-v22.14.0`
+
+## Existing Test Layout / Conventions
+- Tests live under `/Users/shawndavies/dev/cognitive-kernels/test/` and use `*.test.ts` names (Vitest default discovery).
+- Tests currently import from Vitest, e.g. `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1`
+  - `import { beforeEach, describe, expect, test, vi } from "vitest";`
+
+## Notes / Gotchas
+- No `vitest.config.*` found at repo root; Vitest runs with defaults.
+- `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json` includes only `src/**/*.ts` (line 16), so `npm run build` (`tsc -p tsconfig.json`) does not compile/typecheck `test/**` files; tests are still executed by Vitest’s transpilation pipeline.
+

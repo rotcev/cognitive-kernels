@@ -1,0 +1,40 @@
+{"action":"os_boot","status":"started","timestamp":"2026-03-07T04:42:10.517Z","message":"goal=Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:42:10.520Z","message":"boot goal-orchestrator","agentId":"os-proc-82ea81a88b87","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:42:10.520Z","message":"boot awareness-daemon","agentId":"os-proc-55785791f135","agentName":"awareness-daemon","eventSource":"os"}
+{"action":"os_tick","status":"started","timestamp":"2026-03-07T04:42:10.526Z","message":"tick=1 processes=4","eventSource":"os"}
+{"action":"os_process_kill","status":"completed","timestamp":"2026-03-07T04:42:10.528Z","message":"execution_failed","agentId":"os-proc-82ea81a88b87","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_kill","status":"completed","timestamp":"2026-03-07T04:42:10.528Z","message":"execution_failed","agentId":"os-proc-f13148ac2dd2","agentName":"memory-consolidator","eventSource":"os"}
+{"action":"os_tick","status":"completed","timestamp":"2026-03-07T04:42:10.530Z","message":"tick=1 ran=2","eventSource":"os"}
+{"action":"os_snapshot","status":"completed","timestamp":"2026-03-07T04:42:10.530Z","message":"tick=1","eventSource":"os"}
+{"action":"os_checkpoint","status":"completed","timestamp":"2026-03-07T04:42:10.531Z","message":"saved 2 shutdown checkpoints for run e16cb441-7a17-4579-ba2f-3f2da5d4c5fc","eventSource":"os"}
+{"action":"os_boot","status":"started","timestamp":"2026-03-07T04:45:08.068Z","message":"goal=Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert","eventSource":"os"}
+{"action":"os_boot","status":"completed","timestamp":"2026-03-07T04:45:08.070Z","message":"memory-consolidator skipped: no new episodic data","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:45:08.070Z","message":"boot goal-orchestrator","agentId":"os-proc-40fad1b6e178","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:45:08.070Z","message":"boot awareness-daemon","agentId":"os-proc-bb9595c8d29b","agentName":"awareness-daemon","eventSource":"os"}
+{"action":"os_tick","status":"started","timestamp":"2026-03-07T04:45:08.073Z","message":"tick=1 processes=3","eventSource":"os"}
+{"action":"os_process_kill","status":"completed","timestamp":"2026-03-07T04:45:08.075Z","message":"execution_failed","agentId":"os-proc-40fad1b6e178","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_tick","status":"completed","timestamp":"2026-03-07T04:45:08.076Z","message":"tick=1 ran=1","eventSource":"os"}
+{"action":"os_snapshot","status":"completed","timestamp":"2026-03-07T04:45:08.077Z","message":"tick=1","eventSource":"os"}
+{"action":"os_checkpoint","status":"completed","timestamp":"2026-03-07T04:45:08.077Z","message":"saved 2 shutdown checkpoints for run 817ae540-f12b-40ba-9173-8b5c480d4e12","eventSource":"os"}
+{"action":"os_boot","status":"started","timestamp":"2026-03-07T04:45:54.442Z","message":"goal=Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert","eventSource":"os"}
+{"action":"os_boot","status":"completed","timestamp":"2026-03-07T04:45:54.443Z","message":"memory-consolidator skipped: no new episodic data","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:45:54.443Z","message":"boot goal-orchestrator","agentId":"os-proc-55052e3acee8","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:45:54.444Z","message":"boot awareness-daemon","agentId":"os-proc-8caaf1bed922","agentName":"awareness-daemon","eventSource":"os"}
+{"action":"os_tick","status":"started","timestamp":"2026-03-07T04:45:54.447Z","message":"tick=1 processes=3","eventSource":"os"}
+{"action":"os_process_kill","status":"completed","timestamp":"2026-03-07T04:45:54.449Z","message":"execution_failed","agentId":"os-proc-55052e3acee8","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_tick","status":"completed","timestamp":"2026-03-07T04:45:54.450Z","message":"tick=1 ran=1","eventSource":"os"}
+{"action":"os_snapshot","status":"completed","timestamp":"2026-03-07T04:45:54.451Z","message":"tick=1","eventSource":"os"}
+{"action":"os_checkpoint","status":"completed","timestamp":"2026-03-07T04:45:54.452Z","message":"saved 2 shutdown checkpoints for run 186987df-c547-4921-b584-fd8df0c347d9","eventSource":"os"}
+{"action":"os_boot","status":"started","timestamp":"2026-03-07T04:47:03.204Z","message":"goal=Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert","eventSource":"os"}
+{"action":"os_boot","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"memory-consolidator skipped: no new episodic data","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"boot goal-orchestrator","agentId":"os-proc-656528100b72","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"boot awareness-daemon","agentId":"os-proc-aa3289155257","agentName":"awareness-daemon","eventSource":"os"}
+{"action":"os_strategy_match","status":"completed","timestamp":"2026-03-07T04:47:09.935Z","message":"LLM matched 0/7 strategies to goal","eventSource":"os"}
+{"action":"os_tick","status":"started","timestamp":"2026-03-07T04:47:09.936Z","message":"tick=1 processes=3","eventSource":"os"}
+{"action":"os_llm_stream","status":"started","timestamp":"2026-03-07T04:47:29.900Z","agentId":"os-proc-656528100b72","agentName":"goal-orchestrator","message":"{\"type\":\"usage\",\"usage\":{\"inputTokens\":10778,\"outputTokens\":1052,\"totalCostUsd\":0,\"durationMs\":0,\"numTurns\":1}}","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:48:56.166Z","message":"parent=os-proc-656528100b72 model=haiku duration=86256ms","agentId":"eph-1fbcd67a-2b1","agentName":"dependency-scout","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:49:00.372Z","message":"parent=os-proc-656528100b72 model=haiku duration=90463ms","agentId":"eph-630e8962-f59","agentName":"domain-scout","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:50:44.927Z","message":"parent=os-proc-656528100b72 model=haiku duration=195018ms","agentId":"eph-6667de2a-81b","agentName":"codebase-scout","eventSource":"os"}
+{"action":"os_tick","status":"completed","timestamp":"2026-03-07T04:50:44.929Z","message":"tick=1 ran=1","eventSource":"os"}
+{"action":"os_snapshot","status":"completed","timestamp":"2026-03-07T04:50:44.929Z","message":"tick=1","eventSource":"os"}
+{"action":"os_checkpoint","status":"completed","timestamp":"2026-03-07T04:50:44.931Z","message":"saved 3 shutdown checkpoints for run 1e577397-4df5-4eea-a9cd-463f55006982","eventSource":"os"}

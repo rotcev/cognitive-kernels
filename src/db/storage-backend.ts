@@ -1,8 +1,8 @@
 import type { KernelRun, RuntimeProtocolEvent } from "../types.js";
 import type { OsSystemSnapshot } from "../os/types.js";
 import type { DbConnection } from "./connection.js";
-import { runs, runEvents } from "./schema.js";
-import { eq, desc } from "drizzle-orm";
+import { runs, runEvents, runSnapshots } from "./schema.js";
+import { eq, desc, gt, and, sql } from "drizzle-orm";
 
 export interface StorageBackend {
   readonly kind: "memory" | "neon";
@@ -16,6 +16,10 @@ export interface StorageBackend {
   getRunState(id: string): { snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" };
   appendEvents(runId: string, events: RuntimeProtocolEvent[]): Promise<void>;
   saveSnapshot(runId: string, snapshot: OsSystemSnapshot, source: "live" | "final"): Promise<void>;
+
+  // Incremental polling methods (for cross-process Lens)
+  fetchEventsSince(runId: string, afterSeq: number): Promise<{ events: RuntimeProtocolEvent[]; lastSeq: number }>;
+  fetchLatestSnapshot(runId: string): Promise<{ snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" }>;
 }
 
 // ─── In-memory backend (for tests / no-DB mode) ─────────────────
@@ -24,6 +28,7 @@ class InMemoryStorageBackend implements StorageBackend {
   readonly kind = "memory" as const;
   private connected = false;
   private events = new Map<string, RuntimeProtocolEvent[]>();
+  private snapshots = new Map<string, { snapshot: OsSystemSnapshot; source: "live" | "final" }>();
 
   isConnected(): boolean {
     return this.connected;
@@ -43,15 +48,28 @@ class InMemoryStorageBackend implements StorageBackend {
   getRunEvents(id: string): RuntimeProtocolEvent[] {
     return this.events.get(id) ?? [];
   }
-  getRunState(): { snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" } {
-    return { snapshot: null, source: "missing" };
+  getRunState(id: string): { snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" } {
+    const cached = this.snapshots.get(id);
+    return cached ?? { snapshot: null, source: "missing" };
   }
   async appendEvents(runId: string, events: RuntimeProtocolEvent[]): Promise<void> {
     const existing = this.events.get(runId) ?? [];
     existing.push(...events);
     this.events.set(runId, existing);
   }
-  async saveSnapshot(): Promise<void> {}
+  async saveSnapshot(runId: string, snapshot: OsSystemSnapshot, source: "live" | "final"): Promise<void> {
+    this.snapshots.set(runId, { snapshot, source });
+  }
+
+  async fetchEventsSince(runId: string, afterSeq: number): Promise<{ events: RuntimeProtocolEvent[]; lastSeq: number }> {
+    const all = this.events.get(runId) ?? [];
+    const newEvents = all.slice(afterSeq);
+    return { events: newEvents, lastSeq: all.length };
+  }
+
+  async fetchLatestSnapshot(runId: string): Promise<{ snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" }> {
+    return this.getRunState(runId);
+  }
 }
 
 // ─── Neon/Postgres backend ──────────────────────────────────────
@@ -63,6 +81,7 @@ export class NeonStorageBackend implements StorageBackend {
   private cachedRuns: KernelRun[] = [];
   private cachedEvents = new Map<string, RuntimeProtocolEvent[]>();
   private cachedSnapshots = new Map<string, { snapshot: OsSystemSnapshot; source: "live" | "final" }>();
+  private seqCounters = new Map<string, number>(); // runId → last seq written
 
   constructor(db: DbConnection) {
     this.db = db;
@@ -138,14 +157,9 @@ export class NeonStorageBackend implements StorageBackend {
   async appendEvents(runId: string, events: RuntimeProtocolEvent[]): Promise<void> {
     if (events.length === 0) return;
 
-    // Get current max seq
-    const existing = await this.db.select({ seq: runEvents.seq })
-      .from(runEvents)
-      .where(eq(runEvents.runId, runId))
-      .orderBy(desc(runEvents.seq))
-      .limit(1);
-
-    let nextSeq = (existing[0]?.seq ?? 0) + 1;
+    // Seq counter tracked in memory — eliminates the SELECT max(seq) round-trip.
+    // Single INSERT per batch = 1 HTTP request to Neon.
+    let nextSeq = (this.seqCounters.get(runId) ?? 0) + 1;
 
     const rows = events.map(event => ({
       runId,
@@ -156,6 +170,7 @@ export class NeonStorageBackend implements StorageBackend {
     }));
 
     await this.db.insert(runEvents).values(rows);
+    this.seqCounters.set(runId, nextSeq - 1);
 
     // Update event cache
     const cached = this.cachedEvents.get(runId) ?? [];
@@ -166,14 +181,85 @@ export class NeonStorageBackend implements StorageBackend {
   async saveSnapshot(runId: string, snapshot: OsSystemSnapshot, source: "live" | "final"): Promise<void> {
     this.cachedSnapshots.set(runId, { snapshot, source });
 
-    // Persist as a special event
-    await this.appendEvents(runId, [{
-      action: `snapshot:${source}`,
-      status: "completed",
-      timestamp: new Date().toISOString(),
-      message: JSON.stringify(snapshot),
-      eventSource: "os",
-    }]);
+    const now = new Date().toISOString();
+
+    // UPSERT: one row per (runId, source). Live snapshots are overwritten each tick
+    // instead of accumulating rows. Final snapshot written once at run end.
+    // = 1 HTTP request to Neon per call, no row bloat.
+    await this.db.insert(runSnapshots).values({
+      runId,
+      tick: snapshot.tickCount,
+      source,
+      data: snapshot as unknown as Record<string, unknown>,
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [runSnapshots.runId, runSnapshots.source],
+      set: {
+        tick: snapshot.tickCount,
+        data: snapshot as unknown as Record<string, unknown>,
+        updatedAt: now,
+      },
+    });
+  }
+
+  /**
+   * Fetch events created after a given seq number.
+   * Used by LensStoragePoller for efficient incremental polling.
+   * Single query, indexed on (run_id, seq).
+   */
+  async fetchEventsSince(runId: string, afterSeq: number): Promise<{ events: RuntimeProtocolEvent[]; lastSeq: number }> {
+    const rows = await this.db
+      .select()
+      .from(runEvents)
+      .where(and(eq(runEvents.runId, runId), gt(runEvents.seq, afterSeq)))
+      .orderBy(runEvents.seq);
+
+    if (rows.length === 0) {
+      return { events: [], lastSeq: afterSeq };
+    }
+
+    const events = rows.map(r => r.payload as unknown as RuntimeProtocolEvent);
+    const lastSeq = rows[rows.length - 1].seq;
+
+    // Update local caches
+    const cached = this.cachedEvents.get(runId) ?? [];
+    cached.push(...events);
+    this.cachedEvents.set(runId, cached);
+
+    // Keep seq counter in sync (highest seq seen)
+    const currentMax = this.seqCounters.get(runId) ?? 0;
+    if (lastSeq > currentMax) this.seqCounters.set(runId, lastSeq);
+
+    return { events, lastSeq };
+  }
+
+  /**
+   * Fetch the latest snapshot for a run directly from DB.
+   * Used by LensStoragePoller for cross-process observation.
+   * Prefers "final" over "live". At most 2 rows per run (one live, one final).
+   * Single query, indexed on (run_id, source).
+   */
+  async fetchLatestSnapshot(runId: string): Promise<{ snapshot: OsSystemSnapshot | null; source: "live" | "final" | "missing" }> {
+    // At most 2 rows per run (one live, one final) thanks to UPSERT.
+    const rows = await this.db
+      .select()
+      .from(runSnapshots)
+      .where(eq(runSnapshots.runId, runId));
+
+    if (rows.length === 0) {
+      return { snapshot: null, source: "missing" };
+    }
+
+    // Prefer final over live
+    const row = rows.find(r => r.source === "final") ?? rows[0];
+    const snapshot = row.data as unknown as OsSystemSnapshot;
+    const source = row.source as "live" | "final";
+
+    // Update cache
+    this.cachedSnapshots.set(runId, { snapshot, source });
+
+    return { snapshot, source };
   }
 
   async loadRuns(): Promise<void> {

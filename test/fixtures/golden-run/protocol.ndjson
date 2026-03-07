@@ -1,0 +1,13 @@
+{"action":"os_boot","status":"started","timestamp":"2026-03-07T04:47:03.204Z","message":"goal=Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert","eventSource":"os"}
+{"action":"os_boot","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"memory-consolidator skipped: no new episodic data","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"boot goal-orchestrator","agentId":"os-proc-656528100b72","agentName":"goal-orchestrator","eventSource":"os"}
+{"action":"os_process_spawn","status":"completed","timestamp":"2026-03-07T04:47:03.206Z","message":"boot awareness-daemon","agentId":"os-proc-aa3289155257","agentName":"awareness-daemon","eventSource":"os"}
+{"action":"os_strategy_match","status":"completed","timestamp":"2026-03-07T04:47:09.934Z","message":"LLM matched 0/7 strategies to goal","eventSource":"os"}
+{"action":"os_tick","status":"started","timestamp":"2026-03-07T04:47:09.936Z","message":"tick=1 processes=3","eventSource":"os"}
+{"action":"os_llm_stream","status":"started","timestamp":"2026-03-07T04:47:29.899Z","agentId":"os-proc-656528100b72","agentName":"goal-orchestrator","message":"{\"type\":\"usage\",\"usage\":{\"inputTokens\":10778,\"outputTokens\":1052,\"totalCostUsd\":0,\"durationMs\":0,\"numTurns\":1}}","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:48:56.165Z","message":"parent=os-proc-656528100b72 model=haiku duration=86256ms","agentId":"eph-1fbcd67a-2b1","agentName":"dependency-scout","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:49:00.372Z","message":"parent=os-proc-656528100b72 model=haiku duration=90463ms","agentId":"eph-630e8962-f59","agentName":"domain-scout","eventSource":"os"}
+{"action":"os_ephemeral_spawn","status":"completed","timestamp":"2026-03-07T04:50:44.927Z","message":"parent=os-proc-656528100b72 model=haiku duration=195018ms","agentId":"eph-6667de2a-81b","agentName":"codebase-scout","eventSource":"os"}
+{"action":"os_tick","status":"completed","timestamp":"2026-03-07T04:50:44.929Z","message":"tick=1 ran=1","eventSource":"os"}
+{"action":"os_snapshot","status":"completed","timestamp":"2026-03-07T04:50:44.929Z","message":"tick=1","eventSource":"os"}
+{"action":"os_checkpoint","status":"completed","timestamp":"2026-03-07T04:50:44.931Z","message":"saved 3 shutdown checkpoints for run 1e577397-4df5-4eea-a9cd-463f55006982","eventSource":"os"}

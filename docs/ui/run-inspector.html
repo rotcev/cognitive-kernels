@@ -79,6 +79,23 @@ html, body {
   overflow: hidden;
 }
 
+/* Subtle CRT scanline overlay */
+#app::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  mix-blend-mode: multiply;
+}
+
 /* ═══ TOPBAR ═══ */
 #topbar {
   height: var(--topbar-h);
@@ -310,7 +327,8 @@ html, body {
   overflow: hidden;
   display: none;
 }
-.tab-content.active { display: flex; flex-direction: column; }
+.tab-content.active { display: flex; flex-direction: column; animation: tab-fade-in 0.2s ease; }
+@keyframes tab-fade-in { from { opacity: 0.7; } to { opacity: 1; } }
 
 /* ═══ TOPOLOGY TREE ═══ */
 #topology-view {
@@ -353,6 +371,9 @@ html, body {
 }
 .tree-toggle:hover { color: var(--color-text-secondary); }
 .tree-name { color: var(--color-text); font-weight: 500; }
+.tree-node-row[data-state="dead"] .tree-name { color: var(--color-text-dim); }
+.tree-node-row[data-state="dead"] .tree-tokens { color: var(--color-text-dim); opacity: 0.5; }
+.tree-node-row[data-state="dead"] .tree-elapsed { opacity: 0.5; }
 .tree-state {
   font-size: 10px;
   padding: 1px 6px;
@@ -406,7 +427,10 @@ html, body {
   flex-direction: column;
   overflow: hidden;
 }
-#process-drawer.open { transform: translateX(0); }
+#process-drawer.open {
+  transform: translateX(0);
+  box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+}
 .drawer-header {
   display: flex;
   align-items: center;
@@ -789,6 +813,7 @@ html, body {
   transition: background var(--transition-fast);
   cursor: default;
 }
+.event-item:nth-child(even) { background: rgba(255,255,255,0.01); }
 .event-item:hover { background: var(--bg-hover); }
 .event-time { color: var(--color-text-dim); font-size: 10px; }
 .event-body { color: var(--color-text-secondary); }
@@ -1060,6 +1085,353 @@ html, body {
   transform: rotate(45deg);
 }
 
+/* ═══ PROCESS TYPE BADGES ═══ */
+.proc-type-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  letter-spacing: 0.3px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.proc-type-badge.kernel {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid rgba(0,255,136,0.15);
+}
+.proc-type-badge.sub-kernel {
+  color: var(--cyan);
+  background: var(--cyan-dim);
+  border: 1px solid rgba(0,212,255,0.15);
+}
+.proc-type-badge.shell {
+  color: var(--color-text-secondary);
+  background: var(--gray-dim);
+  border: 1px solid var(--border);
+}
+
+/* ═══ DRAWER TABS ═══ */
+.drawer-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.drawer-tab {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 7px 12px;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  transition: all var(--transition-fast);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.drawer-tab:hover { color: var(--color-text-secondary); }
+.drawer-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.drawer-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  display: none;
+}
+.drawer-tab-content.active { display: block; }
+
+/* ═══ DRAWER BLACKBOARD TABLE ═══ */
+.drawer-bb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.drawer-bb-table th {
+  text-align: left;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-dim);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+.drawer-bb-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--color-text-secondary);
+  vertical-align: top;
+}
+.drawer-bb-table tr:hover td { background: var(--bg-hover); }
+.drawer-bb-table .bb-key-cell { color: var(--cyan); cursor: pointer; }
+.drawer-bb-table .bb-key-cell:hover { text-decoration: underline; }
+.drawer-bb-table .bb-dir { color: var(--color-text-dim); font-size: 10px; }
+.drawer-bb-table .bb-val-preview {
+  color: var(--color-text-dim);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ═══ DRAWER TERMINAL ═══ */
+.drawer-terminal {
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 100%;
+}
+
+/* ═══ EXPANDED VIEW ═══ */
+#expanded-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-root);
+  z-index: 900;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+#expanded-overlay.open { display: flex; }
+.expanded-topbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.expanded-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.expanded-title h2 {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.expanded-close {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--color-text-dim);
+  cursor: pointer;
+  padding: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.expanded-close:hover { color: var(--color-text); border-color: var(--border-bright); }
+.expanded-close kbd {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  padding: 1px 4px;
+  font-size: 9px;
+}
+.expanded-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+.expanded-meta {
+  grid-column: 1 / -1;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+  background: var(--bg-panel);
+}
+.expanded-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.expanded-meta-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-dim);
+}
+.expanded-meta-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text);
+}
+.expanded-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+.expanded-pane:last-child { border-right: none; }
+.expanded-pane-header {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--color-text-dim);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.expanded-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+/* ═══ TERMINAL VIEW ═══ */
+#terminal-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-root);
+}
+.term-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+  gap: 12px;
+}
+.term-process-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.term-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--color-text-dim);
+}
+#term-process-select {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  outline: none;
+  cursor: pointer;
+  min-width: 160px;
+}
+#term-process-select:focus { border-color: var(--accent); }
+#term-process-select option {
+  background: var(--bg-panel);
+  color: var(--color-text);
+}
+.term-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.term-autoscroll-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-dim);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.term-autoscroll-label input[type="checkbox"] {
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--border-bright);
+  background: var(--bg-surface);
+  cursor: pointer;
+  position: relative;
+}
+.term-autoscroll-label input[type="checkbox"]:checked {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.term-autoscroll-label input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  top: 0px; left: 2px;
+  width: 3px; height: 6px;
+  border: solid var(--accent);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.term-clear-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--color-text-dim);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.term-clear-btn:hover { border-color: var(--border-bright); color: var(--color-text-secondary); }
+.term-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 4;
+}
+.term-line {
+  padding: 1px 0;
+  display: block;
+}
+.term-line:hover { background: rgba(255,255,255,0.02); }
+.term-line .term-ts {
+  color: var(--color-text-dim);
+  margin-right: 8px;
+  font-size: 10px;
+  user-select: none;
+}
+.term-line .term-level-info { color: var(--color-text-secondary); }
+.term-line .term-level-tool { color: var(--cyan); }
+.term-line .term-level-thinking { color: var(--magenta); font-style: italic; }
+.term-line .term-level-output { color: var(--green); }
+.term-line .term-level-error { color: var(--red); }
+.term-line .term-level-system { color: var(--amber); }
+.term-prompt {
+  color: var(--accent);
+  animation: blink-cursor 1s step-end infinite;
+  display: inline;
+}
+.term-empty {
+  color: var(--color-text-dim);
+  padding: 40px 0;
+  text-align: center;
+}
+
 /* ═══ TREE COLLAPSE ═══ */
 .tree-children.collapsed {
   max-height: 0 !important;
@@ -1135,16 +1507,58 @@ html, body {
 <!-- PROCESS DRAWER -->
 <div id="process-drawer">
   <div class="drawer-header">
-    <h3 id="drawer-title">process</h3>
-    <button class="drawer-close" id="drawer-close">&times;</button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <h3 id="drawer-title">process</h3>
+      <span id="drawer-type-badge" class="proc-type-badge shell">shell</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <button class="drawer-close" id="drawer-expand" title="Expand to full view" style="font-size:11px">\u2922</button>
+      <button class="drawer-close" id="drawer-close">&times;</button>
+    </div>
   </div>
-  <div class="drawer-body" id="drawer-body"></div>
-  <div class="message-area">
-    <div class="label">Send message to <span id="msg-target">agent</span></div>
-    <div class="message-thread" id="msg-thread"></div>
-    <div class="message-input-row">
-      <textarea id="msg-input" placeholder="Type a message to this agent..." rows="1"></textarea>
-      <button class="msg-send-btn" id="msg-send">Send</button>
+  <div class="drawer-tabs">
+    <button class="drawer-tab active" data-dtab="info">Info</button>
+    <button class="drawer-tab" data-dtab="terminal">Terminal</button>
+    <button class="drawer-tab" data-dtab="blackboard">Blackboard</button>
+    <button class="drawer-tab" data-dtab="messages">Messages</button>
+  </div>
+  <div class="drawer-tab-content active" data-dtab="info" id="drawer-body"></div>
+  <div class="drawer-tab-content" data-dtab="terminal" id="drawer-terminal"></div>
+  <div class="drawer-tab-content" data-dtab="blackboard" id="drawer-blackboard"></div>
+  <div class="drawer-tab-content" data-dtab="messages" id="drawer-messages">
+    <div style="padding:12px 16px">
+      <div class="message-thread" id="msg-thread"></div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-text-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Send message to <span id="msg-target">agent</span></div>
+      <div class="message-input-row">
+        <textarea id="msg-input" placeholder="Type a message to this agent..." rows="1"></textarea>
+        <button class="msg-send-btn" id="msg-send">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- EXPANDED VIEW OVERLAY -->
+<div id="expanded-overlay">
+  <div class="expanded-topbar">
+    <div class="expanded-title">
+      <h2 id="expanded-name">process</h2>
+      <span id="expanded-type-badge" class="proc-type-badge shell">shell</span>
+      <span id="expanded-state-badge" class="tree-state running">running</span>
+    </div>
+    <button class="expanded-close" id="expanded-close"><kbd>Esc</kbd> Close</button>
+  </div>
+  <div class="expanded-body">
+    <div class="expanded-meta" id="expanded-meta"></div>
+    <div class="expanded-pane">
+      <div class="expanded-pane-header">Terminal Output</div>
+      <div class="expanded-pane-body" id="expanded-terminal"></div>
+    </div>
+    <div class="expanded-pane" style="border-right:none">
+      <div class="expanded-pane-header">
+        <span>Blackboard I/O</span>
+        <span id="expanded-bb-count" style="color:var(--cyan)"></span>
+      </div>
+      <div class="expanded-pane-body" id="expanded-blackboard"></div>
     </div>
   </div>
 </div>
@@ -1186,6 +1600,7 @@ html, body {
       <button class="center-tab" data-tab="blackboard">Blackboard</button>
       <button class="center-tab" data-tab="heuristics">Heuristics</button>
       <button class="center-tab" data-tab="deferrals">Deferrals</button>
+      <button class="center-tab" data-tab="terminal">Terminal</button>
     </div>
 
     <div class="tab-content active" data-tab="topology" id="topology-view"></div>
@@ -1205,6 +1620,12 @@ html, body {
             <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div><span>Checkpoint</span></div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--gray)"></div><span>Dead (exited)</span></div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div><span>Suspended</span></div>
+          </div>
+          <div class="legend-section">
+            <div class="legend-section-label">Process Type</div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--accent);width:10px;height:10px;box-shadow:0 0 4px var(--accent)"></div><span>Kernel</span></div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--cyan);width:9px;height:9px;outline:1px solid rgba(0,212,255,0.3);outline-offset:2px"></div><span>Sub-kernel</span></div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--gray);width:8px;height:8px"></div><span>Shell</span></div>
           </div>
           <div class="legend-section">
             <div class="legend-section-label">Edges</div>
@@ -1236,6 +1657,22 @@ html, body {
     <div class="tab-content" data-tab="deferrals" id="deferrals-tab">
       <div id="deferrals-view"></div>
     </div>
+
+    <div class="tab-content" data-tab="terminal" id="terminal-tab">
+      <div id="terminal-view">
+        <div class="term-header">
+          <div class="term-process-selector">
+            <label class="term-label">Process:</label>
+            <select id="term-process-select"></select>
+          </div>
+          <div class="term-controls">
+            <label class="term-autoscroll-label"><input type="checkbox" id="term-autoscroll" checked> Auto-scroll</label>
+            <button class="term-clear-btn" id="term-clear">Clear</button>
+          </div>
+        </div>
+        <div class="term-output" id="term-output"></div>
+      </div>
+    </div>
   </main>
 
   <aside id="rightpanel">
@@ -1260,6 +1697,7 @@ html, body {
       <span class="stat-item"><span id="stat-active">3</span> running</span>
       <span class="stat-item"><span id="stat-tokens">27,101</span> tokens</span>
       <span class="stat-item">tick <span id="stat-tick">42</span></span>
+      <span class="stat-item"><span id="stat-rate">~48</span> tok/s</span>
     </div>
     <div class="shortcuts">
       <span class="shortcut"><kbd>&#8984;K</kbd> Command</span>
@@ -1322,6 +1760,7 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-metacog-001", type: "daemon", state: "running", name: "metacog",
     parentPid: null,
+    processRole: "kernel",
     objective: "Orchestrate implementation of JWT authentication system. Spawn specialists, monitor progress, adjust strategy based on outcomes.",
     priority: 100,
     spawnedAt: new Date(Date.now() - 175000).toISOString(),
@@ -1334,8 +1773,10 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-arch-002", type: "lifecycle", state: "dead", name: "architect",
     parentPid: "proc-metacog-001",
+    processRole: "shell",
     objective: "Design the authentication system architecture: JWT structure, refresh token rotation, middleware placement.",
     priority: 90,
+    blackboardKeysRead: [],
     spawnedAt: new Date(Date.now() - 170000).toISOString(),
     lastActiveAt: new Date(Date.now() - 120000).toISOString(),
     tickCount: 15, tokensUsed: 4521,
@@ -1347,7 +1788,9 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-impl-003", type: "lifecycle", state: "running", name: "implementer",
     parentPid: "proc-metacog-001",
+    processRole: "sub-kernel",
     objective: "Implement the authentication system based on the architecture in blackboard key auth.architecture",
+    blackboardKeysRead: ["auth.architecture", "auth.jwt_structure", "auth.middleware_plan"],
     priority: 80,
     spawnedAt: new Date(Date.now() - 115000).toISOString(),
     lastActiveAt: new Date(Date.now() - 5000).toISOString(),
@@ -1362,7 +1805,9 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-jwt-004", type: "lifecycle", state: "checkpoint", name: "jwt-handler",
     parentPid: "proc-impl-003",
+    processRole: "shell",
     objective: "Implement JWT token generation, validation, and refresh token rotation in src/auth/jwt.ts",
+    blackboardKeysRead: ["auth.jwt_structure"],
     priority: 75,
     spawnedAt: new Date(Date.now() - 100000).toISOString(),
     lastActiveAt: new Date(Date.now() - 30000).toISOString(),
@@ -1375,7 +1820,9 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-middleware-005", type: "lifecycle", state: "running", name: "auth-middleware",
     parentPid: "proc-impl-003",
+    processRole: "shell",
     objective: "Implement Express middleware for JWT validation, route protection, and role-based access control",
+    blackboardKeysRead: ["auth.architecture", "auth.middleware_plan"],
     priority: 70,
     spawnedAt: new Date(Date.now() - 80000).toISOString(),
     lastActiveAt: new Date(Date.now() - 8000).toISOString(),
@@ -1386,7 +1833,9 @@ const MOCK_PROCESSES = [
   {
     pid: "proc-test-006", type: "lifecycle", state: "sleeping", name: "test-writer",
     parentPid: "proc-metacog-001",
+    processRole: "shell",
     objective: "Write comprehensive tests for the authentication system as modules are completed",
+    blackboardKeysRead: ["auth.jwt_module_status"],
     priority: 60,
     spawnedAt: new Date(Date.now() - 110000).toISOString(),
     lastActiveAt: new Date(Date.now() - 45000).toISOString(),
@@ -1437,6 +1886,84 @@ const MOCK_HEURISTICS = [
 
 const MOCK_DEFERRALS = [
   { id: "defer-001", name: "test-writer", condition: { type: "blackboard_key_exists", key: "auth.jwt_module_status" }, waitedTicks: 14, reason: "Waiting for JWT module implementation to complete before writing tests" },
+];
+
+const MOCK_TERMINAL_LOGS = {
+  "proc-metacog-001": [
+    { ts: -175, level: "system", text: "Process spawned: metacog (daemon, priority=100)" },
+    { ts: -174, level: "info", text: "Goal: Implement authentication system with JWT tokens and refresh flow" },
+    { ts: -173, level: "thinking", text: "I need to break this into phases: 1) architecture design, 2) implementation, 3) testing. I'll spawn specialist agents for each." },
+    { ts: -170, level: "tool", text: "os_spawn: architect (proc-arch-002) — Design auth system architecture" },
+    { ts: -168, level: "info", text: "Waiting for architect to complete design phase..." },
+    { ts: -120, level: "info", text: "Architect exited [0]. Architecture committed to blackboard." },
+    { ts: -118, level: "thinking", text: "Architecture is ready. Now I need an implementer to build it, and a test-writer to validate as we go." },
+    { ts: -115, level: "tool", text: "os_spawn: implementer (proc-impl-003) — Implement auth based on blackboard" },
+    { ts: -110, level: "tool", text: "os_spawn: test-writer (proc-test-006) — Write tests as modules complete" },
+    { ts: -90, level: "info", text: "Monitoring: implementer spawned jwt-handler and auth-middleware" },
+    { ts: -60, level: "thinking", text: "Implementation is progressing. jwt-handler is at 65% token budget. Should I checkpoint it to let tests run?" },
+    { ts: -30, level: "info", text: "jwt-handler checkpointed. test-writer still sleeping on auth.jwt_module_status signal." },
+    { ts: -10, level: "thinking", text: "Implementation ~60% complete. auth-middleware is writing RBAC logic. On track." },
+    { ts: -3, level: "info", text: "Tick 42: 3 active, 1 sleeping, 1 checkpointed, 1 dead. Total tokens: 27,101" },
+  ],
+  "proc-arch-002": [
+    { ts: -170, level: "system", text: "Process spawned: architect (lifecycle, priority=90)" },
+    { ts: -169, level: "info", text: "Objective: Design JWT auth architecture" },
+    { ts: -168, level: "thinking", text: "I'll design a complete JWT auth system. Need to decide: algorithm, token structure, refresh strategy, middleware layers." },
+    { ts: -165, level: "thinking", text: "RS256 is the right choice — asymmetric keys allow the auth service to sign while other services verify without the private key." },
+    { ts: -160, level: "tool", text: "write_blackboard: auth.jwt_structure = {alg: RS256, payload: [sub, email, role, iat, exp], expiry: 15m}" },
+    { ts: -155, level: "thinking", text: "For refresh tokens, rotation is more secure than static refresh tokens. Each refresh issues a new pair." },
+    { ts: -145, level: "tool", text: "write_blackboard: auth.architecture = {jwt_strategy: RS256, refresh: rotation, middleware: express}" },
+    { ts: -135, level: "tool", text: "write_blackboard: auth.middleware_plan = {layers: [token-extraction, validation, role-check]}" },
+    { ts: -125, level: "output", text: "Architecture design complete. All decisions committed to blackboard." },
+    { ts: -120, level: "system", text: "Process exited with code 0" },
+  ],
+  "proc-impl-003": [
+    { ts: -115, level: "system", text: "Process spawned: implementer (lifecycle, priority=80)" },
+    { ts: -114, level: "info", text: "Reading architecture from blackboard key: auth.architecture" },
+    { ts: -113, level: "thinking", text: "The architecture calls for RS256 JWT with refresh rotation. I'll split this into two parallel tracks: JWT module and middleware." },
+    { ts: -100, level: "tool", text: "os_spawn: jwt-handler (proc-jwt-004) — Implement JWT generation/validation" },
+    { ts: -80, level: "tool", text: "os_spawn: auth-middleware (proc-middleware-005) — Implement Express middleware" },
+    { ts: -70, level: "info", text: "Both child processes running. Monitoring progress..." },
+    { ts: -40, level: "tool", text: "write_blackboard: auth.middleware_progress = 60%" },
+    { ts: -20, level: "info", text: "JWT module complete. Middleware at 80%." },
+    { ts: -8, level: "tool", text: "write_blackboard: auth.middleware_progress = 80%" },
+    { ts: -5, level: "thinking", text: "Middleware is almost done. Once complete, need to wire up routes and test integration." },
+  ],
+  "proc-jwt-004": [
+    { ts: -100, level: "system", text: "Process spawned: jwt-handler (lifecycle, priority=75)" },
+    { ts: -99, level: "info", text: "Implementing JWT in src/auth/jwt.ts based on auth.jwt_structure" },
+    { ts: -95, level: "tool", text: "edit_file: src/auth/jwt.ts — Created JWT class with sign() and verify() methods" },
+    { ts: -85, level: "output", text: "import { SignJWT, jwtVerify } from 'jose';\nimport { generateKeyPair } from 'crypto';\n\nexport class JWTService {\n  private privateKey: CryptoKey;\n  private publicKey: CryptoKey;\n\n  async sign(payload: TokenPayload): Promise<string> {\n    return new SignJWT(payload)\n      .setProtectedHeader({ alg: 'RS256' })\n      .setExpirationTime('15m')\n      .sign(this.privateKey);\n  }\n}" },
+    { ts: -70, level: "tool", text: "edit_file: src/auth/jwt.ts — Added refresh token rotation logic" },
+    { ts: -55, level: "tool", text: "write_blackboard: auth.jwt_module_status = implementation_complete_pending_review" },
+    { ts: -45, level: "tool", text: "write_blackboard: auth.token_schema = {accessToken: string, refreshToken: string}" },
+    { ts: -30, level: "system", text: "Checkpoint created: waiting for test-writer to validate before adding refresh rotation" },
+  ],
+  "proc-middleware-005": [
+    { ts: -80, level: "system", text: "Process spawned: auth-middleware (lifecycle, priority=70)" },
+    { ts: -79, level: "info", text: "Implementing Express middleware for JWT validation" },
+    { ts: -75, level: "tool", text: "edit_file: src/middleware/auth.ts — Created extractToken middleware" },
+    { ts: -65, level: "output", text: "export function extractToken(req: Request, res: Response, next: NextFunction) {\n  const header = req.headers.authorization;\n  if (!header?.startsWith('Bearer ')) {\n    return res.status(401).json({ error: 'Missing token' });\n  }\n  req.token = header.slice(7);\n  next();\n}" },
+    { ts: -50, level: "tool", text: "edit_file: src/middleware/auth.ts — Added validateToken middleware" },
+    { ts: -35, level: "tool", text: "edit_file: src/middleware/auth.ts — Added requireRole middleware" },
+    { ts: -20, level: "thinking", text: "Token extraction and validation done. Now implementing role-based access control checks..." },
+    { ts: -8, level: "tool", text: "edit_file: src/middleware/rbac.ts — Implementing role hierarchy and permission checks" },
+  ],
+  "proc-test-006": [
+    { ts: -110, level: "system", text: "Process spawned: test-writer (lifecycle, priority=60)" },
+    { ts: -109, level: "info", text: "Objective: Write tests for auth system as modules complete" },
+    { ts: -108, level: "info", text: "Waiting for signal: auth.jwt_module_status" },
+    { ts: -107, level: "system", text: "Process sleeping — will wake on blackboard key: auth.jwt_module_status" },
+  ],
+};
+
+const CANNED_TERMINAL_LINES = [
+  { proc: "proc-metacog-001", level: "info", text: () => `Tick ${state.tickCount}: monitoring process health...` },
+  { proc: "proc-metacog-001", level: "thinking", text: () => `Evaluating progress — ${state.processes.filter(p=>p.state==='running').length} processes active. Token burn rate normal.` },
+  { proc: "proc-middleware-005", level: "tool", text: () => `edit_file: src/middleware/rbac.ts — Adding permission check for route /api/users` },
+  { proc: "proc-middleware-005", level: "output", text: () => `export function requireRole(...roles: string[]) {\n  return (req, res, next) => {\n    if (!roles.includes(req.user.role)) {\n      return res.status(403).json({ error: 'Insufficient permissions' });\n    }\n    next();\n  };\n}` },
+  { proc: "proc-impl-003", level: "info", text: () => `Child process auth-middleware progressing — middleware at ~${80 + Math.floor(Math.random()*15)}%` },
+  { proc: "proc-metacog-001", level: "system", text: () => `Blackboard updated: auth.middleware_progress` },
 ];
 
 const NARRATIVES = [
@@ -1492,6 +2019,9 @@ let state = {
   showDeadInDAG: false,
   dagCentered: false,
   collapsedNodes: new Set(),
+  terminalPid: "proc-metacog-001",
+  terminalAutoScroll: true,
+  terminalLogs: JSON.parse(JSON.stringify(MOCK_TERMINAL_LOGS)),
 };
 
 // ═══════════════════════════════════════
@@ -1637,12 +2167,15 @@ function renderTreeNode(node, depth = 0, isLast = true, prefix = '') {
   const childCount = hasChildren ? ` <span style="color:var(--color-text-dim);font-size:10px">(${node.childNodes.length})</span>` : '';
 
   let html = `<div class="tree-node" data-pid="${node.pid}">`;
-  html += `<div class="tree-node-row ${selected}" data-pid="${node.pid}">`;
+  html += `<div class="tree-node-row ${selected}" data-pid="${node.pid}" data-state="${node.state}">`;
   if (depth > 0) {
     html += `<span class="tree-indent">${prefix}</span>`;
   }
   html += `<span class="tree-toggle ${toggleClass}" data-toggle-pid="${node.pid}">${toggleChar}</span>`;
   html += `<span class="tree-name">${escHtml(node.name)}</span>`;
+  const role = node.processRole || 'shell';
+  const roleLabel = role === 'sub-kernel' ? 'sub-kernel' : role;
+  html += `<span class="proc-type-badge ${role}">${roleLabel}</span>`;
   html += `<span class="tree-state ${node.state}">${node.state}${node.exitCode !== undefined ? ' [' + node.exitCode + ']' : ''}</span>`;
   if (isCollapsed && hasChildren) html += childCount;
   html += `<span class="tree-elapsed">${elapsed}</span>`;
@@ -1705,14 +2238,90 @@ function renderTopology() {
 // ═══════════════════════════════════════
 // RENDER: PROCESS DRAWER
 // ═══════════════════════════════════════
+function getProcessBBEntries(proc) {
+  const entries = [];
+  // Keys written
+  if (proc.blackboardKeysWritten) {
+    proc.blackboardKeysWritten.forEach(k => {
+      const bb = state.blackboard[k];
+      entries.push({ key: k, dir: 'write', value: bb ? bb.value : null, tick: bb ? bb.tick : '?' });
+    });
+  }
+  // Keys read
+  if (proc.blackboardKeysRead) {
+    proc.blackboardKeysRead.forEach(k => {
+      if (proc.blackboardKeysWritten && proc.blackboardKeysWritten.includes(k)) return; // skip dupes
+      const bb = state.blackboard[k];
+      entries.push({ key: k, dir: 'read', value: bb ? bb.value : null, tick: bb ? bb.tick : '?' });
+    });
+  }
+  return entries;
+}
+
+function renderDrawerTerminal(pid) {
+  const container = $('#drawer-terminal');
+  const logs = state.terminalLogs[pid] || [];
+  if (logs.length === 0) {
+    container.innerHTML = '<div class="drawer-terminal" style="color:var(--color-text-dim);padding:20px 12px">No terminal output for this process.</div>';
+    return;
+  }
+  let html = '<div class="drawer-terminal">';
+  html += logs.slice(-50).map(log => {
+    const levelClass = `term-level-${log.level}`;
+    return `<span class="${levelClass}">${escHtml(log.text)}</span>`;
+  }).join('\n');
+  html += '</div>';
+  container.innerHTML = html;
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderDrawerBlackboard(proc) {
+  const container = $('#drawer-blackboard');
+  const entries = getProcessBBEntries(proc);
+  if (entries.length === 0) {
+    container.innerHTML = '<div style="padding:16px;color:var(--color-text-dim);font-family:var(--font-mono);font-size:11px">No blackboard I/O for this process.</div>';
+    return;
+  }
+  let html = '<div style="padding:8px"><table class="drawer-bb-table"><thead><tr><th>Key</th><th>I/O</th><th>Value</th><th>Tick</th></tr></thead><tbody>';
+  entries.forEach(e => {
+    const dirColor = e.dir === 'write' ? 'var(--green)' : 'var(--color-text-dim)';
+    const dirIcon = e.dir === 'write' ? '\u2192 W' : '\u2190 R';
+    const preview = e.value !== null ? (typeof e.value === 'string' ? e.value : JSON.stringify(e.value)).slice(0, 40) : '—';
+    html += `<tr>
+      <td class="bb-key-cell" data-bbkey="${escHtml(e.key)}">${escHtml(e.key)}</td>
+      <td class="bb-dir" style="color:${dirColor}">${dirIcon}</td>
+      <td class="bb-val-preview">${escHtml(preview)}</td>
+      <td style="color:var(--color-text-dim)">${e.tick}</td>
+    </tr>`;
+  });
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+
+  // Click on key to jump to blackboard tab
+  container.querySelectorAll('.bb-key-cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      state.activeBBKey = cell.dataset.bbkey;
+      switchTab('blackboard');
+    });
+  });
+}
+
 function openProcessDrawer(pid) {
   const proc = state.processes.find(p => p.pid === pid);
   if (!proc) return;
 
   state.drawerOpen = true;
+  state.selectedProcessPid = pid;
   $('#drawer-title').textContent = proc.name;
   $('#msg-target').textContent = proc.name;
 
+  // Type badge
+  const role = proc.processRole || 'shell';
+  const badge = $('#drawer-type-badge');
+  badge.textContent = role;
+  badge.className = 'proc-type-badge ' + role;
+
+  // Info tab
   const body = $('#drawer-body');
   let html = '';
 
@@ -1726,7 +2335,8 @@ function openProcessDrawer(pid) {
 
   if (proc.tokenBudget) {
     const pct = Math.min(100, (proc.tokensUsed / proc.tokenBudget) * 100);
-    html += `<div class="drawer-section"><div class="drawer-label">Tokens</div><div class="drawer-value">${fmtTokens(proc.tokensUsed)} / ${fmtTokens(proc.tokenBudget)}</div><div class="token-bar"><div class="token-bar-fill" style="width:${pct}%"></div></div></div>`;
+    const barColor = pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--amber)' : 'var(--accent)';
+    html += `<div class="drawer-section"><div class="drawer-label">Tokens</div><div class="drawer-value">${fmtTokens(proc.tokensUsed)} / ${fmtTokens(proc.tokenBudget)} <span style="color:var(--color-text-dim)">(${pct.toFixed(0)}%)</span></div><div class="token-bar"><div class="token-bar-fill" style="width:${pct}%;background:${barColor}"></div></div></div>`;
   } else {
     html += `<div class="drawer-section"><div class="drawer-label">Tokens</div><div class="drawer-value">${fmtTokens(proc.tokensUsed)}</div></div>`;
   }
@@ -1738,7 +2348,7 @@ function openProcessDrawer(pid) {
     html += `<div class="drawer-section"><div class="drawer-label">Checkpoint</div><div class="drawer-value">${escHtml(proc.checkpoint.reason)}</div></div>`;
   }
   if (proc.blackboardKeysWritten) {
-    html += `<div class="drawer-section"><div class="drawer-label">Blackboard Keys</div><div class="drawer-value">${proc.blackboardKeysWritten.map(k => `<div style="color:var(--cyan)">${escHtml(k)}</div>`).join('')}</div></div>`;
+    html += `<div class="drawer-section"><div class="drawer-label">Blackboard Keys Written</div><div class="drawer-value">${proc.blackboardKeysWritten.map(k => `<div style="color:var(--cyan)">${escHtml(k)}</div>`).join('')}</div></div>`;
   }
   if (proc.selfReports && proc.selfReports.length > 0) {
     html += `<div class="drawer-section"><div class="drawer-label">Self Reports</div>`;
@@ -1753,7 +2363,13 @@ function openProcessDrawer(pid) {
 
   body.innerHTML = html;
 
-  // render message thread
+  // Terminal tab
+  renderDrawerTerminal(pid);
+
+  // Blackboard tab
+  renderDrawerBlackboard(proc);
+
+  // Messages tab
   const thread = $('#msg-thread');
   const msgs = state.messages[pid] || [];
   thread.innerHTML = msgs.map(m => {
@@ -1770,6 +2386,90 @@ function closeDrawer() {
   state.selectedProcessPid = null;
   $('#process-drawer').classList.remove('open');
   renderTopology();
+}
+
+function switchDrawerTab(tabName) {
+  $$('.drawer-tab').forEach(t => t.classList.toggle('active', t.dataset.dtab === tabName));
+  $$('.drawer-tab-content').forEach(t => t.classList.toggle('active', t.dataset.dtab === tabName));
+}
+
+function openExpandedView(pid) {
+  const proc = state.processes.find(p => p.pid === pid);
+  if (!proc) return;
+
+  const role = proc.processRole || 'shell';
+
+  // Header
+  $('#expanded-name').textContent = proc.name;
+  const typeBadge = $('#expanded-type-badge');
+  typeBadge.textContent = role;
+  typeBadge.className = 'proc-type-badge ' + role;
+  const stateBadge = $('#expanded-state-badge');
+  stateBadge.textContent = proc.state;
+  stateBadge.className = 'tree-state ' + proc.state;
+
+  // Meta row
+  const meta = $('#expanded-meta');
+  const pct = proc.tokenBudget ? ((proc.tokensUsed / proc.tokenBudget) * 100).toFixed(0) + '%' : '\u221e';
+  meta.innerHTML = [
+    { label: 'PID', value: proc.pid },
+    { label: 'Model', value: proc.model },
+    { label: 'Priority', value: proc.priority },
+    { label: 'Ticks', value: proc.tickCount },
+    { label: 'Tokens', value: `${fmtTokens(proc.tokensUsed)} / ${proc.tokenBudget ? fmtTokens(proc.tokenBudget) : '\u221e'} (${pct})` },
+    { label: 'Spawned', value: relTime(proc.spawnedAt) },
+    { label: 'Objective', value: proc.objective.slice(0, 80) + (proc.objective.length > 80 ? '...' : '') },
+  ].map(m => `<div class="expanded-meta-item"><span class="expanded-meta-label">${m.label}</span><span class="expanded-meta-value">${escHtml(String(m.value))}</span></div>`).join('');
+
+  // Terminal pane
+  const termContainer = $('#expanded-terminal');
+  const logs = state.terminalLogs[pid] || [];
+  if (logs.length === 0) {
+    termContainer.innerHTML = '<div style="color:var(--color-text-dim);font-family:var(--font-mono);font-size:11px;padding:20px">No terminal output.</div>';
+  } else {
+    let termHtml = '<div class="drawer-terminal">';
+    termHtml += logs.map(log => {
+      const levelClass = `term-level-${log.level}`;
+      return `<span class="${levelClass}">${escHtml(log.text)}</span>`;
+    }).join('\n');
+    termHtml += '</div>';
+    termContainer.innerHTML = termHtml;
+    termContainer.scrollTop = termContainer.scrollHeight;
+  }
+
+  // Blackboard I/O pane
+  const bbContainer = $('#expanded-blackboard');
+  const entries = getProcessBBEntries(proc);
+  const bbCount = $('#expanded-bb-count');
+  bbCount.textContent = entries.length > 0 ? `${entries.length} key${entries.length > 1 ? 's' : ''}` : '';
+
+  if (entries.length === 0) {
+    bbContainer.innerHTML = '<div style="color:var(--color-text-dim);font-family:var(--font-mono);font-size:11px;padding:20px">No blackboard I/O.</div>';
+  } else {
+    let bbHtml = '';
+    entries.forEach(e => {
+      const dirColor = e.dir === 'write' ? 'var(--green)' : 'var(--color-text-dim)';
+      const dirLabel = e.dir === 'write' ? 'WRITE' : 'READ';
+      bbHtml += `<div style="margin-bottom:12px;border:1px solid var(--border);padding:10px">`;
+      bbHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`;
+      bbHtml += `<span style="font-family:var(--font-mono);font-size:12px;color:var(--cyan);font-weight:500">${escHtml(e.key)}</span>`;
+      bbHtml += `<span style="font-family:var(--font-mono);font-size:9px;color:${dirColor};border:1px solid ${dirColor};padding:1px 5px;opacity:0.7">${dirLabel}</span>`;
+      bbHtml += `</div>`;
+      if (e.value !== null) {
+        bbHtml += `<pre style="font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:0">${jsonToHtml(e.value)}</pre>`;
+      } else {
+        bbHtml += `<div style="color:var(--color-text-dim);font-family:var(--font-mono);font-size:11px">Value not available</div>`;
+      }
+      bbHtml += `</div>`;
+    });
+    bbContainer.innerHTML = bbHtml;
+  }
+
+  $('#expanded-overlay').classList.add('open');
+}
+
+function closeExpandedView() {
+  $('#expanded-overlay').classList.remove('open');
 }
 
 // ═══════════════════════════════════════
@@ -1866,6 +2566,22 @@ function renderDAG() {
   const scale = state.dagScale;
 
   ctx.clearRect(0, 0, rect.width, rect.height);
+
+  // Draw subtle grid
+  ctx.save();
+  const gridSize = 40 * scale;
+  const gridOffX = ox % gridSize;
+  const gridOffY = oy % gridSize;
+  ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+  ctx.lineWidth = 0.5;
+  for (let x = gridOffX; x < rect.width; x += gridSize) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); ctx.stroke();
+  }
+  for (let y = gridOffY; y < rect.height; y += gridSize) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(rect.width, y); ctx.stroke();
+  }
+  ctx.restore();
+
   ctx.save();
   ctx.translate(ox, oy);
   ctx.scale(scale, scale);
@@ -1928,16 +2644,20 @@ function renderDAG() {
   });
 
   // Draw nodes
+  const roleColors = { kernel: '#00ff88', 'sub-kernel': '#00d4ff', shell: '#555555' };
+
   dagProcs.forEach(proc => {
     const pos = positions[proc.pid];
     if (!pos) return;
 
-    const r = proc.name === 'metacog' ? 28 : 22;
+    const role = proc.processRole || 'shell';
+    const r = role === 'kernel' ? 28 : role === 'sub-kernel' ? 24 : 22;
     const color = stateColors[proc.state] || '#555';
+    const ringColor = roleColors[role] || '#555';
     const isSelected = proc.pid === state.selectedProcessPid;
 
-    // Glow for metacog
-    if (proc.name === 'metacog') {
+    // Glow for kernel
+    if (role === 'kernel') {
       ctx.beginPath();
       ctx.arc(pos.x, pos.y, r + 6, 0, Math.PI * 2);
       const grad = ctx.createRadialGradient(pos.x, pos.y, r, pos.x, pos.y, r + 8);
@@ -1947,14 +2667,25 @@ function renderDAG() {
       ctx.fill();
     }
 
+    // Sub-kernel double ring
+    if (role === 'sub-kernel') {
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0,212,255,0.15)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
     // Node circle
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
     ctx.fillStyle = isSelected ? 'rgba(0,255,136,0.12)' : '#0a0a0a';
     ctx.fill();
     ctx.lineWidth = isSelected ? 2 : 1;
-    ctx.strokeStyle = isSelected ? color : 'rgba(255,255,255,0.15)';
+    ctx.strokeStyle = isSelected ? color : ringColor;
+    ctx.globalAlpha = isSelected ? 1 : (role === 'shell' ? 0.3 : 0.5);
     ctx.stroke();
+    ctx.globalAlpha = 1;
 
     // Inner dot for state
     ctx.beginPath();
@@ -1968,10 +2699,12 @@ function renderDAG() {
     ctx.textAlign = 'center';
     ctx.fillText(proc.name, pos.x, pos.y + r + 16);
 
-    // State label
+    // Role + state label
     ctx.font = '9px IBM Plex Mono, monospace';
+    ctx.fillStyle = roleColors[role];
+    ctx.fillText(role, pos.x, pos.y + r + 28);
     ctx.fillStyle = color;
-    ctx.fillText(proc.state, pos.x, pos.y + r + 28);
+    ctx.fillText(proc.state, pos.x, pos.y + r + 38);
   });
 
   ctx.restore();
@@ -2052,6 +2785,62 @@ function renderDeferrals() {
 }
 
 // ═══════════════════════════════════════
+// RENDER: TERMINAL
+// ═══════════════════════════════════════
+function renderTerminalSelect() {
+  const select = $('#term-process-select');
+  const current = select.value || state.terminalPid;
+  select.innerHTML = state.processes.map(p => {
+    const stateTag = p.state === 'dead' ? ' (exited)' : p.state === 'sleeping' ? ' (sleeping)' : '';
+    return `<option value="${p.pid}" ${p.pid === current ? 'selected' : ''}>${escHtml(p.name)}${stateTag}</option>`;
+  }).join('');
+}
+
+function renderTerminal() {
+  const output = $('#term-output');
+  const logs = state.terminalLogs[state.terminalPid] || [];
+  if (logs.length === 0) {
+    output.innerHTML = '<div class="term-empty">No output from this process yet.</div>';
+    return;
+  }
+  const proc = state.processes.find(p => p.pid === state.terminalPid);
+  const procName = proc ? proc.name : state.terminalPid;
+  const procState = proc ? proc.state : 'unknown';
+
+  let html = logs.map(log => {
+    const absTs = log.ts;
+    const ago = Math.abs(absTs);
+    const tsStr = ago >= 60 ? `${Math.floor(ago/60)}m${ago%60}s` : `${ago}s`;
+    const levelClass = `term-level-${log.level}`;
+    const text = escHtml(log.text);
+    return `<span class="term-line"><span class="term-ts">-${tsStr}</span><span class="${levelClass}">${text}</span></span>`;
+  }).join('\n');
+
+  // Add blinking cursor at end if process is alive
+  if (procState === 'running' || procState === 'sleeping' || procState === 'checkpoint') {
+    html += `\n<span class="term-line"><span class="term-ts">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="term-prompt">\u2588</span></span>`;
+  }
+
+  output.innerHTML = html;
+
+  if (state.terminalAutoScroll) {
+    output.scrollTop = output.scrollHeight;
+  }
+}
+
+function appendTerminalLine(pid, level, text) {
+  if (!state.terminalLogs[pid]) state.terminalLogs[pid] = [];
+  state.terminalLogs[pid].push({ ts: 0, level, text });
+  // Keep last 200 lines per process
+  if (state.terminalLogs[pid].length > 200) {
+    state.terminalLogs[pid] = state.terminalLogs[pid].slice(-200);
+  }
+  if (state.activeTab === 'terminal' && state.terminalPid === pid) {
+    renderTerminal();
+  }
+}
+
+// ═══════════════════════════════════════
 // RENDER: EVENT FEED
 // ═══════════════════════════════════════
 function renderEvents(flashLast = false) {
@@ -2084,6 +2873,8 @@ function renderEvents(flashLast = false) {
 // ═══════════════════════════════════════
 // RENDER: STATS
 // ═══════════════════════════════════════
+let prevTokens = 27101;
+let lastTokenTime = Date.now();
 function renderStats() {
   const running = state.processes.filter(p => p.state === 'running').length;
   state.totalTokens = state.processes.reduce((s, p) => s + p.tokensUsed, 0);
@@ -2091,6 +2882,15 @@ function renderStats() {
   $('#stat-active').textContent = running;
   $('#stat-tokens').textContent = fmtTokens(state.totalTokens);
   $('#stat-tick').textContent = state.tickCount;
+
+  const now = Date.now();
+  const dt = (now - lastTokenTime) / 1000;
+  if (dt > 0.5) {
+    const rate = Math.round((state.totalTokens - prevTokens) / dt);
+    $('#stat-rate').textContent = `~${Math.max(0, rate)}`;
+    prevTokens = state.totalTokens;
+    lastTokenTime = now;
+  }
 }
 
 // ═══════════════════════════════════════
@@ -2163,9 +2963,32 @@ function executeCmdQuery(query) {
 
   const responseText = CMD_RESPONSES[q] || CMD_RESPONSES.default;
 
+  // Typewriter effect
   setTimeout(() => {
-    resp.innerHTML = `<pre style="white-space:pre-wrap;margin:0;font-family:var(--font-mono);font-size:12px;line-height:1.6">${escHtml(responseText)}</pre>`;
-  }, 800);
+    let idx = 0;
+    const chars = responseText;
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;margin:0;font-family:var(--font-mono);font-size:12px;line-height:1.6';
+    resp.innerHTML = '';
+    resp.appendChild(pre);
+    const cursor = document.createElement('span');
+    cursor.className = 'cmd-typing';
+    cursor.textContent = '\u2588';
+    resp.appendChild(cursor);
+
+    function typeChar() {
+      if (idx < chars.length) {
+        const chunk = Math.min(3, chars.length - idx); // 3 chars at a time for speed
+        pre.textContent += chars.slice(idx, idx + chunk);
+        idx += chunk;
+        resp.scrollTop = resp.scrollHeight;
+        setTimeout(typeChar, 12 + Math.random() * 8);
+      } else {
+        cursor.remove();
+      }
+    }
+    typeChar();
+  }, 600);
 }
 
 // ═══════════════════════════════════════
@@ -2184,6 +3007,9 @@ function switchTab(tabName) {
     renderHeuristics();
   } else if (tabName === 'deferrals') {
     renderDeferrals();
+  } else if (tabName === 'terminal') {
+    renderTerminalSelect();
+    renderTerminal();
   }
 }
 
@@ -2251,6 +3077,15 @@ function simulateNewEvent() {
   state.events.unshift(ev);
   if (state.events.length > 100) state.events.pop();
   renderEvents(true);
+
+  // Also append to terminal logs for the relevant agent
+  if (tmpl.agentName) {
+    const proc = state.processes.find(p => p.name === tmpl.agentName);
+    if (proc) {
+      const levelMap = { os_tick: 'info', os_llm_stream: 'thinking', os_command: 'tool' };
+      appendTerminalLine(proc.pid, levelMap[tmpl.action] || 'info', tmpl.message());
+    }
+  }
 }
 
 function simulateStateChange() {
@@ -2295,6 +3130,7 @@ function simulateSpawn() {
     pid: `proc-spawn-${String(spawnCounter).padStart(3, '0')}`,
     type: 'lifecycle', state: 'running', name,
     parentPid: parent.pid,
+    processRole: 'shell',
     objective: `Auto-spawned process for ${name}`,
     priority: 50,
     spawnedAt: new Date().toISOString(),
@@ -2413,6 +3249,21 @@ function setupEventHandlers() {
   // Drawer close
   $('#drawer-close').addEventListener('click', closeDrawer);
 
+  // Drawer tab switching
+  $$('.drawer-tab').forEach(tab => {
+    tab.addEventListener('click', () => switchDrawerTab(tab.dataset.dtab));
+  });
+
+  // Drawer expand button
+  $('#drawer-expand').addEventListener('click', () => {
+    if (state.selectedProcessPid) {
+      openExpandedView(state.selectedProcessPid);
+    }
+  });
+
+  // Expanded view close
+  $('#expanded-close').addEventListener('click', closeExpandedView);
+
   // Message send
   function sendMessage() {
     const input = $('#msg-input');
@@ -2440,7 +3291,8 @@ function setupEventHandlers() {
       else openCmdPalette();
     }
     if (e.key === 'Escape') {
-      if (state.cmdOpen) closeCmdPalette();
+      if ($('#expanded-overlay').classList.contains('open')) closeExpandedView();
+      else if (state.cmdOpen) closeCmdPalette();
       else if (state.drawerOpen) closeDrawer();
     }
   });
@@ -2489,6 +3341,23 @@ function setupEventHandlers() {
 
   // Blackboard search
   $('#bb-search').addEventListener('input', renderBlackboard);
+
+  // Terminal controls
+  $('#term-process-select').addEventListener('change', (e) => {
+    state.terminalPid = e.target.value;
+    renderTerminal();
+  });
+  $('#term-autoscroll').addEventListener('change', (e) => {
+    state.terminalAutoScroll = e.target.checked;
+    if (state.terminalAutoScroll) {
+      const output = $('#term-output');
+      output.scrollTop = output.scrollHeight;
+    }
+  });
+  $('#term-clear').addEventListener('click', () => {
+    state.terminalLogs[state.terminalPid] = [];
+    renderTerminal();
+  });
 
   // DAG canvas interactions
   const canvas = $('#dag-canvas');
@@ -2654,6 +3523,14 @@ async function boot() {
   setInterval(() => rotateNarrative(), 8000);
   setInterval(() => updateClock(), 1000);
   setInterval(() => updateTitle(), 3000);
+
+  // Simulated terminal output
+  let cannedTermIdx = 0;
+  setInterval(() => {
+    const tmpl = CANNED_TERMINAL_LINES[cannedTermIdx % CANNED_TERMINAL_LINES.length];
+    cannedTermIdx++;
+    appendTerminalLine(tmpl.proc, tmpl.level, tmpl.text());
+  }, 4000 + Math.random() * 2000);
 
   // DAG animation loop for edge particles
   dagAnimLoop();

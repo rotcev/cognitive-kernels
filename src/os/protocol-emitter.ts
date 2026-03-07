@@ -2,6 +2,7 @@ import path from "node:path";
 import { createWriteStream, writeFileSync, type WriteStream } from "node:fs";
 import type { RuntimeProtocolEvent, RuntimeProtocolAction, RuntimeProtocolStatus, StreamEvent } from "../types.js";
 import type { OsSystemSnapshot } from "./types.js";
+import type { LensEventBus } from "../lens/event-bus.js";
 
 const DB_FLUSH_BATCH_SIZE = 10;
 const DB_FLUSH_INTERVAL_MS = 1_000;
@@ -25,11 +26,13 @@ export type OsProtocolEmitterFileOptions = {
   snapshotPath: string;
   livePath: string;
   storageBackend?: OsProtocolEmitterStorageBackend;
+  lensBus?: LensEventBus;
 };
 
 export type OsProtocolEmitterDbOnlyOptions = {
   storageBackend: OsProtocolEmitterStorageBackend;
   runId: string;
+  lensBus?: LensEventBus;
 };
 
 export type OsProtocolEmitterOptions = OsProtocolEmitterFileOptions | OsProtocolEmitterDbOnlyOptions;
@@ -40,6 +43,7 @@ export class OsProtocolEmitter {
   private readonly livePath: string | null;
   private readonly runId: string;
   private readonly storageBackend?: OsProtocolEmitterStorageBackend;
+  private readonly lensBus?: LensEventBus;
   private readonly bufferedEvents: RuntimeProtocolEvent[] = [];
 
   private flushTimer: NodeJS.Timeout | null = null;
@@ -66,6 +70,7 @@ export class OsProtocolEmitter {
       this.livePath = optionsOrPath.livePath;
       this.runId = path.basename(path.dirname(optionsOrPath.protocolLogPath));
       this.storageBackend = optionsOrPath.storageBackend;
+      this.lensBus = optionsOrPath.lensBus;
     } else {
       // DB-only mode
       this.stream = null;
@@ -73,6 +78,7 @@ export class OsProtocolEmitter {
       this.livePath = null;
       this.runId = optionsOrPath.runId;
       this.storageBackend = optionsOrPath.storageBackend;
+      this.lensBus = optionsOrPath.lensBus;
     }
   }
 
@@ -89,6 +95,7 @@ export class OsProtocolEmitter {
 
     this.stream?.write(`${JSON.stringify(event)}\n`);
     this.enqueueBackendEvent(event);
+    this.lensBus?.emit({ type: "event", runId: this.runId, event });
   }
 
   emitStreamEvent(pid: string, processName: string, event: StreamEvent): void {
@@ -107,6 +114,7 @@ export class OsProtocolEmitter {
 
     this.stream?.write(`${JSON.stringify(entry)}\n`);
     this.enqueueBackendEvent(entry);
+    this.lensBus?.emit({ type: "event", runId: this.runId, event: entry });
   }
 
   writeLiveState(snapshot: OsSystemSnapshot): void {
@@ -119,6 +127,8 @@ export class OsProtocolEmitter {
         // Filesystem snapshot artifacts are authoritative; DB writes are best-effort.
       });
     }
+
+    this.lensBus?.emit({ type: "snapshot", runId: this.runId, snapshot });
   }
 
   saveSnapshot(snapshot: OsSystemSnapshot): void {

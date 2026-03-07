@@ -1,0 +1,52 @@
+Direct result: This repo is a TypeScript ESM (NodeNext) project. Source lives in `src/`, tests live in `test/` and run under Vitest. Tests commonly import TS modules using a `.js` extension (NodeNext convention) and use `describe/test/expect` (Vitest), sometimes with `vi.mock` and “contract” style dynamic imports.
+
+## Top-Level Layout
+- Root dirs (from `ls`): `/Users/shawndavies/dev/cognitive-kernels/src`, `/Users/shawndavies/dev/cognitive-kernels/test`, `/Users/shawndavies/dev/cognitive-kernels/dist`
+- Source areas (examples):
+  - OS runtime: `/Users/shawndavies/dev/cognitive-kernels/src/os/*`
+  - DB layer: `/Users/shawndavies/dev/cognitive-kernels/src/db/*`
+  - Brain providers: `/Users/shawndavies/dev/cognitive-kernels/src/brain/*`
+  - API: `/Users/shawndavies/dev/cognitive-kernels/src/api/*`
+
+## Module System / Imports (important for new TS files + tests)
+- Package is ESM: `/Users/shawndavies/dev/cognitive-kernels/package.json:5` (`"type": "module"`)
+- TS uses NodeNext modules: `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5`
+- Tests import from `src/` using `.js` extensions (TS maps to `.ts` under NodeNext), e.g.:
+  - `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:35`:
+    - `import { runOsMode } from "../../src/os/entry.js";`
+- Node builtins are usually imported via `node:` specifiers, e.g.:
+  - `/Users/shawndavies/dev/cognitive-kernels/test/os/kernel.test.ts:1-3` (`node:os`, `node:path`, `node:fs`)
+
+## Test Runner / Conventions
+- Vitest script: `/Users/shawndavies/dev/cognitive-kernels/package.json:19-22` (`"test": "vitest run --passWithNoTests"`)
+- Test file discovery: `test/**/*.test.ts` (examples below).
+- Most tests use Vitest’s BDD API:
+  - `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1`:
+    - `import { beforeEach, describe, expect, test, vi } from "vitest";`
+
+## Common Test Patterns (useful templates)
+### 1) Direct import + expect assertions
+- `/Users/shawndavies/dev/cognitive-kernels/test/runs/run-manager.test.ts:8-13` imports from `src/` with `.js`.
+- Uses `describe` + `test` + `expect` assertions.
+
+### 1b) `assert` note (for the email validator task)
+- No existing tests import Node’s `assert` (`rg "node:assert"` returned no matches), but using `import assert from "node:assert/strict";` inside Vitest `test(...)` blocks should be compatible with this repo’s ESM setup.
+
+### 2) Mocking with `vi.mock` + `vi.hoisted`
+- `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:3-35`:
+  - Uses `vi.hoisted` to declare mocks/capture objects.
+  - Uses `vi.mock` to stub dependencies (including `node:fs/promises`).
+
+### 3) “Contract” tests with dynamic import + helpful error
+- `/Users/shawndavies/dev/cognitive-kernels/test/db/connection.test.ts:3-14`:
+  - `const MODULE_PATH = "../../src/db/connection.js";`
+  - `await import(MODULE_PATH)` in a try/catch that throws a clearer “Missing implementation…” error.
+
+## Build vs Test Typechecking Gotcha
+- `tsc -p tsconfig.json` compiles only `src/**/*.ts`:
+  - `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:16-17`
+- Tests are not included in `tsc` build; they’re transpiled/executed by Vitest.
+
+## Public Exports (if parent wants to expose a new helper)
+- Central export barrel: `/Users/shawndavies/dev/cognitive-kernels/src/index.ts:1-54`
+  - Add new exports here only if the email validator should be part of the published package API.

@@ -37,6 +37,8 @@ type KernelRunRecord = {
   child: ChildProcess | null;
 };
 
+export type RunTransitionCallback = (run: KernelRun) => void;
+
 export type KernelRunManagerOptions = {
   runsRoot?: string;
   scriptPath?: string;
@@ -45,6 +47,7 @@ export type KernelRunManagerOptions = {
   scriptPathExistsFn?: (filePath: string) => boolean;
   now?: () => Date;
   storageBackend?: KernelRunStorageBackend;
+  onTransition?: RunTransitionCallback;
 };
 
 export type ReadRunEventsOptions = {
@@ -70,6 +73,7 @@ export class KernelRunManager {
   private readonly scriptPathExistsFn: (filePath: string) => boolean;
   private readonly now: () => Date;
   private readonly storageBackend?: KernelRunStorageBackend;
+  private readonly onTransition?: RunTransitionCallback;
   private readonly records = new Map<string, KernelRunRecord>();
 
   constructor(options: KernelRunManagerOptions = {}) {
@@ -80,6 +84,7 @@ export class KernelRunManager {
     this.scriptPathExistsFn = options.scriptPathExistsFn ?? existsSync;
     this.now = options.now ?? (() => new Date());
     this.storageBackend = options.storageBackend;
+    this.onTransition = options.onTransition;
   }
 
   async initialize(): Promise<void> {
@@ -480,6 +485,7 @@ export class KernelRunManager {
 
     record.run = updated;
     await this.persistRun(updated);
+    this.onTransition?.(updated);
   }
 
   private async persistRun(run: KernelRun): Promise<void> {

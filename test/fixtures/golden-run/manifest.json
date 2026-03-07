@@ -1,0 +1,42 @@
+{
+  "capturedAt": "2026-03-07T04:50:44.936Z",
+  "goal": "Write a TypeScript function that validates email addresses using a regex, with 3 unit tests using assert",
+  "runId": "1e577397-4df5-4eea-a9cd-463f55006982",
+  "totalTicks": 1,
+  "processCount": 3,
+  "eventCount": 13,
+  "snapshotCount": 4,
+  "elapsedMs": 221732,
+  "processNames": [
+    {
+      "pid": "os-proc-656528100b72",
+      "name": "goal-orchestrator",
+      "type": "lifecycle",
+      "state": "running",
+      "children": []
+    },
+    {
+      "pid": "os-proc-5ddd54779dec",
+      "name": "metacog-daemon",
+      "type": "daemon",
+      "state": "idle",
+      "children": []
+    },
+    {
+      "pid": "os-proc-aa3289155257",
+      "name": "awareness-daemon",
+      "type": "daemon",
+      "state": "idle",
+      "children": []
+    }
+  ],
+  "blackboardKeys": [
+    "system:design-guidelines",
+    "architecture:plan-draft",
+    "ephemeral:dependency-scout:eph-1fbcd67a-2b1",
+    "ephemeral:domain-scout:eph-630e8962-f59",
+    "ephemeral:codebase-scout:eph-6667de2a-81b"
+  ],
+  "dagEdgeCount": 0,
+  "dagNodeCount": 3
+}

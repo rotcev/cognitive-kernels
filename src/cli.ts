@@ -6,6 +6,7 @@ import { KernelRunManager } from "./runs/run-manager.js";
 import { createRunsApiServer } from "./api/server.js";
 import { createDbConnection } from "./db/connection.js";
 import { NeonStorageBackend } from "./db/storage-backend.js";
+import { LensSession } from "./lens/session.js";
 import type { BrainProvider } from "./types.js";
 
 loadDotenv();
@@ -100,7 +101,40 @@ async function handleServeCommand(flags: Map<string, string | boolean>): Promise
     process.stderr.write(`Neon storage backend connected\n`);
   }
 
-  const runManager = new KernelRunManager({ storageBackend });
+  // Lens is always on when Neon is connected (no --lens flag needed).
+  // For non-Neon setups, --lens flag enables it on a standalone port.
+  const lensPort = Number(readStringFlag(flags, "--lens-port") ?? "3200");
+  const lensEnabled = storageBackend != null || flags.has("--lens");
+  let lensSession: LensSession | undefined;
+
+  if (lensEnabled) {
+    lensSession = new LensSession({
+      port: lensPort,
+      storage: storageBackend,
+      pollIntervalMs: 2000,
+    });
+    await lensSession.start();
+    const addr = lensSession.address;
+    process.stderr.write(`Lens listening on ws://${host}:${addr?.port ?? lensPort}\n`);
+  }
+
+  const TERMINAL_STATUSES = new Set(["completed", "failed", "canceled"]);
+
+  const runManager = new KernelRunManager({
+    storageBackend,
+    onTransition: (run) => {
+      if (!lensSession) return;
+
+      if (run.status === "running") {
+        // Auto-observe: start polling Neon for this run's data
+        lensSession.observeRun(run.id);
+      } else if (TERMINAL_STATUSES.has(run.status)) {
+        // Auto-unobserve: stop polling, emit run_end
+        lensSession.bus.emit({ type: "run_end", runId: run.id, reason: run.status });
+        lensSession.unobserveRun(run.id);
+      }
+    },
+  });
   await runManager.initialize();
 
   const server = await createRunsApiServer({
@@ -116,6 +150,7 @@ async function handleServeCommand(flags: Map<string, string | boolean>): Promise
   // Keep alive until SIGINT/SIGTERM
   const shutdown = async () => {
     process.stderr.write("\nShutting down...\n");
+    if (lensSession) await lensSession.stop();
     await server.close();
     process.exit(0);
   };
@@ -139,7 +174,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       throw new Error(`Unexpected argument: ${token}`);
     }
 
-    if (token === "--json" || token === "--help") {
+    if (token === "--json" || token === "--help" || token === "--lens") {
       flags.set(token, true);
       continue;
     }
@@ -177,7 +212,7 @@ function printUsage(): void {
     [
       "Usage:",
       "  cognitive-kernels os --goal <text> [--config <path>] [--cwd <path>] [--provider claude|codex] [--protocol-log <path>] [--out <path>] [--run-id <id>] [--json]",
-      "  cognitive-kernels serve [--port <number>] [--host <address>] [--cwd <path>] [--config <path>]",
+      "  cognitive-kernels serve [--port <number>] [--host <address>] [--cwd <path>] [--config <path>] [--lens] [--lens-port <number>]",
     ].join("\n") + "\n",
   );
 }
