@@ -2185,6 +2185,25 @@ export class OsKernel {
 
     // Execute any commands the process returned
     await this.executeProcessCommands(proc.pid, result.commands);
+
+    // Auto-exit daemons that complete a turn without issuing exit/idle/sleep.
+    // Daemons are housekeeping processes — if they produce output without
+    // explicitly managing their own lifecycle, they're done.
+    const hasLifecycleCmd = result.commands.some(
+      c => c.kind === "exit" || c.kind === "idle" || c.kind === "sleep" || c.kind === "checkpoint"
+    );
+    if (!hasLifecycleCmd && proc.type === "daemon" && proc.state === "running") {
+      this.supervisor.kill(proc.pid, false, "auto-exit: daemon completed turn without lifecycle command");
+      this.executor.disposeThread(proc.pid);
+      this.router.disposeThread(proc.pid);
+      this.emitter?.emit({
+        action: "os_process_exit",
+        status: "completed",
+        agentId: proc.pid,
+        agentName: proc.name,
+        message: "auto-exit: daemon completed turn without lifecycle command",
+      });
+    }
   }
 
   /**
