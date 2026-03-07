@@ -1274,135 +1274,145 @@ export class OsKernel {
     this.streamTokenCount.clear();
     this.tickInProgress = false;
 
-    const now = new Date().toISOString();
     for (const result of results) {
-      const proc = this.table.get(result.pid);
-      if (!proc) continue;
-
-      proc.tickCount += 1;
-      proc.tokensUsed += result.tokensUsed;
-      proc.lastActiveAt = now;
-
-      // Check if process exceeded its token budget (only when per-process budgets are enabled)
-      if (this.config.kernel.processTokenBudgetEnabled &&
-          proc.tokenBudget !== undefined && proc.tokensUsed > proc.tokenBudget) {
-        this.addTrigger('resource_exhaustion');
-        this.emitter?.emit({
-          action: 'os_metacog',
-          status: 'completed',
-          message: `token_budget_exceeded pid=${proc.pid} name=${proc.name} used=${proc.tokensUsed} budget=${proc.tokenBudget}`,
-        });
-      }
-
-      if (!result.success) {
-        // GAP 1: Record strategy FAILURE for the strategy that was active on this process
-        if (proc.activeStrategyId) {
-          this.memoryStore.recordStrategyOutcome(proc.activeStrategyId, false, proc.tokensUsed);
-        }
-        // Process failed — kill it and trigger metacog
-        const parentPid = proc.parentPid;
-        this.supervisor.kill(proc.pid, false, `execution_failed: ${result.response}`);
-        this.executor.disposeThread(proc.pid);
-        this.router.disposeThread(proc.pid);
-        this.emitter?.emit({
-          action: "os_process_kill",
-          status: "completed",
-          agentId: proc.pid,
-          agentName: proc.name,
-          message: `execution_failed`,
-        });
-        this.addTrigger("process_failed");
-
-        // Auto-signal parent when a child process dies (don't depend on LLM compliance)
-        if (parentPid) {
-          this.emitChildDoneSignal(proc.pid, proc.name, parentPid, 1, proc.exitReason ?? `execution_failed: ${result.response}`);
-        }
-        continue;
-      }
-
-      // Gap 8: Wire TelemetryCollector.onProcessComplete() for process-level telemetry
-      if (this.config.kernel.telemetryEnabled) {
-        this.telemetryCollector.onProcessComplete(
-          proc.pid,
-          result.tokensUsed,
-          result.response.split("\n"),
-        );
-      }
-
-      // ── Hard Spawn Enforcement ──
-      // For the top-level orchestrator's first tick: enforce spawn requirement.
-      // proc.tickCount was incremented above, so tickCount === 1 means this was tick 0's result.
-      if (
-        !proc.parentPid &&
-        proc.type === "lifecycle" &&
-        proc.tickCount === 1
-      ) {
-        const hasSpawnCommand = result.commands.some(c =>
-          c.kind === "spawn_child" || c.kind === "spawn_system" || c.kind === "spawn_kernel" || c.kind === "spawn_ephemeral" || c.kind === "spawn_graph"
-        );
-        if (!hasSpawnCommand) {
-          // REJECT: orchestrator tried to solve directly instead of spawning workers.
-          // Preserve bb_write commands so architecture docs aren't lost on retry.
-          const bbWrites = result.commands.filter(c => c.kind === "bb_write");
-          if (bbWrites.length > 0) {
-            await this.executeProcessCommands(proc.pid, bbWrites);
-          }
-          this.emitter?.emit({
-            action: "os_command_rejected",
-            status: "completed",
-            agentId: proc.pid,
-            agentName: proc.name,
-            message: `tick 0 rejected: orchestrator produced zero spawn commands — must design topology and spawn child processes (preserved ${bbWrites.length} bb_write commands)`,
-          });
-          // Discard remaining commands, keep process in running state — it will run again
-          // next tick with a re-prompt (see llm-executor rejection re-prompt)
-          continue;
-        }
-      }
-
-      // ── Architect-Phase Deadlock Enforcement ──
-      // After scouts return, the orchestrator must spawn lifecycle children.
-      // If it has scout results but no lifecycle children and is going idle without
-      // spawning any, that's a deadlock — reject and re-prompt.
-      if (
-        !proc.parentPid &&
-        proc.type === "lifecycle" &&
-        proc.tickCount >= 1
-      ) {
-        const hasLifecycleChildren = this.table.getAll().some(
-          p => p.parentPid === proc.pid && p.type === "lifecycle"
-        );
-        const hasScoutResults = this.ipcBus.bbReadAll().some(
-          entry => entry.key.startsWith("ephemeral:") || entry.key.startsWith("scout:")
-        );
-        const goingIdle = result.commands.some(c => c.kind === "idle");
-        const spawnsLifecycle = result.commands.some(c =>
-          c.kind === "spawn_child" || c.kind === "spawn_graph"
-        );
-
-        if (!hasLifecycleChildren && hasScoutResults && goingIdle && !spawnsLifecycle) {
-          // Preserve bb_write commands before rejecting
-          const bbWrites = result.commands.filter(c => c.kind === "bb_write");
-          if (bbWrites.length > 0) {
-            await this.executeProcessCommands(proc.pid, bbWrites);
-          }
-          this.emitter?.emit({
-            action: "os_command_rejected",
-            status: "completed",
-            agentId: proc.pid,
-            agentName: proc.name,
-            message: `architect-phase deadlock: scout data available but no lifecycle children spawned — must design topology and spawn Phase 0 (preserved ${bbWrites.length} bb_write commands)`,
-          });
-          continue;
-        }
-      }
-
-      // Execute any commands the process returned
-      await this.executeProcessCommands(proc.pid, result.commands);
+      await this.processOneResult(result);
     }
 
     // Fire-and-forget: drain ephemerals in background so the next tick can start immediately
     void this.drainPendingEphemerals();
+  }
+
+  /**
+   * Handle a single process turn result: update bookkeeping, enforce spawn
+   * invariants, and execute any returned commands.  Extracted from the
+   * executeProcesses() for-loop so it can also be called from the
+   * event-driven completion handler.
+   */
+  private async processOneResult(result: OsProcessTurnResult): Promise<void> {
+    const now = new Date().toISOString();
+    const proc = this.table.get(result.pid);
+    if (!proc) return;
+
+    proc.tickCount += 1;
+    proc.tokensUsed += result.tokensUsed;
+    proc.lastActiveAt = now;
+
+    // Check if process exceeded its token budget (only when per-process budgets are enabled)
+    if (this.config.kernel.processTokenBudgetEnabled &&
+        proc.tokenBudget !== undefined && proc.tokensUsed > proc.tokenBudget) {
+      this.addTrigger('resource_exhaustion');
+      this.emitter?.emit({
+        action: 'os_metacog',
+        status: 'completed',
+        message: `token_budget_exceeded pid=${proc.pid} name=${proc.name} used=${proc.tokensUsed} budget=${proc.tokenBudget}`,
+      });
+    }
+
+    if (!result.success) {
+      // GAP 1: Record strategy FAILURE for the strategy that was active on this process
+      if (proc.activeStrategyId) {
+        this.memoryStore.recordStrategyOutcome(proc.activeStrategyId, false, proc.tokensUsed);
+      }
+      // Process failed — kill it and trigger metacog
+      const parentPid = proc.parentPid;
+      this.supervisor.kill(proc.pid, false, `execution_failed: ${result.response}`);
+      this.executor.disposeThread(proc.pid);
+      this.router.disposeThread(proc.pid);
+      this.emitter?.emit({
+        action: "os_process_kill",
+        status: "completed",
+        agentId: proc.pid,
+        agentName: proc.name,
+        message: `execution_failed`,
+      });
+      this.addTrigger("process_failed");
+
+      // Auto-signal parent when a child process dies (don't depend on LLM compliance)
+      if (parentPid) {
+        this.emitChildDoneSignal(proc.pid, proc.name, parentPid, 1, proc.exitReason ?? `execution_failed: ${result.response}`);
+      }
+      return;
+    }
+
+    // Gap 8: Wire TelemetryCollector.onProcessComplete() for process-level telemetry
+    if (this.config.kernel.telemetryEnabled) {
+      this.telemetryCollector.onProcessComplete(
+        proc.pid,
+        result.tokensUsed,
+        result.response.split("\n"),
+      );
+    }
+
+    // ── Hard Spawn Enforcement ──
+    // For the top-level orchestrator's first tick: enforce spawn requirement.
+    // proc.tickCount was incremented above, so tickCount === 1 means this was tick 0's result.
+    if (
+      !proc.parentPid &&
+      proc.type === "lifecycle" &&
+      proc.tickCount === 1
+    ) {
+      const hasSpawnCommand = result.commands.some(c =>
+        c.kind === "spawn_child" || c.kind === "spawn_system" || c.kind === "spawn_kernel" || c.kind === "spawn_ephemeral" || c.kind === "spawn_graph"
+      );
+      if (!hasSpawnCommand) {
+        // REJECT: orchestrator tried to solve directly instead of spawning workers.
+        // Preserve bb_write commands so architecture docs aren't lost on retry.
+        const bbWrites = result.commands.filter(c => c.kind === "bb_write");
+        if (bbWrites.length > 0) {
+          await this.executeProcessCommands(proc.pid, bbWrites);
+        }
+        this.emitter?.emit({
+          action: "os_command_rejected",
+          status: "completed",
+          agentId: proc.pid,
+          agentName: proc.name,
+          message: `tick 0 rejected: orchestrator produced zero spawn commands — must design topology and spawn child processes (preserved ${bbWrites.length} bb_write commands)`,
+        });
+        // Discard remaining commands, keep process in running state — it will run again
+        // next tick with a re-prompt (see llm-executor rejection re-prompt)
+        return;
+      }
+    }
+
+    // ── Architect-Phase Deadlock Enforcement ──
+    // After scouts return, the orchestrator must spawn lifecycle children.
+    // If it has scout results but no lifecycle children and is going idle without
+    // spawning any, that's a deadlock — reject and re-prompt.
+    if (
+      !proc.parentPid &&
+      proc.type === "lifecycle" &&
+      proc.tickCount >= 1
+    ) {
+      const hasLifecycleChildren = this.table.getAll().some(
+        p => p.parentPid === proc.pid && p.type === "lifecycle"
+      );
+      const hasScoutResults = this.ipcBus.bbReadAll().some(
+        entry => entry.key.startsWith("ephemeral:") || entry.key.startsWith("scout:")
+      );
+      const goingIdle = result.commands.some(c => c.kind === "idle");
+      const spawnsLifecycle = result.commands.some(c =>
+        c.kind === "spawn_child" || c.kind === "spawn_graph"
+      );
+
+      if (!hasLifecycleChildren && hasScoutResults && goingIdle && !spawnsLifecycle) {
+        // Preserve bb_write commands before rejecting
+        const bbWrites = result.commands.filter(c => c.kind === "bb_write");
+        if (bbWrites.length > 0) {
+          await this.executeProcessCommands(proc.pid, bbWrites);
+        }
+        this.emitter?.emit({
+          action: "os_command_rejected",
+          status: "completed",
+          agentId: proc.pid,
+          agentName: proc.name,
+          message: `architect-phase deadlock: scout data available but no lifecycle children spawned — must design topology and spawn Phase 0 (preserved ${bbWrites.length} bb_write commands)`,
+        });
+        return;
+      }
+    }
+
+    // Execute any commands the process returned
+    await this.executeProcessCommands(proc.pid, result.commands);
   }
 
   /**
