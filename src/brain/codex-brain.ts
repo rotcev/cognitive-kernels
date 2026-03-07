@@ -315,64 +315,108 @@ export class CodexBrainThread implements BrainThread {
     for await (const event of events) {
       switch (event.type) {
         case "item.started":
-        case "item.updated":
-          if (event.item.type === "agent_message") {
-            onStream({ type: "text_delta", text: event.item.text });
-          } else if (event.item.type === "mcp_tool_call" && event.item.status === "in_progress") {
-            const toolName = `${event.item.server}:${event.item.tool}`;
-            const argumentsSummary = summarizeToolValue(event.item.arguments);
-            toolState.set(event.item.id, { toolName, argumentsSummary });
+        case "item.updated": {
+          const item = event.item;
+          switch (item.type) {
+            case "agent_message":
+              onStream({ type: "text_delta", text: item.text });
+              break;
+            case "reasoning":
+              onStream({ type: "text_delta", text: item.text });
+              break;
+            case "command_execution":
+              if (event.type === "item.started") {
+                onStream({ type: "text_delta", text: `$ ${item.command}\n` });
+              }
+              if (item.aggregated_output) {
+                onStream({ type: "text_delta", text: item.aggregated_output });
+              }
+              break;
+            case "file_change":
+              for (const change of item.changes) {
+                onStream({ type: "text_delta", text: `[${change.kind}] ${change.path}\n` });
+              }
+              break;
+            case "mcp_tool_call":
+              if (item.status === "in_progress") {
+                const toolName = `${item.server}:${item.tool}`;
+                const argumentsSummary = summarizeToolValue(item.arguments);
+                toolState.set(item.id, { toolName, argumentsSummary });
+                onStream({
+                  type: event.type === "item.started" ? "tool_started" : "tool_progress",
+                  provider: "codex",
+                  toolName,
+                  toolUseId: item.id,
+                  argumentsSummary,
+                  ...(event.type === "item.updated" ? { elapsedSeconds: 0 } : {}),
+                } as any);
+              }
+              break;
+            case "web_search":
+              onStream({ type: "text_delta", text: `[search] ${item.query}\n` });
+              break;
+            case "todo_list":
+              for (const todo of item.items) {
+                onStream({ type: "text_delta", text: `${todo.completed ? "✓" : "○"} ${todo.text}\n` });
+              }
+              break;
+            case "error":
+              onStream({ type: "text_delta", text: `[error] ${item.message}\n` });
+              break;
+          }
+          break;
+        }
 
-            if (event.type === "item.started") {
-              onStream({
-                type: "tool_started",
-                provider: "codex",
-                toolName,
-                toolUseId: event.item.id,
-                argumentsSummary,
-              });
-            } else {
-              onStream({
-                type: "tool_progress",
-                provider: "codex",
-                toolName,
-                toolUseId: event.item.id,
-                argumentsSummary,
-                elapsedSeconds: 0,
-              });
+        case "item.completed": {
+          const item = event.item;
+          switch (item.type) {
+            case "agent_message":
+              finalResponse = item.text;
+              break;
+            case "command_execution":
+              if (item.aggregated_output) {
+                onStream({ type: "text_delta", text: item.aggregated_output });
+              }
+              if (item.exit_code !== undefined && item.exit_code !== 0) {
+                onStream({ type: "text_delta", text: `[exit ${item.exit_code}]\n` });
+              }
+              break;
+            case "file_change":
+              for (const change of item.changes) {
+                onStream({ type: "text_delta", text: `[${change.kind}] ${change.path}\n` });
+              }
+              break;
+            case "mcp_tool_call": {
+              const prior = toolState.get(item.id);
+              const toolName = prior?.toolName ?? `${item.server}:${item.tool}`;
+              const argumentsSummary = prior?.argumentsSummary ?? summarizeToolValue(item.arguments);
+              if (item.status === "completed") {
+                onStream({
+                  type: "tool_completed",
+                  provider: "codex",
+                  toolName,
+                  toolUseId: item.id,
+                  argumentsSummary,
+                  resultSummary: summarizeToolValue(item.result),
+                });
+              } else if (item.status === "failed") {
+                onStream({
+                  type: "tool_failed",
+                  provider: "codex",
+                  toolName,
+                  toolUseId: item.id,
+                  argumentsSummary,
+                  error: summarizeToolError(item.error),
+                  resultSummary: summarizeToolValue(item.error),
+                });
+              }
+              break;
             }
           }
           break;
+        }
 
-        case "item.completed":
-          if (event.item.type === "agent_message") {
-            finalResponse = event.item.text;
-          } else if (event.item.type === "mcp_tool_call") {
-            const prior = toolState.get(event.item.id);
-            const toolName = prior?.toolName ?? `${event.item.server}:${event.item.tool}`;
-            const argumentsSummary = prior?.argumentsSummary ?? summarizeToolValue(event.item.arguments);
-
-            if (event.item.status === "completed") {
-              onStream({
-                type: "tool_completed",
-                provider: "codex",
-                toolName,
-                toolUseId: event.item.id,
-                argumentsSummary,
-                resultSummary: summarizeToolValue(event.item.result),
-              });
-            } else if (event.item.status === "failed") {
-              onStream({
-                type: "tool_failed",
-                provider: "codex",
-                toolName,
-                toolUseId: event.item.id,
-                argumentsSummary,
-                error: summarizeToolError(event.item.error),
-                resultSummary: summarizeToolValue(event.item.error),
-              });
-            }
-          }
+        case "turn.started":
           break;
 
         case "turn.completed":
