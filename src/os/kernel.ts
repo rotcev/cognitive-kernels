@@ -103,6 +103,7 @@ export class OsKernel {
   private pendingEphemerals: Array<{
     pid: string;
     ephemeralId: string;
+    tablePid: string;
     name: string;
     model: string;
     prompt: string;
@@ -538,6 +539,7 @@ export class OsKernel {
               action: "os_process_kill",
               status: "completed",
               agentId: cmd.pid,
+              agentName: this.table.get(cmd.pid)?.name ?? cmd.pid,
               message: `watchdog_kill: ${cmd.reason}`,
               detail: {
                 trigger: "watchdog",
@@ -1399,8 +1401,8 @@ export class OsKernel {
       await this.executeProcessCommands(proc.pid, result.commands);
     }
 
-    // Drain all pending ephemerals (non-blocking spawns from this tick)
-    await this.drainPendingEphemerals();
+    // Fire-and-forget: drain ephemerals in background so the next tick can start immediately
+    void this.drainPendingEphemerals();
   }
 
   /**
@@ -1441,6 +1443,16 @@ export class OsKernel {
         this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
         this.tickSignals.push("ephemeral:ready");
 
+        // Kill the process table entry so it shows as dead in topology
+        this.supervisor.kill(desc.tablePid, false, "ephemeral completed");
+        this.emitter?.emit({
+          action: "os_process_exit",
+          status: "completed",
+          agentId: desc.tablePid,
+          agentName: desc.name,
+          message: `completed duration=${ephDurationMs}ms`,
+        });
+
         if (this.config.kernel.telemetryEnabled) {
           this.telemetryCollector.onEphemeralComplete(ephResult);
         }
@@ -1470,6 +1482,16 @@ export class OsKernel {
         this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
         this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
         this.tickSignals.push("ephemeral:ready");
+
+        // Kill the process table entry so it shows as dead in topology
+        this.supervisor.kill(desc.tablePid, false, `ephemeral failed: ${errorMsg}`);
+        this.emitter?.emit({
+          action: "os_process_exit",
+          status: "failed",
+          agentId: desc.tablePid,
+          agentName: desc.name,
+          message: `failed: ${errorMsg}`,
+        });
 
         if (this.config.kernel.telemetryEnabled) {
           this.telemetryCollector.onEphemeralComplete(ephResult);
@@ -1501,6 +1523,7 @@ export class OsKernel {
    * Execute OS commands returned by a process turn.
    */
   private async executeProcessCommands(pid: string, commands: OsProcessCommand[]): Promise<void> {
+    const procName = this.table.get(pid)?.name ?? pid;
     // Reorder: process exit LAST so bb_write/signals run before death
     const reordered = [
       ...commands.filter((c) => c.kind !== "exit"),
@@ -1550,6 +1573,7 @@ export class OsKernel {
               action: "os_checkpoint",
               status: "completed",
               agentId: pid,
+              agentName: procName,
               message: `checkpoint saved: ${summary}`,
             });
             break;
@@ -1586,6 +1610,7 @@ export class OsKernel {
                   action: "os_command_rejected",
                   status: "completed",
                   agentId: pid,
+                  agentName: procName,
                   message: `defer dedup: "${cmd.descriptor.name}" already has pending deferral id=${dupDefer.id} from same parent`,
                 });
                 break;
@@ -1605,6 +1630,7 @@ export class OsKernel {
                 action: "os_defer",
                 status: "started",
                 agentId: pid,
+                agentName: procName,
                 message: `deferred spawn of "${cmd.descriptor.name}" condition=${JSON.stringify(cmd.condition)}`,
               });
             } else {
@@ -1685,6 +1711,7 @@ export class OsKernel {
                     action: "os_command_rejected",
                     status: "completed",
                     agentId: pid,
+                    agentName: procName,
                     message: `defer dedup: graph node "${node.name}" already has pending deferral id=${dupGraphDefer.id} from same parent`,
                   });
                   continue;
@@ -1704,6 +1731,7 @@ export class OsKernel {
                   action: "os_defer",
                   status: "started",
                   agentId: pid,
+                  agentName: procName,
                   message: `graph deferred: "${node.name}" after=[${node.after.join(", ")}] id=${ds.id}`,
                 });
               }
@@ -1712,6 +1740,7 @@ export class OsKernel {
               action: "os_defer",
               status: "started",
               agentId: pid,
+              agentName: procName,
               message: `spawn_graph: ${immediateCount} immediate, ${deferredCount} deferred (${cmd.nodes.length} total nodes)`,
             });
             break;
@@ -1808,11 +1837,30 @@ export class OsKernel {
             const ephName = cmd.name ?? "ephemeral";
             const ephModel = cmd.model ?? this.config.ephemeral.defaultModel;
 
+            // Register in process table so ephemerals appear in topology/DAG
+            const ephTableProc = this.supervisor.spawn({
+              type: "event",
+              name: ephName,
+              objective: cmd.objective,
+              parentPid: pid,
+              model: ephModel,
+              workingDir: ephProc.workingDir,
+            });
+            this.supervisor.activate(ephTableProc.pid);
+            this.emitter?.emit({
+              action: "os_process_spawn",
+              status: "started",
+              agentId: ephTableProc.pid,
+              agentName: ephName,
+              message: `parent=${procName} type=ephemeral model=${ephModel}`,
+            });
+
             // Non-blocking: push descriptor, increment count, continue processing commands
             ephProc.ephemeralSpawnCount = spawnCount + 1;
             this.pendingEphemerals.push({
               pid,
               ephemeralId,
+              tablePid: ephTableProc.pid,
               name: ephName,
               model: ephModel,
               prompt: [
@@ -1855,6 +1903,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "failed",
                 agentId: pid,
+                agentName: procName,
                 message: `spawn_system rejected: systemProcess.enabled is false`,
               });
               break;
@@ -1868,6 +1917,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "failed",
                 agentId: pid,
+                agentName: procName,
                 message: `spawn_system rejected: max system processes (${this.config.systemProcess.maxSystemProcesses}) reached`,
               });
               break;
@@ -1910,6 +1960,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "failed",
                 agentId: pid,
+                agentName: procName,
                 message: `spawn_kernel rejected: childKernel.enabled is false`,
               });
               break;
@@ -1920,6 +1971,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "failed",
                 agentId: pid,
+                agentName: procName,
                 message: `spawn_kernel rejected: this kernel is already a child (depth limit)`,
               });
               break;
@@ -1933,6 +1985,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "failed",
                 agentId: pid,
+                agentName: procName,
                 message: `spawn_kernel rejected: max child kernels (${this.config.childKernel.maxChildKernels}) reached`,
               });
               break;
@@ -1977,6 +2030,7 @@ export class OsKernel {
                 action: "os_command_rejected",
                 status: "completed",
                 agentId: pid,
+                agentName: procName,
                 message: `cancel_defer: no pending deferral with name "${cmd.name}" from this process`,
               });
               break;
@@ -1988,6 +2042,7 @@ export class OsKernel {
               action: "os_defer",
               status: "completed",
               agentId: pid,
+              agentName: procName,
               message: `cancel_defer: removed ${matches.length} deferral(s) for "${cmd.name}" reason="${cmd.reason}"`,
             });
             break;
@@ -2048,6 +2103,7 @@ export class OsKernel {
               action: "os_process_kill",
               status: "completed",
               agentId: pid,
+              agentName: exitingProc?.name ?? procName,
               message: `exit: ${cmd.reason}`,
             });
             // Auto-signal parent when a child exits (structural, not LLM-dependent)

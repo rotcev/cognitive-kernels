@@ -13,6 +13,8 @@ export class StreamSegmenter {
   private buffers = new Map<string, LensTerminalLine[]>();
   /** Global ring buffer — all lines across all processes, ordered by seq. */
   private globalBuffer: LensTerminalLine[] = [];
+  /** PID/ephemeralId → friendly name, populated from spawn events. */
+  private nameCache = new Map<string, string>();
   private maxPerProcess: number;
   private maxGlobal: number;
   private seq = 0;
@@ -29,6 +31,11 @@ export class StreamSegmenter {
   ingest(event: RuntimeProtocolEvent): LensTerminalLine | null {
     const pid = event.agentId;
     if (!pid) return null;
+
+    // Learn PID→name from any event that carries agentName
+    if (event.agentName && event.agentName !== pid) {
+      this.nameCache.set(pid, event.agentName);
+    }
 
     const line = this.classify(event);
     if (!line) return null;
@@ -120,9 +127,23 @@ export class StreamSegmenter {
   /**
    * Clear all buffers.
    */
+  /**
+   * Populate the PID→name cache from a snapshot's process list.
+   * Call this when a snapshot arrives to backfill names for processes
+   * whose spawn event may have been missed.
+   */
+  updateNamesFromSnapshot(processes: Array<{ pid: string; name: string }>): void {
+    for (const p of processes) {
+      if (p.name && p.name !== p.pid) {
+        this.nameCache.set(p.pid, p.name);
+      }
+    }
+  }
+
   clear(): void {
     this.buffers.clear();
     this.globalBuffer.length = 0;
+    this.nameCache.clear();
     this.seq = 0;
   }
 
@@ -134,12 +155,13 @@ export class StreamSegmenter {
     const text = this.extractText(event);
     if (!text) return null;
 
+    const pid = event.agentId!;
     this.seq++;
     return {
       seq: this.seq,
       timestamp: event.timestamp,
-      pid: event.agentId!,
-      processName: event.agentName ?? event.agentId!,
+      pid,
+      processName: event.agentName ?? this.nameCache.get(pid) ?? pid,
       level,
       text,
     };

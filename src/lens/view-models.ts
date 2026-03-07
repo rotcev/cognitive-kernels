@@ -131,6 +131,7 @@ function buildLensDag(snap: OsSystemSnapshot): { nodes: LensDagNode[]; edges: Le
       role: proc ? classifyRole(proc, snap.processes) : "shell",
       priority: n.priority,
       parentPid: n.parentPid,
+      backendKind: proc?.backend?.kind,
     };
   });
 

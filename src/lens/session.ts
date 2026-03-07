@@ -47,6 +47,7 @@ export class LensSession {
       port: options.port ?? 3200,
       server: options.httpServer,
       narrator: options.narrator,
+      storage: options.storage,
     });
   }
 

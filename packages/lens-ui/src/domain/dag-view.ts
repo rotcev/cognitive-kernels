@@ -21,8 +21,8 @@ const STATE_COLORS: Record<string, string> = {
 const ROLE_COLORS: Record<string, string> = {
   kernel: "#00ff88",
   "sub-kernel": "#00d4ff",
-  worker: "#555555",
-  shell: "#555555",
+  worker: "#888888",
+  shell: "#ffb020",
 };
 
 const LEVEL_WIDTH = 160;
@@ -399,10 +399,12 @@ export class LensDagView extends LensElement {
       if (!pos) return;
 
       const role = proc.role;
-      const r = role === "kernel" ? 28 : role === "sub-kernel" ? 24 : 22;
+      const isShell = role === "shell";
+      const r = role === "kernel" ? 28 : role === "sub-kernel" ? 24 : isShell ? 18 : 22;
       const color = STATE_COLORS[proc.state] ?? "#555";
       const ringColor = ROLE_COLORS[role] ?? "#555";
       const isSelected = proc.pid === this._selectedPid;
+      const isDead = proc.state === "dead";
 
       // Glow for kernel
       if (role === "kernel") {
@@ -424,43 +426,76 @@ export class LensDagView extends LensElement {
         ctx.stroke();
       }
 
-      // Node circle
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? "rgba(0,255,136,0.12)" : "#0a0a0a";
-      ctx.fill();
-      ctx.lineWidth = isSelected ? 2 : 1;
-      ctx.strokeStyle = isSelected ? color : ringColor;
-      ctx.globalAlpha = isSelected ? 1 : (role === "shell" || role === "worker" ? 0.4 : 0.6);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+      if (isShell) {
+        // ── Shell nodes: rounded rectangle (pill shape) ──
+        const pw = 40;
+        const ph = 22;
+        const pr = 8;
+        const x1 = pos.x - pw / 2;
+        const y1 = pos.y - ph / 2;
 
-      // Inner state dot
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      // Pulse for running state
-      if (proc.state === "running") {
-        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 500);
-        ctx.globalAlpha = 0.4 + 0.6 * pulse;
+        ctx.beginPath();
+        ctx.roundRect(x1, y1, pw, ph, pr);
+        ctx.fillStyle = isSelected ? "rgba(255,176,32,0.12)" : "#0a0a0a";
+        ctx.fill();
+        ctx.lineWidth = isSelected ? 2 : 1;
+        ctx.strokeStyle = isSelected ? color : ringColor;
+        ctx.globalAlpha = isSelected ? 1 : (isDead ? 0.25 : 0.6);
+        if (isDead) {
+          ctx.setLineDash([3, 3]);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+
+        // Terminal icon: >_
+        ctx.font = "bold 10px 'IBM Plex Mono', monospace";
+        ctx.fillStyle = ringColor;
+        ctx.globalAlpha = isDead ? 0.3 : 0.7;
+        ctx.textAlign = "center";
+        ctx.fillText(">_", pos.x, pos.y + 4);
+        ctx.globalAlpha = 1;
+      } else {
+        // ── Standard circular node ──
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = isSelected ? "rgba(0,255,136,0.12)" : "#0a0a0a";
+        ctx.fill();
+        ctx.lineWidth = isSelected ? 2 : 1;
+        ctx.strokeStyle = isSelected ? color : ringColor;
+        ctx.globalAlpha = isSelected ? 1 : (role === "worker" ? 0.5 : 0.6);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Inner state dot
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        if (proc.state === "running") {
+          const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 500);
+          ctx.globalAlpha = 0.4 + 0.6 * pulse;
+        }
+        ctx.fill();
+        ctx.globalAlpha = 1;
       }
-      ctx.fill();
-      ctx.globalAlpha = 1;
 
       // Label
+      const labelY = isShell ? pos.y + 22 : pos.y + r + 16;
       ctx.font = "11px 'IBM Plex Mono', monospace";
-      ctx.fillStyle = "#ccc";
+      ctx.fillStyle = isDead ? "#666" : "#ccc";
       ctx.textAlign = "center";
-      ctx.fillText(proc.name, pos.x, pos.y + r + 16);
+      ctx.fillText(proc.name, pos.x, labelY);
 
       // Role label
       ctx.font = "9px 'IBM Plex Mono', monospace";
       ctx.fillStyle = ringColor;
-      ctx.fillText(role, pos.x, pos.y + r + 28);
+      ctx.globalAlpha = isDead ? 0.4 : 1;
+      ctx.fillText(isShell ? "shell" : role, pos.x, labelY + 12);
 
       // State label
       ctx.fillStyle = color;
-      ctx.fillText(proc.state, pos.x, pos.y + r + 38);
+      ctx.fillText(proc.state, pos.x, labelY + 22);
+      ctx.globalAlpha = 1;
     });
 
     ctx.restore();
@@ -482,11 +517,14 @@ export class LensDagView extends LensElement {
     for (const proc of this._visibleNodes) {
       const pos = this._positions[proc.pid];
       if (!pos) continue;
-      const r = proc.role === "kernel" ? 28 : proc.role === "sub-kernel" ? 24 : 22;
       const dx = mx - pos.x;
       const dy = my - pos.y;
-      if (dx * dx + dy * dy <= (r + 4) * (r + 4)) {
-        return proc.pid;
+      if (proc.role === "shell") {
+        // Pill hit test: 40x22 rect
+        if (Math.abs(dx) <= 24 && Math.abs(dy) <= 15) return proc.pid;
+      } else {
+        const r = proc.role === "kernel" ? 28 : proc.role === "sub-kernel" ? 24 : 22;
+        if (dx * dx + dy * dy <= (r + 4) * (r + 4)) return proc.pid;
       }
     }
     return null;
@@ -624,6 +662,15 @@ export class LensDagView extends LensElement {
               <div class="legend-item"><span class="legend-dot checkpoint"></span> Checkpoint</div>
               <div class="legend-item"><span class="legend-dot dead"></span> Dead</div>
               <div class="legend-item"><span class="legend-dot suspended"></span> Suspended</div>
+            </div>
+          </div>
+          <div>
+            <div class="legend-section-title">Node Types</div>
+            <div class="legend-items">
+              <div class="legend-item"><span class="legend-dot" style="background:#00ff88;box-shadow:0 0 4px #00ff88"></span> Kernel</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#00d4ff"></span> Sub-kernel</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#888"></span> Worker</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#ffb020;border-radius:3px"></span> Shell</div>
             </div>
           </div>
           <div>

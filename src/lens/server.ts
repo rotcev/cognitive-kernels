@@ -57,6 +57,7 @@ export interface LensServerOptions {
   server?: HttpServer; // attach to existing HTTP server
   heartbeatIntervalMs?: number;
   narrator?: NarrativeGenerator;
+  storage?: import("../db/storage-backend.js").StorageBackend;
 }
 
 export class LensServer {
@@ -66,6 +67,7 @@ export class LensServer {
   private readonly externalServer?: HttpServer;
   private readonly heartbeatIntervalMs: number;
   private readonly narrator?: NarrativeGenerator;
+  private readonly storage?: import("../db/storage-backend.js").StorageBackend;
 
   private clients = new Set<ClientState>();
   private runs = new Map<string, RunState>();
@@ -78,6 +80,7 @@ export class LensServer {
     this.externalServer = options.server;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30000;
     this.narrator = options.narrator;
+    this.storage = options.storage;
   }
 
   async start(): Promise<void> {
@@ -174,10 +177,12 @@ export class LensServer {
     switch (msg.type) {
       case "subscribe": {
         client.subscribedRuns.add(msg.runId);
-        // Send current snapshot if we have one
+        // Send current snapshot if we have one, otherwise try storage
         const run = this.getOrCreateRunState(msg.runId);
         if (run.lastSnapshot) {
           this.send(client, { type: "snapshot", runId: msg.runId, snapshot: run.lastSnapshot });
+        } else if (this.storage?.isConnected()) {
+          void this.loadSnapshotFromStorage(client, msg.runId, run);
         }
         break;
       }
@@ -234,6 +239,48 @@ export class LensServer {
         break;
       default:
         this.send(client, { type: "error", message: `Unknown message type: ${(msg as { type: string }).type}` });
+    }
+  }
+
+  // ── Storage fetch for completed/historical runs ──────────────
+
+  private async loadSnapshotFromStorage(client: ClientState, runId: string, run: RunState): Promise<void> {
+    try {
+      // Fetch snapshot and events in parallel
+      const [snapshotResult, eventsResult] = await Promise.all([
+        this.storage!.fetchLatestSnapshot(runId),
+        this.storage!.fetchEventsSince(runId, 0),
+      ]);
+
+      if (snapshotResult.snapshot) {
+        const lensSnapshot = buildLensSnapshot(snapshotResult.snapshot, run.prevTokens);
+        run.lastSnapshot = lensSnapshot;
+        if (snapshotResult.snapshot.processes) {
+          run.segmenter.updateNamesFromSnapshot(snapshotResult.snapshot.processes);
+        }
+        if (client.subscribedRuns.has(runId) && client.ws.readyState === WebSocket.OPEN) {
+          this.send(client, { type: "snapshot", runId, snapshot: lensSnapshot });
+        }
+      }
+
+      // Replay historical events through segmenter to rebuild terminal + event feed
+      if (eventsResult.events.length > 0 && client.ws.readyState === WebSocket.OPEN) {
+        for (const event of eventsResult.events) {
+          run.segmenter.ingest(event);
+          // Send raw event for the event feed
+          this.send(client, { type: "event", runId, event });
+        }
+        // Send all accumulated terminal lines (terminal sub may have arrived while async was in-flight)
+        const termSub = client.terminalSubs.get(runId);
+        let lines = run.segmenter.getAllLines();
+        if (termSub?.pidSet) lines = lines.filter(l => termSub.pidSet!.has(l.pid));
+        if (termSub?.levelSet) lines = lines.filter(l => termSub.levelSet!.has(l.level));
+        for (const line of lines) {
+          this.send(client, { type: "terminal_line", runId, pid: line.pid, line });
+        }
+      }
+    } catch {
+      // Storage fetch failed — client just sees empty state
     }
   }
 
@@ -296,6 +343,11 @@ export class LensServer {
 
   private handleSnapshot(runId: string, rawSnapshot: OsSystemSnapshot): void {
     const run = this.getOrCreateRunState(runId);
+
+    // Backfill PID→name cache from snapshot process list
+    if (rawSnapshot.processes) {
+      run.segmenter.updateNamesFromSnapshot(rawSnapshot.processes);
+    }
 
     const lensSnapshot = buildLensSnapshot(rawSnapshot, run.prevTokens);
     run.prevTokens = {

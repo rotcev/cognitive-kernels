@@ -16,7 +16,7 @@ import "./dashboard.js";
 
 const MAX_EVENTS = 500;
 const MAX_TERMINAL_LINES = 2000;
-const RUN_POLL_INTERVAL = 5000;
+const RUN_POLL_INTERVAL = 2000;
 
 /** Extract a short human-readable summary of tool arguments. */
 function summarizeToolArgs(toolName: string, args: unknown): string {
@@ -267,6 +267,8 @@ export class LensApp extends LensElement {
         endedAt?: string;
       }> };
 
+      const prevRunIds = new Set(this._runs.map(r => r.id));
+
       this._runs = data.runs.map(r => {
         const elapsed = r.endedAt
           ? new Date(r.endedAt).getTime() - new Date(r.startedAt ?? r.createdAt).getTime()
@@ -281,6 +283,12 @@ export class LensApp extends LensElement {
           elapsed,
         };
       });
+
+      // Auto-subscribe to a newly appeared running run
+      const newRunning = this._runs.find(r => r.status === "running" && !prevRunIds.has(r.id));
+      if (newRunning && newRunning.id !== this._activeRunId) {
+        this.subscribeRun(newRunning.id);
+      }
     } catch {
       // Silently fail — polling will retry
     }

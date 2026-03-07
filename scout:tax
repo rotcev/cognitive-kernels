@@ -1,0 +1,55 @@
+## Tax Planning Scout: 2025-2026 Critical Numbers
+
+**Timestamp:** 2026-03-07
+
+### Core Thresholds (Age 30, Side Business Context)
+
+#### 401(k)
+- **2025 limit:** $23,500 employee | $70,000 combined
+- **2026 limit:** $24,500 employee | $72,000 combined
+- **Employer match tax treatment:** Tax-deductible for employer, deferred for employee (ordinary income on withdrawal)
+- **4% match on ~$60k salary:** ~$2,400/year free money
+
+#### Student Loan Interest Deduction
+- **Max deduction:** $2,500 or actual interest paid
+- **2025 single phase-out:** $85k–$100k MAGI
+- **2026 single phase-out:** $85k–$100k MAGI
+- **2025 married phase-out:** $170k–$200k MAGI
+- **2026 married phase-out:** $175k–$205k MAGI
+- **Risk:** Side business income pushes into phase-out zone
+
+#### Self-Employment Tax
+- **Rates:** 12.4% SS (capped) + 2.9% Medicare = 15.3% total
+- **2025 SS wage base:** $176,100 (SS tax capped above this)
+- **2026 SS wage base:** $184,500
+- **Applies to:** 92.35% of net SE income
+- **Deductible:** 50% of SE tax paid counts as income tax deduction
+- **Cost per $10k business income:** ~$1,400 SE tax
+
+#### Qualified Business Income (QBI) Deduction
+- **Rate:** 20% of qualified business income
+- **2025 single full deduction:** ≤$197,300 taxable income
+- **2026 single full deduction:** ~$200,000
+- **2025 married full deduction:** ≤$394,600
+- **2026 married full deduction:** ~$400,000
+- **Tax savings (25% bracket):** $20k business = $4k deduction = $1k savings
+
+#### Home Office Deduction
+- **2025 simplified method:** $5/sq ft, max $1,500
+- **2026 simplified method:** $6/sq ft, max $1,800
+- **200 sq ft office (2026):** $1,200 deduction
+- **Requirement:** Exclusive, regular business use; self-employed only (not remote W-2 employee)
+
+### Interaction Effects
+1. SE tax on side business is partially offset by QBI deduction (20% reduction in business income for tax)
+2. Side business income can disqualify student loan deduction above phase-out thresholds
+3. Additional Medicare Tax (0.9%) triggers at $200k+ for single filers (W-2 + SE combined)
+4. 401(k) contributions reduce both income tax AND SE tax base (through lower AGI/MAGI)
+
+### Decision Impact: $50k Allocation
+- **Employer match capture:** $2,400 (~5% of $50k)
+- **Student loan paydown:** $12k reduces 5.8% interest exposure
+- **Side business capital:** Each $10k invested faces ~$1,400 SE tax liability if net income realized, offset ~$400-500 by QBI deduction
+- **Home office setup:** Immediate $1,200–$1,800 deduction if dedicated space established
+
+**Full details:** See scout:tax.md in blackboard

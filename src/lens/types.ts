@@ -75,6 +75,7 @@ export interface LensDagNode {
   role: LensProcessRole;
   priority: number;
   parentPid: string | null;
+  backendKind?: "llm" | "system" | "kernel";
 }
 
 export type LensEdge = OsDagEdge;

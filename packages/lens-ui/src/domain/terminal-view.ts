@@ -373,12 +373,29 @@ export class LensTerminalView extends LensElement {
         display: flex; align-items: center; justify-content: center;
         height: 100%; color: var(--lens-text-dim); font-size: 12px;
       }
+
+      /* ── Compact mode (drawer) ───────────────── */
+      :host([compact]) .header { display: none; }
+      :host([compact]) .col-legend { display: none; }
+      :host([compact]) .row {
+        grid-template-columns: 1fr;
+        padding: 1px 8px;
+      }
+      :host([compact]) .col-time { display: none; }
+      :host([compact]) .col-agent { display: none; }
+      :host([compact]) .row.group-start { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); }
+      :host([compact]) .row.group-start:first-child { margin-top: 0; border-top: none; }
+      :host([compact]) .cursor-row { padding: 2px 8px; }
+      :host([compact]) .tool-detail { max-width: 100%; }
+      :host([compact]) .think-preview { font-size: 10px; }
+      :host([compact]) .scroll { padding: 4px 0; }
     `,
   ];
 
   @property({ type: Array }) lines: LensTerminalLine[] = [];
   @property({ type: Boolean }) autoscroll = true;
   @property({ type: String }) processFilter = "";
+  @property({ type: Boolean, reflect: true }) compact = false;
   @query(".scroll") private _scrollEl!: HTMLElement;
   @state() private _expandedThinking = new Set<number>();
   @state() private _collapsedTurns = new Set<number>();

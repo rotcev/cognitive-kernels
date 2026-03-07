@@ -5,6 +5,7 @@ import type { OsProtocolEmitter } from "./protocol-emitter.js";
 
 type SubkernelEntry = {
   kernel: InstanceType<typeof import("./kernel.js").OsKernel>;
+  name: string;
   ticksRun: number;
   halted: boolean;
   maxTicks: number;
@@ -92,6 +93,7 @@ export class SubkernelExecutorBackend implements ExecutorBackend, ExecutorCheckp
 
     this.entries.set(proc.pid, {
       kernel: childKernel,
+      name: proc.name,
       ticksRun: 0,
       halted: false,
       maxTicks: effectiveMaxTicks,
@@ -259,6 +261,7 @@ export class SubkernelExecutorBackend implements ExecutorBackend, ExecutorCheckp
         status: "completed",
         message: `child_kernel disposed pid=${pid} ticks=${entry.ticksRun}`,
         agentId: pid,
+        agentName: entry.name,
       });
 
       this.entries.delete(pid);

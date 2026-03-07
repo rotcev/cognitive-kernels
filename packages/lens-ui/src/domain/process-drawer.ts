@@ -134,6 +134,15 @@ export class LensProcessDrawer extends LensElement {
         padding: 12px 16px;
       }
 
+      .tab-content.terminal-tab {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      .tab-content.terminal-tab lens-terminal-view {
+        height: 100%;
+      }
+
       /* Info tab */
       .info-section {
         margin-bottom: 12px;
@@ -379,7 +388,7 @@ export class LensProcessDrawer extends LensElement {
     if (lines.length === 0) {
       return html`<div class="placeholder">No terminal output for ${this.process?.name ?? "unknown"}</div>`;
     }
-    return html`<lens-terminal-view .lines=${lines} processFilter=${this.process?.pid ?? ""}></lens-terminal-view>`;
+    return html`<lens-terminal-view .lines=${lines} processFilter=${this.process?.pid ?? ""} ?compact=${true}></lens-terminal-view>`;
   }
 
   private _renderBlackboard() {
@@ -461,7 +470,7 @@ export class LensProcessDrawer extends LensElement {
           `
         )}
       </div>
-      <div class="tab-content">
+      <div class="tab-content ${this._activeTab === "terminal" ? "terminal-tab" : ""}">
         ${this._activeTab === "info" ? this._renderInfo() : nothing}
         ${this._activeTab === "terminal" ? this._renderTerminal() : nothing}
         ${this._activeTab === "blackboard" ? this._renderBlackboard() : nothing}

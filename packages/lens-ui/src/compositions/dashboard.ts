@@ -162,6 +162,7 @@ export class LensDashboard extends LensElement {
     return s.processes.map(p => ({
       pid: p.pid, name: p.name, type: p.type, state: p.state,
       role: p.role, priority: p.priority, parentPid: p.parentPid,
+      backendKind: p.backendKind,
     }));
   }
 
