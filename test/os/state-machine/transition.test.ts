@@ -1660,3 +1660,492 @@ describe("transition — deferral processing", () => {
     )).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Typed effect emission tests (Wave 1.5)
+// ---------------------------------------------------------------------------
+
+describe("transition — typed effects: process_completed exit emits child_done_signal", () => {
+  test("exit command emits child_done_signal with correct fields", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // Spawn a child worker first
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    // Worker exits
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "exit", code: 0, reason: "completed successfully" }],
+    }));
+
+    const childDone = effects.find(e => e.type === "child_done_signal");
+    expect(childDone).toBeDefined();
+    expect(childDone!.type === "child_done_signal" && childDone!.childPid).toBe(worker.pid);
+    expect(childDone!.type === "child_done_signal" && childDone!.childName).toBe("w1");
+    expect(childDone!.type === "child_done_signal" && childDone!.parentPid).toBe(orchestratorPid);
+    expect(childDone!.type === "child_done_signal" && childDone!.exitCode).toBe(0);
+    expect(childDone!.type === "child_done_signal" && childDone!.exitReason).toBe("completed successfully");
+  });
+
+  test("exit command emits flush_ipc after child_done_signal", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+    }));
+
+    const flushIpc = effects.find(e => e.type === "flush_ipc");
+    expect(flushIpc).toBeDefined();
+
+    // flush_ipc should come after child_done_signal
+    const childDoneIdx = effects.findIndex(e => e.type === "child_done_signal");
+    const flushIdx = effects.findIndex(e => e.type === "flush_ipc");
+    expect(childDoneIdx).toBeGreaterThanOrEqual(0);
+    expect(flushIdx).toBeGreaterThan(childDoneIdx);
+  });
+
+  test("exit command emits rebuild_dag effect", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+    }));
+
+    expect(effects.some(e => e.type === "rebuild_dag")).toBe(true);
+  });
+
+  test("parentless process exit does not emit child_done_signal", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // Spawn a child so orchestrator has work, then attempt orchestrator exit
+    // which will be prevented — instead test with a parentless worker
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    // Add a parentless lifecycle process
+    const processes = new Map(s1.processes);
+    const orphanPid = "orphan-1";
+    processes.set(orphanPid, {
+      pid: orphanPid, type: "lifecycle" as const, state: "running" as const,
+      name: "orphan-worker", parentPid: null, objective: "solo work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const [, effects] = transition({ ...s1, processes }, processCompletedEvent(orphanPid, {
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+    }));
+
+    // No child_done_signal because no parent
+    expect(effects.some(e => e.type === "child_done_signal")).toBe(false);
+    // But rebuild_dag should still be emitted
+    expect(effects.some(e => e.type === "rebuild_dag")).toBe(true);
+  });
+});
+
+describe("transition — typed effects: failed process emits child_done_signal", () => {
+  test("failed process with parent emits child_done_signal with exit code 1", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      success: false,
+      response: "LLM crashed",
+    }));
+
+    const childDone = effects.find(e => e.type === "child_done_signal");
+    expect(childDone).toBeDefined();
+    expect(childDone!.type === "child_done_signal" && childDone!.childPid).toBe(worker.pid);
+    expect(childDone!.type === "child_done_signal" && childDone!.parentPid).toBe(orchestratorPid);
+    expect(childDone!.type === "child_done_signal" && childDone!.exitCode).toBe(1);
+  });
+
+  test("failed process emits flush_ipc and rebuild_dag", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      success: false,
+      response: "error",
+    }));
+
+    expect(effects.some(e => e.type === "flush_ipc")).toBe(true);
+    expect(effects.some(e => e.type === "rebuild_dag")).toBe(true);
+  });
+
+  test("failed parentless process emits rebuild_dag but not child_done_signal", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    // Add a parentless lifecycle process
+    const processes = new Map(s1.processes);
+    const orphanPid = "orphan-fail";
+    processes.set(orphanPid, {
+      pid: orphanPid, type: "lifecycle" as const, state: "running" as const,
+      name: "orphan-worker", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const [, effects] = transition({ ...s1, processes }, processCompletedEvent(orphanPid, {
+      success: false,
+      response: "crashed",
+    }));
+
+    expect(effects.some(e => e.type === "child_done_signal")).toBe(false);
+    expect(effects.some(e => e.type === "rebuild_dag")).toBe(true);
+  });
+});
+
+describe("transition — typed effects: signal_emit command emits signal_emit effect", () => {
+  test("signal_emit command produces signal_emit and flush_ipc effects", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [
+        { kind: "signal_emit", signal: "data:ready" },
+        { kind: "idle" },
+      ],
+    }));
+
+    const signalEffect = effects.find(e => e.type === "signal_emit");
+    expect(signalEffect).toBeDefined();
+    expect(signalEffect!.type === "signal_emit" && signalEffect!.signal).toBe("data:ready");
+    expect(signalEffect!.type === "signal_emit" && signalEffect!.sender).toBe(worker.pid);
+
+    expect(effects.some(e => e.type === "flush_ipc")).toBe(true);
+  });
+});
+
+describe("transition — typed effects: ephemeral_completed emits signal_emit + flush_ipc", () => {
+  function setupWithEphemeral() {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const ephPid = "eph-typed-1";
+    const processes = new Map(s1.processes);
+    processes.set(ephPid, {
+      pid: ephPid, type: "event" as const, state: "running" as const,
+      name: "scout-typed", parentPid: orch.pid, objective: "find something",
+      priority: 50, spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+    return { state: { ...s1, processes }, orchPid: orch.pid, ephPid };
+  }
+
+  test("successful ephemeral emits signal_emit with ephemeral:ready signal", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const [, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-signal-test",
+      name: "scout-typed",
+      success: true,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      response: "Found it",
+      durationMs: 500,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    const signalEffect = effects.find(e => e.type === "signal_emit");
+    expect(signalEffect).toBeDefined();
+    expect(signalEffect!.type === "signal_emit" && signalEffect!.signal).toBe("ephemeral:ready");
+    expect(signalEffect!.type === "signal_emit" && signalEffect!.sender).toBe("kernel");
+    const payload = signalEffect!.type === "signal_emit" ? signalEffect!.payload : undefined;
+    expect(payload).toBeDefined();
+    expect(payload!.name).toBe("scout-typed");
+    expect(payload!.parentPid).toBe(orchPid);
+    expect(payload!.id).toBe("eph-signal-test");
+    expect(payload!.error).toBe(false);
+  });
+
+  test("failed ephemeral emits signal_emit with error flag in payload", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const [, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-fail-signal",
+      name: "scout-typed",
+      success: false,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      error: "timeout",
+      durationMs: 30000,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    const signalEffect = effects.find(e => e.type === "signal_emit");
+    expect(signalEffect).toBeDefined();
+    const payload = signalEffect!.type === "signal_emit" ? signalEffect!.payload : undefined;
+    expect(payload!.error).toBe(true);
+  });
+
+  test("ephemeral_completed emits flush_ipc after signal_emit", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const [, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-flush-test",
+      name: "scout-typed",
+      success: true,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      response: "result",
+      durationMs: 100,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    const signalIdx = effects.findIndex(e => e.type === "signal_emit");
+    const flushIdx = effects.findIndex(e => e.type === "flush_ipc");
+    expect(signalIdx).toBeGreaterThanOrEqual(0);
+    expect(flushIdx).toBeGreaterThan(signalIdx);
+  });
+
+  test("ephemeral_completed without tablePid emits no signal_emit or flush_ipc", () => {
+    const { state } = setupWithEphemeral();
+    const [, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-no-table",
+      name: "scout-typed",
+      success: true,
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    expect(effects.some(e => e.type === "signal_emit")).toBe(false);
+    expect(effects.some(e => e.type === "flush_ipc")).toBe(false);
+  });
+});
+
+describe("transition — typed effects: housekeep stall detection emits activate_process", () => {
+  test("stall detection emits activate_process for each idle process", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const metacog = [...s1.processes.values()].find(p => p.name === "metacog-daemon")!;
+
+    // Set up: orchestrator and metacog both idle, stall conditions met
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "idle" as const });
+    processes.set(metacog.pid, { ...metacog, state: "idle" as const });
+    const stallState = {
+      ...s1,
+      processes,
+      inflight: new Set<string>(),
+      consecutiveIdleTicks: 3,
+      lastProcessCompletionTime: Date.now() - 10000,
+    };
+
+    const [, effects] = transition(stallState, timerEvent("housekeep"));
+
+    const activateEffects = effects.filter(e => e.type === "activate_process");
+    expect(activateEffects.length).toBe(2); // both orch and metacog
+    const activatedPids = activateEffects.map(e => e.type === "activate_process" ? e.pid : "");
+    expect(activatedPids).toContain(orch.pid);
+    expect(activatedPids).toContain(metacog.pid);
+  });
+
+  test("no stall detection when inflight work exists", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "idle" as const });
+    const noStallState = {
+      ...s1,
+      processes,
+      inflight: new Set<string>(["some-pid"]), // inflight work prevents stall
+      consecutiveIdleTicks: 10,
+    };
+
+    const [, effects] = transition(noStallState, timerEvent("housekeep"));
+
+    expect(effects.some(e => e.type === "activate_process")).toBe(false);
+  });
+});
+
+describe("transition — typed effects: housekeep cadence signals emit signal_emit", () => {
+  test("cadence signal emits signal_emit with correct signal name and payload", () => {
+    const state = makeState({ tickSignalCadences: [1, 5, 10] });
+    const [s1] = transition(state, bootEvent());
+
+    // First housekeep: count=1, cadence 1 matches
+    const [, effects] = transition(s1, timerEvent("housekeep"));
+
+    const signalEffects = effects.filter(e => e.type === "signal_emit");
+    expect(signalEffects.length).toBeGreaterThanOrEqual(1);
+
+    const tick1Signal = signalEffects.find(
+      e => e.type === "signal_emit" && e.signal === "tick:1"
+    );
+    expect(tick1Signal).toBeDefined();
+    expect(tick1Signal!.type === "signal_emit" && tick1Signal!.sender).toBe("kernel");
+    const payload = tick1Signal!.type === "signal_emit" ? tick1Signal!.payload : undefined;
+    expect(payload).toBeDefined();
+    expect(payload!.cadence).toBe(1);
+    expect(payload!.tick).toBe(1);
+  });
+
+  test("cadence 5 fires on housekeepCount=5", () => {
+    const state = makeState({ tickSignalCadences: [1, 5, 10] });
+    const [s1] = transition(state, bootEvent());
+    // Set housekeepCount to 4 so next housekeep fires at count=5
+    const s1AtTick4 = { ...s1, housekeepCount: 4 };
+
+    const [, effects] = transition(s1AtTick4, timerEvent("housekeep"));
+
+    const signalEffects = effects.filter(e => e.type === "signal_emit");
+    const signals = signalEffects.map(e => e.type === "signal_emit" ? e.signal : "");
+    // tick:1 and tick:5 should both fire (5 % 1 === 0 and 5 % 5 === 0)
+    expect(signals).toContain("tick:1");
+    expect(signals).toContain("tick:5");
+    // tick:10 should NOT fire (5 % 10 !== 0)
+    expect(signals).not.toContain("tick:10");
+  });
+
+  test("cadence signals emit flush_ipc after all signals", () => {
+    const state = makeState({ tickSignalCadences: [1, 5] });
+    const [s1] = transition(state, bootEvent());
+
+    const [, effects] = transition(s1, timerEvent("housekeep"));
+
+    // flush_ipc should exist
+    expect(effects.some(e => e.type === "flush_ipc")).toBe(true);
+
+    // flush_ipc should come after all signal_emit effects
+    const lastSignalIdx = effects.reduce(
+      (max, e, i) => e.type === "signal_emit" ? i : max, -1
+    );
+    const flushIdx = effects.findIndex(e => e.type === "flush_ipc");
+    expect(flushIdx).toBeGreaterThan(lastSignalIdx);
+  });
+
+  test("no cadence signal when housekeepCount does not match any cadence", () => {
+    const state = makeState({ tickSignalCadences: [3, 7] });
+    const [s1] = transition(state, bootEvent());
+    // housekeepCount=0 → next will be 1. 1%3≠0, 1%7≠0
+    const [, effects] = transition(s1, timerEvent("housekeep"));
+
+    expect(effects.some(e => e.type === "signal_emit")).toBe(false);
+    expect(effects.some(e => e.type === "flush_ipc")).toBe(false);
+  });
+});
+
+describe("transition — typed effects: housekeep deadlock detection emits activate_process", () => {
+  test("deadlock detection emits activate_process for idle orchestrator", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Set up: orchestrator idle with tick >= 1, no living workers, no ephemerals
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
+    // Kill or remove any non-daemon, non-orchestrator processes
+    for (const [pid, proc] of processes) {
+      if (pid !== orch.pid && proc.type !== "daemon") {
+        processes.set(pid, { ...proc, state: "dead" as const });
+      }
+    }
+
+    const deadlockState = {
+      ...s1,
+      processes,
+      inflight: new Set<string>(),
+    };
+
+    const [s2, effects] = transition(deadlockState, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+      bbKeyCount: 5,
+      bbKeysAtLastForceWake: 3, // bbChanged = true
+    }));
+
+    // Orchestrator should be woken
+    expect(s2.processes.get(orch.pid)?.state).toBe("running");
+
+    // activate_process effect emitted
+    const activateEffect = effects.find(e => e.type === "activate_process");
+    expect(activateEffect).toBeDefined();
+    expect(activateEffect!.type === "activate_process" && activateEffect!.pid).toBe(orch.pid);
+  });
+
+  test("no deadlock detection when orchestrator is running", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Orchestrator is running, not idle
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
+
+    const runningState = { ...s1, processes };
+
+    const [, effects] = transition(runningState, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+    }));
+
+    // No activate_process from deadlock detection
+    // (there might be one from stall detection if conditions align, so filter specifically)
+    const deadlockProtocol = effects.find(
+      e => e.type === "emit_protocol" && (e as any).message.includes("deadlock_detected")
+    );
+    expect(deadlockProtocol).toBeUndefined();
+  });
+
+  test("no deadlock detection when living workers exist", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
+    // Add a living worker
+    processes.set("w1", {
+      pid: "w1", type: "lifecycle" as const, state: "running" as const,
+      name: "active-worker", parentPid: orch.pid, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const activeState = { ...s1, processes };
+
+    const [, effects] = transition(activeState, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+    }));
+
+    const deadlockProtocol = effects.find(
+      e => e.type === "emit_protocol" && (e as any).message.includes("deadlock_detected")
+    );
+    expect(deadlockProtocol).toBeUndefined();
+  });
+});

@@ -45,8 +45,16 @@ describe("KernelEffect types", () => {
       { type: "persist_memory", operation: "save_heuristics", seq: 9 },
       { type: "emit_protocol", action: "os_process_spawn", message: "test", seq: 10 },
       { type: "halt", reason: "goal_work_complete", seq: 11 },
+      { type: "wake_process", pid: "p", seq: 12 },
+      { type: "activate_process", pid: "p", seq: 13 },
+      { type: "idle_process", pid: "p", wakeOnSignals: ["tick:1"], seq: 14 },
+      { type: "signal_emit", signal: "data:ready", sender: "p1", payload: { key: "val" }, seq: 15 },
+      { type: "child_done_signal", childPid: "c1", childName: "worker", parentPid: "p1", exitCode: 0, exitReason: "done", seq: 16 },
+      { type: "flush_ipc", seq: 17 },
+      { type: "rebuild_dag", seq: 18 },
+      { type: "schedule_pass", seq: 19 },
     ];
-    expect(effects).toHaveLength(12);
+    expect(effects).toHaveLength(20);
     // Verify seq is monotonically increasing
     for (let i = 1; i < effects.length; i++) {
       expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);
@@ -58,6 +66,47 @@ describe("KernelEffect types", () => {
     if (effect.type === "submit_llm") {
       expect(effect.pid).toBe("p1");
       expect(effect.model).toBe("gpt-4");
+    }
+  });
+
+  test("type discrimination works for new typed effects", () => {
+    const effects: KernelEffect[] = [
+      { type: "activate_process", pid: "p1", seq: 0 },
+      { type: "idle_process", pid: "p2", wakeOnSignals: ["tick:1"], seq: 1 },
+      { type: "signal_emit", signal: "data:ready", sender: "p1", seq: 2 },
+      { type: "child_done_signal", childPid: "c1", childName: "w1", parentPid: "p1", exitCode: 0, seq: 3 },
+      { type: "flush_ipc", seq: 4 },
+      { type: "rebuild_dag", seq: 5 },
+      { type: "schedule_pass", seq: 6 },
+    ];
+
+    for (const e of effects) {
+      if (e.type === "activate_process") {
+        expect(e.pid).toBe("p1");
+      }
+      if (e.type === "idle_process") {
+        expect(e.pid).toBe("p2");
+        expect(e.wakeOnSignals).toEqual(["tick:1"]);
+      }
+      if (e.type === "signal_emit") {
+        expect(e.signal).toBe("data:ready");
+        expect(e.sender).toBe("p1");
+      }
+      if (e.type === "child_done_signal") {
+        expect(e.childPid).toBe("c1");
+        expect(e.childName).toBe("w1");
+        expect(e.parentPid).toBe("p1");
+        expect(e.exitCode).toBe(0);
+      }
+      if (e.type === "flush_ipc") {
+        expect(e.seq).toBe(4);
+      }
+      if (e.type === "rebuild_dag") {
+        expect(e.seq).toBe(5);
+      }
+      if (e.type === "schedule_pass") {
+        expect(e.seq).toBe(6);
+      }
     }
   });
 });
