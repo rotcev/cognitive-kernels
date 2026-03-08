@@ -83,6 +83,30 @@ export class OsProcessTable {
     return process;
   }
 
+  /**
+   * Add a pre-constructed process directly to the table.
+   * Used by the transition function wiring — the transition creates the OsProcess
+   * object with a deterministic PID, so we skip spawn's PID generation.
+   */
+  addDirect(proc: OsProcess): void {
+    this.processes.set(proc.pid, proc);
+
+    // Register as child of parent
+    if (proc.parentPid) {
+      const parent = this.processes.get(proc.parentPid);
+      if (parent && !parent.children.includes(proc.pid)) {
+        parent.children.push(proc.pid);
+      }
+    }
+
+    this._events.push({
+      kind: "spawned",
+      pid: proc.pid,
+      timestamp: proc.spawnedAt,
+      details: { type: proc.type, name: proc.name },
+    });
+  }
+
   get(pid: string): OsProcess | undefined {
     return this.processes.get(pid);
   }

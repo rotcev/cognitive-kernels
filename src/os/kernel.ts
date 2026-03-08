@@ -2259,50 +2259,61 @@ export class OsKernel {
   }
 
   private async processOneResult(result: OsProcessTurnResult): Promise<void> {
-    const now = new Date().toISOString();
     const proc = this.table.get(result.pid);
     if (!proc) return;
 
-    proc.tickCount += 1;
-    proc.tokensUsed += result.tokensUsed;
-    proc.lastActiveAt = now;
-
-    // Check if process exceeded its token budget (only when per-process budgets are enabled)
-    if (this.config.kernel.processTokenBudgetEnabled &&
-        proc.tokenBudget !== undefined && proc.tokensUsed > proc.tokenBudget) {
-      this.addTrigger('resource_exhaustion');
-      this.emitter?.emit({
-        action: 'os_metacog',
-        status: 'completed',
-        message: `token_budget_exceeded pid=${proc.pid} name=${proc.name} used=${proc.tokensUsed} budget=${proc.tokenBudget}`,
-      });
+    // Snapshot which processes are already dead before transition
+    const wasDeadBefore = new Set<string>();
+    for (const p of this.table.getAll()) {
+      if (p.state === "dead") wasDeadBefore.add(p.pid);
     }
 
-    if (!result.success) {
-      // GAP 1: Record strategy FAILURE for the strategy that was active on this process
-      if (proc.activeStrategyId) {
-        this.memoryStore.recordStrategyOutcome(proc.activeStrategyId, false, proc.tokensUsed);
-      }
-      // Process failed — kill it and trigger metacog
-      const parentPid = proc.parentPid;
-      this.supervisor.kill(proc.pid, false, `execution_failed: ${result.response}`);
-      this.executor.disposeThread(proc.pid);
-      this.router.disposeThread(proc.pid);
-      this.emitProtocol("os_process_kill", `execution_failed`, {
-        agentId: proc.pid,
-        agentName: proc.name,
-      });
-      this.addTrigger("process_failed");
+    // ── Delegate to pure transition function ──
+    const state = this.extractState();
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: result.pid,
+      name: proc.name,
+      success: result.success,
+      commandCount: result.commands.length,
+      tokensUsed: result.tokensUsed,
+      commands: result.commands,
+      response: result.response,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    };
 
-      // Auto-signal parent when a child process dies (don't depend on LLM compliance)
-      if (parentPid) {
-        this.emitChildDoneSignal(proc.pid, proc.name, parentPid, 1, proc.exitReason ?? `execution_failed: ${result.response}`);
+    const [newState, effects] = transition(state, event);
+
+    // Apply all state changes (processes, blackboard, deferrals, triggers)
+    this.applyStateChanges(newState, { syncProcesses: true });
+
+    // Interpret effects (submit_llm, emit_protocol, start_shell, etc.)
+    this.interpretTransitionEffects(effects);
+
+    // ── Post-transition side effects (I/O that can't live in pure transition) ──
+
+    // Dispose threads for newly-dead processes
+    for (const [pid, p] of newState.processes) {
+      if (p.state === "dead" && !wasDeadBefore.has(pid)) {
+        this.executor.disposeThread(pid);
+        this.router.disposeThread(pid);
       }
-      return;
     }
 
-    // Gap 8: Wire TelemetryCollector.onProcessComplete() for process-level telemetry
-    if (this.config.kernel.telemetryEnabled) {
+    // GAP 1: Record strategy outcome
+    if (!result.success && proc.activeStrategyId) {
+      this.memoryStore.recordStrategyOutcome(proc.activeStrategyId, false, proc.tokensUsed);
+    }
+    if (result.success) {
+      const exitCmd = result.commands.find(c => c.kind === "exit");
+      if (exitCmd && exitCmd.kind === "exit" && proc.activeStrategyId) {
+        this.memoryStore.recordStrategyOutcome(proc.activeStrategyId, exitCmd.code === 0, proc.tokensUsed);
+      }
+    }
+
+    // Gap 8: Telemetry
+    if (result.success && this.config.kernel.telemetryEnabled) {
       this.telemetryCollector.onProcessComplete(
         proc.pid,
         result.tokensUsed,
@@ -2310,104 +2321,9 @@ export class OsKernel {
       );
     }
 
-    // ── Hard Spawn Enforcement ──
-    // For the top-level orchestrator's first tick: enforce spawn requirement.
-    // proc.tickCount was incremented above, so tickCount === 1 means this was tick 0's result.
-    if (
-      !proc.parentPid &&
-      proc.type === "lifecycle" &&
-      proc.tickCount === 1
-    ) {
-      const hasSpawnCommand = result.commands.some(c =>
-        c.kind === "spawn_child" || c.kind === "spawn_system" || c.kind === "spawn_kernel" || c.kind === "spawn_ephemeral" || c.kind === "spawn_graph"
-      );
-      if (!hasSpawnCommand) {
-        // REJECT: orchestrator tried to solve directly instead of spawning workers.
-        // Preserve bb_write commands so architecture docs aren't lost on retry.
-        const bbWrites = result.commands.filter(c => c.kind === "bb_write");
-        if (bbWrites.length > 0) {
-          await this.executeProcessCommands(proc.pid, bbWrites);
-        }
-        this.emitter?.emit({
-          action: "os_command_rejected",
-          status: "completed",
-          agentId: proc.pid,
-          agentName: proc.name,
-          message: `tick 0 rejected: orchestrator produced zero spawn commands — must design topology and spawn child processes (preserved ${bbWrites.length} bb_write commands)`,
-        });
-        // Discard remaining commands, keep process in running state — it will run again
-        // next tick with a re-prompt (see llm-executor rejection re-prompt)
-        return;
-      }
-    }
-
-    // ── Architect-Phase Deadlock Enforcement ──
-    // After scouts return, the orchestrator must spawn lifecycle children.
-    // If it has scout results but no lifecycle children and is going idle without
-    // spawning any, that's a deadlock — reject and re-prompt.
-    if (
-      !proc.parentPid &&
-      proc.type === "lifecycle" &&
-      proc.tickCount >= 1
-    ) {
-      const hasLifecycleChildren = this.table.getAll().some(
-        p => p.parentPid === proc.pid && p.type === "lifecycle"
-      );
-      const hasScoutResults = this.ipcBus.bbReadAll().some(
-        entry => entry.key.startsWith("ephemeral:") || entry.key.startsWith("scout:")
-      );
-      const goingIdle = result.commands.some(c => c.kind === "idle");
-      const spawnsLifecycle = result.commands.some(c =>
-        c.kind === "spawn_child" || c.kind === "spawn_graph"
-      );
-
-      if (!hasLifecycleChildren && hasScoutResults && !spawnsLifecycle) {
-        // Preserve bb_write and ephemeral commands before rejecting — don't discard useful work
-        const preservable = result.commands.filter(c => c.kind === "bb_write" || c.kind === "spawn_ephemeral");
-        if (preservable.length > 0) {
-          await this.executeProcessCommands(proc.pid, preservable);
-        }
-        this.emitter?.emit({
-          action: "os_command_rejected",
-          status: "completed",
-          agentId: proc.pid,
-          agentName: proc.name,
-          message: `architect-phase deadlock: scout data available but no lifecycle children spawned — must design topology and spawn Phase 0 (preserved ${preservable.length} commands, rejected idle/exit)`,
-        });
-        return;
-      }
-    }
-
-    // Emit turn summary so the UI shows what the process decided
-    if (this.emitter && result.commands.length > 0) {
-      const summary = this.summarizeTurnCommands(result.commands);
-      this.emitter.emitStreamEvent(proc.pid, proc.name, {
-        type: "status",
-        status: `Turn ${proc.tickCount} complete → ${summary}`,
-      });
-    }
-
-    // Execute any commands the process returned
-    await this.executeProcessCommands(proc.pid, result.commands);
-
-    // Auto-exit daemons that complete a turn without issuing exit/idle/sleep.
-    // Daemons are housekeeping processes — if they produce output without
-    // explicitly managing their own lifecycle, they're done.
-    const hasLifecycleCmd = result.commands.some(
-      c => c.kind === "exit" || c.kind === "idle" || c.kind === "sleep" || c.kind === "checkpoint"
-    );
-    if (!hasLifecycleCmd && proc.type === "daemon" && proc.state === "running") {
-      this.supervisor.kill(proc.pid, false, "auto-exit: daemon completed turn without lifecycle command");
-      this.executor.disposeThread(proc.pid);
-      this.router.disposeThread(proc.pid);
-      this.emitter?.emit({
-        action: "os_process_exit",
-        status: "completed",
-        agentId: proc.pid,
-        agentName: proc.name,
-        message: "auto-exit: daemon completed turn without lifecycle command",
-      });
-    }
+    // NOTE: The old processOneResult body (token tracking, failure handling,
+    // hard spawn enforcement, architect-phase deadlock, command execution,
+    // auto-exit daemons) is now handled by the transition function above.
   }
 
   /**
@@ -4193,9 +4109,15 @@ export class OsKernel {
       processes.set(proc.pid, proc);
     }
 
-    // Blackboard: populated on-demand when transition handlers need it.
-    // For halt_check, blackboard is not read.
+    // Snapshot blackboard from IPC bus for transition function use
     const blackboard = new Map<string, { value: unknown; writtenBy: string | null; version: number }>();
+    for (const entry of this.ipcBus.bbReadAll()) {
+      blackboard.set(entry.key, {
+        value: entry.value,
+        writtenBy: entry.writtenBy,
+        version: entry.version,
+      });
+    }
 
     return {
       goal: this.goal,
@@ -4223,7 +4145,7 @@ export class OsKernel {
    * Apply state changes from a transition result back to kernel fields.
    * Only applies fields that the transition function can modify.
    */
-  private applyStateChanges(newState: KernelState): void {
+  private applyStateChanges(newState: KernelState, opts?: { syncProcesses?: boolean }): void {
     // NOTE: Do NOT set this.halted here — haltResolve() sets it and must
     // not see it as already true (it uses the flag to prevent duplicate halts).
     // The caller checks newState.halted and calls haltResolve() if needed.
@@ -4232,6 +4154,64 @@ export class OsKernel {
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
     this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
     this.housekeepCount = newState.housekeepCount;
+
+    if (!opts?.syncProcesses) return;
+
+    // ── Sync process table ──
+    // The transition function produces a new process map. We reconcile:
+    // - New processes → add to table via supervisor.spawn or direct table add
+    // - State changes on existing processes → apply to table
+    // - Dead processes → kill via supervisor (disposes threads)
+    const existingPids = new Set(this.table.getAll().map(p => p.pid));
+
+    for (const [pid, proc] of newState.processes) {
+      if (!existingPids.has(pid)) {
+        // New process created by transition — add directly to table
+        // (supervisor.spawn generates a new PID, but transition already assigned one)
+        this.table.addDirect(proc);
+      } else {
+        // Existing process — sync state changes
+        const existing = this.table.get(pid)!;
+
+        // Sync all mutable fields from transition state
+        existing.state = proc.state;
+        existing.tickCount = proc.tickCount;
+        existing.tokensUsed = proc.tokensUsed;
+        existing.lastActiveAt = proc.lastActiveAt;
+        existing.exitCode = proc.exitCode;
+        existing.exitReason = proc.exitReason;
+        existing.children = proc.children;
+        existing.selfReports = proc.selfReports;
+        existing.blackboardKeysWritten = proc.blackboardKeysWritten;
+        existing.ephemeralSpawnCount = proc.ephemeralSpawnCount;
+        existing.checkpoint = proc.checkpoint;
+        existing.sleepUntil = proc.sleepUntil;
+        existing.wakeOnSignals = proc.wakeOnSignals;
+
+        // Dispose thread for dead processes
+        if (proc.state === "dead" && existing.state === "dead") {
+          // Already marked dead — disposal happens in interpretTransitionEffects
+        }
+      }
+    }
+
+    // ── Sync blackboard ──
+    // Write new/updated entries back to IPC bus
+    for (const [key, entry] of newState.blackboard) {
+      const existing = this.ipcBus.bbRead(key);
+      if (!existing || existing.version < entry.version) {
+        this.ipcBus.bbWrite(key, entry.value, entry.writtenBy ?? "kernel");
+      }
+    }
+
+    // ── Sync deferrals ──
+    this.deferrals = new Map(newState.deferrals);
+
+    // ── Sync pending triggers ──
+    // Append new triggers from transition (don't lose existing ones not consumed yet)
+    for (const trigger of newState.pendingTriggers) {
+      this.addTrigger(trigger);
+    }
   }
 
   /**
@@ -4250,12 +4230,114 @@ export class OsKernel {
             status: "completed",
             message: effect.message,
           });
+          // Handle signal dispatch: os_signal_emit effects need to go through ipcBus
+          if (effect.action === "os_signal_emit") {
+            const match = effect.message.match(/signal=(\S+)\s+from=(\S+)/);
+            if (match) {
+              this.ipcBus.emitSignal(match[1], match[2]);
+              this.tickSignals.push(match[1]);
+            }
+            // child:done signals need full dispatch through emitChildDoneSignal
+            const childMatch = effect.message.match(/child:done pid=(\S+) name=(\S+) parent=(\S+) code=(\S+)/);
+            if (childMatch) {
+              this.emitChildDoneSignal(childMatch[1], childMatch[2], childMatch[3], parseInt(childMatch[4]), undefined);
+            }
+          }
           break;
+
         case "halt":
-          // Halt is applied via applyStateChanges (halted = true)
-          // The emitter call is already handled by emit_protocol effect
+          // Halt is applied by caller checking newState.halted
           break;
-        // Other effect types will be added as more handlers move to transition
+
+        case "submit_llm": {
+          // Submit the process for LLM execution
+          const proc = this.table.get(effect.pid);
+          if (proc) {
+            this.submitProcess(proc);
+          }
+          break;
+        }
+
+        case "submit_ephemeral": {
+          // Queue ephemeral for execution — the transition already created the process
+          const ephProc = this.table.get(effect.pid);
+          const parentPid = ephProc?.parentPid;
+          const parentProc = parentPid ? this.table.get(parentPid) : undefined;
+          if (ephProc && parentProc) {
+            this.pendingEphemerals.push({
+              pid: parentProc.pid,
+              ephemeralId: effect.ephemeralId,
+              tablePid: ephProc.pid,
+              name: effect.name,
+              model: effect.model,
+              prompt: [
+                "You are a single-turn helper process. You run once, return findings, then terminate.",
+                "IMPORTANT: You have NO blackboard access. Do NOT claim to write to any blackboard key.",
+                "Your text response IS your output — the kernel captures it and delivers it to your parent automatically.",
+                "",
+                "## Context",
+                `Parent process: ${parentProc.name} (working on: ${parentProc.objective ?? "unknown"})`,
+                `Working directory: ${parentProc.workingDir}`,
+                "",
+                "## Task",
+                ephProc.objective,
+                "",
+                "## Output Format",
+                "Structure your response for machine consumption by your parent process.",
+                "",
+                "## Constraints",
+                "- Single turn only — you cannot spawn processes or continue after this response",
+              ].join("\n"),
+              workingDir: parentProc.workingDir,
+              startTime: Date.now(),
+            });
+          }
+          break;
+        }
+
+        case "start_shell": {
+          // Start the shell process via executor router
+          const shellProc = this.table.get(effect.pid);
+          if (shellProc) {
+            this.router.startProcess(shellProc).catch(() => {
+              this.supervisor.kill(shellProc.pid, false, "shell start failed");
+            });
+          }
+          break;
+        }
+
+        case "start_subkernel": {
+          // Start the sub-kernel via executor router
+          const kernelProc = this.table.get(effect.pid);
+          if (kernelProc) {
+            this.router.startProcess(kernelProc).catch(() => {
+              this.supervisor.kill(kernelProc.pid, false, "subkernel boot failed");
+            });
+          }
+          break;
+        }
+
+        case "persist_memory": {
+          // Handle checkpoint persistence
+          if (effect.operation.startsWith("checkpoint:")) {
+            const pid = effect.operation.slice("checkpoint:".length);
+            const proc = this.table.get(pid);
+            if (proc?.checkpoint) {
+              // Enrich with executor state before saving
+              proc.checkpoint.executorState = this.router.captureCheckpointState(proc) ?? undefined;
+              this.memoryStore.saveCheckpoint(proc.checkpoint);
+            }
+          }
+          break;
+        }
+
+        case "schedule_timer":
+        case "cancel_timer":
+        case "persist_snapshot":
+        case "submit_metacog":
+        case "submit_awareness":
+          // These effect types are not yet produced by process_completed transitions
+          break;
       }
     }
   }
