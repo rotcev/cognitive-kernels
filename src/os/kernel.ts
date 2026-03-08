@@ -3345,6 +3345,7 @@ export class OsKernel {
       dagTopology: this.dagEngine.currentTopology(),
       deferrals: new Map(this.deferrals),
       pendingTriggers: [...this.pendingTriggers],
+      activeStrategyId: this.activeStrategyId ?? null,
       halted: this.halted,
       haltReason: this.haltReason,
       goalWorkDoneAt: this.goalWorkDoneAt,
@@ -3366,6 +3367,9 @@ export class OsKernel {
     this.goal = newState.goal;
     this.haltReason = newState.haltReason ?? "";
     this.goalWorkDoneAt = newState.goalWorkDoneAt;
+    if (newState.activeStrategyId !== null) {
+      this.activeStrategyId = newState.activeStrategyId;
+    }
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
     this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
     this.housekeepCount = newState.housekeepCount;

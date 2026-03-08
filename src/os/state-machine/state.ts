@@ -48,6 +48,10 @@ export type KernelState = {
   // --- Metacognition ---
   pendingTriggers: OsMetacogTrigger[];
 
+  // --- Strategy ---
+  /** Active scheduling strategy ID (for outcome attribution). */
+  activeStrategyId: string | null;
+
   // --- Halt logic ---
   halted: boolean;
   haltReason: string | null;
@@ -86,6 +90,8 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     deferrals: new Map(),
 
     pendingTriggers: [],
+
+    activeStrategyId: null,
 
     halted: false,
     haltReason: null,
