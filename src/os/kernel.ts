@@ -64,6 +64,8 @@ import type { KernelEvent, KernelEventInput } from "./state-machine/events.js";
 import { createEventSequencer } from "./state-machine/events.js";
 import type { KernelEffect, KernelEffectInput } from "./state-machine/effects.js";
 import { createEffectSequencer } from "./state-machine/effects.js";
+import { transition } from "./state-machine/transition.js";
+import type { KernelState } from "./state-machine/state.js";
 
 
 export class OsKernel {
@@ -4176,6 +4178,82 @@ export class OsKernel {
   /** Get the effect log (for testing and Lens). */
   getEffectLog(): readonly KernelEffect[] {
     return this.effectLog;
+  }
+
+  /**
+   * Extract the kernel's deterministic state as a plain-data KernelState.
+   * This bridges the mutable kernel class and the pure transition function.
+   */
+  extractState(): KernelState {
+    // Build process map from process table
+    const processes = new Map<string, OsProcess>();
+    for (const proc of this.table.getAll()) {
+      processes.set(proc.pid, proc);
+    }
+
+    // Blackboard: populated on-demand when transition handlers need it.
+    // For halt_check, blackboard is not read.
+    const blackboard = new Map<string, { value: unknown; writtenBy: string | null; version: number }>();
+
+    return {
+      goal: this.goal,
+      runId: this.runId,
+      config: this.config,
+      processes,
+      inflight: new Set(this.inflight.keys()),
+      activeEphemeralCount: this.activeEphemeralCount,
+      blackboard,
+      tickCount: this.scheduler.tickCount,
+      dagTopology: this.dagEngine.currentTopology(),
+      deferrals: new Map(this.deferrals),
+      pendingTriggers: [...this.pendingTriggers],
+      halted: this.halted,
+      haltReason: this.haltReason,
+      goalWorkDoneAt: this.goalWorkDoneAt,
+      startTime: this.startTime,
+      consecutiveIdleTicks: this.consecutiveIdleTicks,
+      lastProcessCompletionTime: this.lastProcessCompletionTime,
+      housekeepCount: this.housekeepCount,
+    };
+  }
+
+  /**
+   * Apply state changes from a transition result back to kernel fields.
+   * Only applies fields that the transition function can modify.
+   */
+  private applyStateChanges(newState: KernelState): void {
+    this.halted = newState.halted;
+    this.haltReason = newState.haltReason ?? "";
+    this.goalWorkDoneAt = newState.goalWorkDoneAt;
+    this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
+    this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
+    this.housekeepCount = newState.housekeepCount;
+  }
+
+  /**
+   * Interpret effects from a transition result — execute each effect
+   * using the kernel's runtime capabilities (I/O, timers, emitter).
+   */
+  private interpretTransitionEffects(effects: readonly KernelEffect[]): void {
+    for (const effect of effects) {
+      // Record in effect log
+      this.collectEffect(effect);
+
+      switch (effect.type) {
+        case "emit_protocol":
+          this.emitter?.emit({
+            action: effect.action,
+            status: "completed",
+            message: effect.message,
+          });
+          break;
+        case "halt":
+          // Halt is applied via applyStateChanges (halted = true)
+          // The emitter call is already handled by emit_protocol effect
+          break;
+        // Other effect types will be added as more handlers move to transition
+      }
+    }
   }
 
   /**
