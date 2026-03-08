@@ -189,11 +189,18 @@ const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
   // awareness_response_received with random adjustments/notes
   fc.record({
     type: fc.constant("awareness_response_received" as const),
-    adjustments: fc.array(fc.record({
-      processName: fc.string({ minLength: 1, maxLength: 20 }),
-      field: fc.constantFrom("priority", "objective"),
-      value: fc.string({ minLength: 1, maxLength: 20 }),
-    }), { minLength: 0, maxLength: 3 }),
+    adjustments: fc.array(fc.oneof(
+      fc.record({ kind: fc.constant("noop" as const) }),
+      fc.record({ kind: fc.constant("adjust_kill_threshold" as const), delta: fc.integer({ min: -5, max: 5 }) }),
+      fc.record({ kind: fc.constant("suggest_metacog_focus" as const), area: fc.string({ minLength: 1, maxLength: 20 }) }),
+      fc.record({
+        kind: fc.constant("detect_oscillation" as const),
+        processType: fc.constantFrom("lifecycle", "event"),
+        killCount: fc.nat({ max: 10 }),
+        respawnCount: fc.nat({ max: 10 }),
+        windowTicks: fc.nat({ max: 50 }),
+      }),
+    ), { minLength: 0, maxLength: 3 }),
     notes: fc.array(fc.string({ minLength: 1, maxLength: 50 }), { minLength: 0, maxLength: 3 }),
     flaggedHeuristics: fc.constant([]),
     timestamp: fc.constant(Date.now()),
@@ -206,7 +213,7 @@ const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
     success: fc.boolean(),
     response: fc.string({ maxLength: 50 }),
     tokensUsed: fc.nat({ max: 5000 }),
-    commands: fc.array(fc.constant({ kind: "idle" as const }), { minLength: 0, maxLength: 3 }),
+    commands: fc.array(arbCommand, { minLength: 0, maxLength: 3 }),
     timestamp: fc.constant(Date.now()),
     seq: fc.nat(),
   }),
@@ -562,7 +569,7 @@ describe("Pure kernel invariants", () => {
         state.metacogInflight = true;
         state.halted = false;
 
-        const [, effects] = transition(state, {
+        const [newState, effects] = transition(state, {
           type: "timer_fired",
           timer: "metacog",
           timestamp: Date.now(),
@@ -574,6 +581,8 @@ describe("Pure kernel invariants", () => {
         const hasSubmitMetacog = effects.some(e => e.type === "submit_metacog");
         expect(hasRunMetacog).toBe(false);
         expect(hasSubmitMetacog).toBe(false);
+        // Guard should not accidentally clear the inflight flag
+        expect(newState.metacogInflight).toBe(true);
       }),
       { numRuns: 300 },
     );
