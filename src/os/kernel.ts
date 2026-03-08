@@ -3699,9 +3699,24 @@ export class OsKernel {
           break;
         }
 
+        case "run_metacog": {
+          // New effect from handleMetacogTimer — carries full context payload.
+          // Old kernel still uses its own doMetacogCheck flow, so we just set the flag.
+          // The context is ignored here; the new KernelInterpreter will use it directly.
+          this.transitionApprovedMetacog = true;
+          break;
+        }
+
         case "submit_awareness": {
           // Transition decided awareness should run after metacog.
           // The actual LLM call happens in doMetacogCheck's awareness section.
+          this.transitionApprovedAwareness = true;
+          break;
+        }
+
+        case "run_awareness": {
+          // New effect from handleMetacogTimer — carries context payload.
+          // Old kernel treats this the same as submit_awareness.
           this.transitionApprovedAwareness = true;
           break;
         }

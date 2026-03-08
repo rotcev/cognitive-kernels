@@ -1138,14 +1138,37 @@ describe("transition — timer_fired (housekeep)", () => {
     expect(effects.some(e => e.type === "persist_snapshot")).toBe(true);
   });
 
-  test("metacog timer emits submit_metacog when pendingTriggers present (boot trigger)", () => {
+  test("metacog timer emits run_metacog when pendingTriggers present (boot trigger)", () => {
     const state = makeState();
     const [s1] = transition(state, bootEvent());
     // After boot, pendingTriggers includes "boot", so metacog timer should fire
     expect(s1.pendingTriggers).toContain("boot");
 
     const [s2, e2] = transition(s1, timerEvent("metacog"));
-    expect(e2.some(e => e.type === "submit_metacog")).toBe(true);
+    const runMetacog = e2.find(e => e.type === "run_metacog");
+    expect(runMetacog).toBeDefined();
+    expect((runMetacog as any).context).toBeDefined();
+    expect((runMetacog as any).context.trigger).toBe("boot");
+  });
+
+  test("metacog timer does not emit run_metacog when metacogInflight is true", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    // Simulate metacog already inflight
+    const inflightState = { ...s1, metacogInflight: true };
+
+    const [, e2] = transition(inflightState, timerEvent("metacog"));
+    expect(e2.filter(e => e.type === "run_metacog")).toHaveLength(0);
+  });
+
+  test("metacog timer sets metacogInflight to true when emitting run_metacog", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    expect(s1.pendingTriggers).toContain("boot");
+    expect(s1.metacogInflight).toBe(false);
+
+    const [s2] = transition(s1, timerEvent("metacog"));
+    expect(s2.metacogInflight).toBe(true);
   });
 
   test("metacog timer is a no-op when pendingTriggers is empty and cadence does not fire", () => {

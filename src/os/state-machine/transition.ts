@@ -20,6 +20,7 @@ import { validateTopology } from "../topology/validate.js";
 import { optimizeTopology } from "../topology/optimize.js";
 import type { TopologyExpr, MetacogMemoryCommand } from "../topology/types.js";
 import { randomUUID } from "node:crypto";
+import { buildMetacogContextPure } from "./metacog-context.js";
 
 export type TransitionResult = readonly [KernelState, KernelEffect[]];
 
@@ -1269,11 +1270,14 @@ function handleTimerFired(state: KernelState, event: TimerFiredEvent): Transitio
 }
 
 /**
- * Metacog timer handler — decides WHEN to submit metacog/awareness evaluations.
- * The actual LLM invocation stays in the kernel; transition just emits the effect.
+ * Metacog timer handler — decides WHEN to run metacog/awareness evaluations.
+ * Builds the full metacog context from state and emits a run_metacog effect
+ * carrying the context payload. Guards against concurrent metacog evals via
+ * state.metacogInflight.
  */
 function handleMetacogTimer(state: KernelState): TransitionResult {
   if (state.halted) return [state, []];
+  if (state.metacogInflight) return [state, []];
 
   const effects: KernelEffectInput[] = [];
   const pendingTriggers = [...state.pendingTriggers];
@@ -1294,11 +1298,17 @@ function handleMetacogTimer(state: KernelState): TransitionResult {
     state.tickCount % state.config.scheduler.metacogCadence === 0;
   const shouldRunMetacog = pendingTriggers.length > 0 || cadenceFires;
 
+  let metacogInflight: boolean = state.metacogInflight;
+
   if (shouldRunMetacog) {
+    // Build context from state — pure function, no I/O
+    const stateForContext = { ...state, pendingTriggers };
+    const context = buildMetacogContextPure(stateForContext);
     effects.push({
-      type: "submit_metacog",
-      triggerCount: pendingTriggers.length,
+      type: "run_metacog",
+      context,
     });
+    metacogInflight = true;
   }
 
   // Awareness cadence check: runs every N metacog evaluations
@@ -1308,13 +1318,14 @@ function handleMetacogTimer(state: KernelState): TransitionResult {
     const nextMetacogEvalCount = state.metacogEvalCount + 1;
     if (nextMetacogEvalCount > 0 && nextMetacogEvalCount % state.config.awareness.cadence === 0) {
       effects.push({
-        type: "submit_awareness",
+        type: "run_awareness",
+        context: {},
       });
     }
   }
 
   return [
-    { ...state, pendingTriggers },
+    { ...state, pendingTriggers, metacogInflight },
     assignEffectSeqs(effects),
   ];
 }
