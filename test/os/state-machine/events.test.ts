@@ -187,4 +187,23 @@ describe("Kernel event log", () => {
     expect(haltChecks.length).toBe(1);
     expect((haltChecks[0] as any).result).toBe(false);
   });
+
+  test("metacog evaluation records metacog_evaluated event", async () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.doSchedulingPass = () => {};
+    // Add a trigger so shouldConsultMetacog() returns true
+    k.pendingTriggers = ["test_trigger"];
+
+    await k.doMetacogCheck();
+
+    const log = kernel.getEventLog();
+    const metacogEvents = log.filter((e: any) => e.type === "metacog_evaluated");
+    expect(metacogEvents.length).toBe(1);
+    expect(typeof (metacogEvents[0] as any).commandCount).toBe("number");
+    expect(typeof (metacogEvents[0] as any).triggerCount).toBe("number");
+  });
 });

@@ -589,12 +589,20 @@ export class OsKernel {
       }
 
       this.lastMetacogTick = this.scheduler.tickCount;
+      const triggerCount = this.pendingTriggers.length;
       this.pendingTriggers = [];
 
       // (2) Read all pending items from 'metacog:commands' channel
       // (3) Apply each MetacogCommand via executeMetacogCommand()
+      let metacogCommandCount = 0;
       const cmdEntry = this.ipcBus.bbRead("metacog:commands", "kernel");
       if (cmdEntry && typeof cmdEntry.value === "string") {
+        try {
+          const parsed = JSON.parse(cmdEntry.value);
+          if (parsed && Array.isArray(parsed.commands)) {
+            metacogCommandCount = parsed.commands.length;
+          }
+        } catch { /* count stays 0 */ }
         nextWakeMs = this.parseMetacogResponse(cmdEntry.value);
         this.ipcBus.bbDelete("metacog:commands");
       }
@@ -602,6 +610,12 @@ export class OsKernel {
 
       // Track metacog evaluation count
       this.metacogEvalCount += 1;
+
+      this.logEvent({
+        type: "metacog_evaluated",
+        commandCount: metacogCommandCount,
+        triggerCount,
+      });
 
       // Record progress snapshot for awareness context
       this.recordProgressSnapshot();
@@ -652,6 +666,11 @@ export class OsKernel {
               flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
               tick: this.scheduler.tickCount,
             },
+          });
+
+          this.logEvent({
+            type: "awareness_evaluated",
+            hasAdjustment: awarenessResp.adjustments.length > 0,
           });
         } catch {
           // Awareness eval failed — continue without notes
@@ -992,6 +1011,11 @@ export class OsKernel {
                 flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
                 tick: this.scheduler.tickCount,
               },
+            });
+
+            this.logEvent({
+              type: "awareness_evaluated",
+              hasAdjustment: awarenessResp.adjustments.length > 0,
             });
           } catch {
             // Awareness eval failed — non-critical, continue
@@ -1512,6 +1536,11 @@ export class OsKernel {
               flaggedHeuristicCount: awarenessResp.flaggedHeuristics.length,
               tick: this.scheduler.tickCount,
             },
+          });
+
+          this.logEvent({
+            type: "awareness_evaluated",
+            hasAdjustment: awarenessResp.adjustments.length > 0,
           });
         } catch {
           // Awareness eval failed — continue without notes
