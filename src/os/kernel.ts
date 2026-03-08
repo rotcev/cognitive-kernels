@@ -1919,6 +1919,8 @@ export class OsKernel {
       success: result.success,
       commandCount: result.commands.length,
       tokensUsed: result.tokensUsed,
+      commands: result.commands,
+      response: result.response,
     });
     const release = await this.mutex.acquire();
     try {

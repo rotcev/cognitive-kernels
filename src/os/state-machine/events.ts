@@ -34,6 +34,10 @@ export type ProcessCompletedEvent = BaseEvent & {
   success: boolean;
   commandCount: number;
   tokensUsed: number;
+  /** Full command array for transition function processing. */
+  commands: import("../types.js").OsProcessCommand[];
+  /** Raw LLM response text (needed for failure diagnostics). */
+  response: string;
 };
 
 /** A process was submitted to the LLM executor. */

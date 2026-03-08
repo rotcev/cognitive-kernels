@@ -51,18 +51,21 @@ describe("KernelEvent types", () => {
       success: true,
       commandCount: 3,
       tokensUsed: 1500,
+      commands: [{ kind: "idle" }, { kind: "bb_write", key: "k", value: "v" }, { kind: "exit", code: 0, reason: "done" }],
+      response: "test response",
       timestamp: Date.now(),
       seq: 1,
     };
     expect(event.type).toBe("process_completed");
     expect(event.pid).toBe("proc-1");
+    expect(event.commands).toHaveLength(3);
   });
 
   test("all event types are constructable", () => {
     const ts = Date.now();
     const events: KernelEvent[] = [
       { type: "boot", goal: "g", timestamp: ts, seq: 0 },
-      { type: "process_completed", pid: "p", name: "n", success: true, commandCount: 0, tokensUsed: 0, timestamp: ts, seq: 1 },
+      { type: "process_completed", pid: "p", name: "n", success: true, commandCount: 0, tokensUsed: 0, commands: [], response: "", timestamp: ts, seq: 1 },
       { type: "process_submitted", pid: "p", name: "n", model: "m", timestamp: ts, seq: 2 },
       { type: "ephemeral_completed", id: "e", name: "n", success: true, timestamp: ts, seq: 3 },
       { type: "timer_fired", timer: "housekeep", timestamp: ts, seq: 4 },

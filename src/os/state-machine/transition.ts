@@ -5,15 +5,15 @@
  * Total function — for every valid (state, event) pair, produces exactly
  * one (state', effects) pair. No exceptions, no I/O, no randomness.
  *
- * Phase 3: Handles boot and halt_check events.
+ * Phase 3: Handles boot, halt_check, external_command, and process_completed events.
  * Other events pass through as no-ops (strangler pattern — the kernel
  * class still handles them via its existing code paths).
  */
 
-import type { KernelState } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent } from "./events.js";
+import type { KernelState, BlackboardEntry } from "./state.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
-import type { OsProcess } from "../types.js";
+import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport } from "../types.js";
 import { randomUUID } from "node:crypto";
 
 export type TransitionResult = readonly [KernelState, KernelEffect[]];
@@ -30,6 +30,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleHaltCheck(state, event);
     case "external_command":
       return handleExternalCommand(state, event);
+    case "process_completed":
+      return handleProcessCompleted(state, event);
     default:
       // Unhandled events are no-ops — the kernel class still handles them
       // via its existing code paths (strangler pattern).
@@ -210,6 +212,795 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
   }
 
   return [state, []];
+}
+
+function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent): TransitionResult {
+  const effects: KernelEffectInput[] = [];
+  const processes = new Map(state.processes);
+  const blackboard = new Map(state.blackboard);
+  const deferrals = new Map(state.deferrals);
+  const pendingTriggers = [...state.pendingTriggers];
+
+  const proc = processes.get(event.pid);
+  if (!proc) {
+    // Process not found — nothing to do
+    return [state, []];
+  }
+
+  // Clone process for mutation
+  const updatedProc = { ...proc };
+  const now = new Date().toISOString();
+
+  // --- Pre-command processing ---
+
+  // Update process stats
+  updatedProc.tickCount += 1;
+  updatedProc.tokensUsed += event.tokensUsed;
+  updatedProc.lastActiveAt = now;
+
+  // Per-process token budget check
+  if (state.config.kernel.processTokenBudgetEnabled &&
+      updatedProc.tokenBudget !== undefined && updatedProc.tokensUsed > updatedProc.tokenBudget) {
+    pendingTriggers.push("resource_exhaustion");
+    effects.push({
+      type: "emit_protocol",
+      action: "os_metacog",
+      message: `token_budget_exceeded pid=${updatedProc.pid} name=${updatedProc.name} used=${updatedProc.tokensUsed} budget=${updatedProc.tokenBudget}`,
+    });
+  }
+
+  // --- Failure handling ---
+  if (!event.success) {
+    // Kill the failed process
+    updatedProc.state = "dead";
+    updatedProc.exitReason = `execution_failed: ${event.response}`;
+    processes.set(event.pid, updatedProc);
+    pendingTriggers.push("process_failed");
+
+    effects.push({
+      type: "emit_protocol",
+      action: "os_process_kill",
+      message: "execution_failed",
+    });
+
+    // Auto-signal parent
+    if (updatedProc.parentPid) {
+      effects.push({
+        type: "emit_protocol",
+        action: "os_signal_emit",
+        message: `child:done pid=${event.pid} name=${updatedProc.name} parent=${updatedProc.parentPid} code=1`,
+      });
+    }
+
+    return [
+      { ...state, processes, pendingTriggers, lastProcessCompletionTime: Date.now() },
+      assignEffectSeqs(effects),
+    ];
+  }
+
+  // --- Hard Spawn Enforcement ---
+  // Top-level orchestrator's first tick must spawn children.
+  if (
+    !updatedProc.parentPid &&
+    updatedProc.type === "lifecycle" &&
+    updatedProc.tickCount === 1
+  ) {
+    const hasSpawnCommand = event.commands.some(c =>
+      c.kind === "spawn_child" || c.kind === "spawn_system" || c.kind === "spawn_kernel" || c.kind === "spawn_ephemeral" || c.kind === "spawn_graph"
+    );
+    if (!hasSpawnCommand) {
+      // Preserve bb_write commands before rejecting
+      const bbWrites = event.commands.filter(c => c.kind === "bb_write");
+      for (const cmd of bbWrites) {
+        if (cmd.kind === "bb_write") {
+          processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
+        }
+      }
+      effects.push({
+        type: "emit_protocol",
+        action: "os_command_rejected",
+        message: `tick 0 rejected: orchestrator produced zero spawn commands — must design topology and spawn child processes (preserved ${bbWrites.length} bb_write commands)`,
+      });
+      processes.set(event.pid, updatedProc);
+      return [
+        { ...state, processes, blackboard, pendingTriggers, lastProcessCompletionTime: Date.now() },
+        assignEffectSeqs(effects),
+      ];
+    }
+  }
+
+  // --- Architect-Phase Deadlock Enforcement ---
+  if (
+    !updatedProc.parentPid &&
+    updatedProc.type === "lifecycle" &&
+    updatedProc.tickCount >= 1
+  ) {
+    const hasLifecycleChildren = [...processes.values()].some(
+      p => p.parentPid === updatedProc.pid && p.type === "lifecycle"
+    );
+    const hasScoutResults = [...blackboard.keys()].some(
+      key => key.startsWith("ephemeral:") || key.startsWith("scout:")
+    );
+    const spawnsLifecycle = event.commands.some(c =>
+      c.kind === "spawn_child" || c.kind === "spawn_graph"
+    );
+
+    if (!hasLifecycleChildren && hasScoutResults && !spawnsLifecycle) {
+      // Preserve bb_write and ephemeral commands
+      const preservable = event.commands.filter(c => c.kind === "bb_write" || c.kind === "spawn_ephemeral");
+      for (const cmd of preservable) {
+        if (cmd.kind === "bb_write") {
+          processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
+        }
+      }
+      // Ephemeral spawn effects from preservable commands
+      for (const cmd of preservable) {
+        if (cmd.kind === "spawn_ephemeral") {
+          const [ephProc, ephEffects] = processSpawnEphemeral(state, processes, updatedProc, cmd);
+          if (ephProc) {
+            processes.set(ephProc.pid, ephProc);
+            effects.push(...ephEffects);
+          }
+        }
+      }
+      effects.push({
+        type: "emit_protocol",
+        action: "os_command_rejected",
+        message: `architect-phase deadlock: scout data available but no lifecycle children spawned (preserved ${preservable.length} commands)`,
+      });
+      processes.set(event.pid, updatedProc);
+      return [
+        { ...state, processes, blackboard, deferrals, pendingTriggers, lastProcessCompletionTime: Date.now() },
+        assignEffectSeqs(effects),
+      ];
+    }
+  }
+
+  // --- Execute commands ---
+  // Reorder: exit LAST so bb_write/signals run before death
+  const reordered = [
+    ...event.commands.filter(c => c.kind !== "exit"),
+    ...event.commands.filter(c => c.kind === "exit"),
+  ];
+
+  for (const cmd of reordered) {
+    switch (cmd.kind) {
+      case "idle":
+        updatedProc.state = "idle";
+        if (cmd.wakeOnSignals) {
+          updatedProc.wakeOnSignals = cmd.wakeOnSignals;
+        }
+        break;
+
+      case "sleep":
+        updatedProc.state = "sleeping";
+        updatedProc.sleepUntil = new Date(Date.now() + cmd.durationMs).toISOString();
+        break;
+
+      case "bb_write":
+        processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
+        break;
+
+      case "bb_read": {
+        const readResults: Record<string, unknown> = {};
+        for (const key of cmd.keys) {
+          const entry = blackboard.get(key);
+          if (entry) {
+            readResults[key] = entry.value;
+          }
+        }
+        blackboard.set(`_inbox:${event.pid}`, {
+          value: readResults,
+          writtenBy: "kernel",
+          version: 1,
+        });
+        break;
+      }
+
+      case "signal_emit":
+        effects.push({
+          type: "emit_protocol",
+          action: "os_signal_emit",
+          message: `signal=${cmd.signal} from=${event.pid}`,
+        });
+        break;
+
+      case "request_kernel":
+        blackboard.set(`kernel_request:${event.pid}`, {
+          value: cmd.question,
+          writtenBy: event.pid,
+          version: 1,
+        });
+        pendingTriggers.push("novel_situation");
+        break;
+
+      case "self_report": {
+        if (!updatedProc.selfReports) updatedProc.selfReports = [];
+        const report: SelfReport = {
+          tick: updatedProc.tickCount,
+          efficiency: cmd.efficiency,
+          blockers: cmd.blockers,
+          resourcePressure: cmd.resourcePressure,
+          suggestedAction: cmd.suggestedAction,
+          reason: cmd.reason,
+          timestamp: now,
+        };
+        updatedProc.selfReports = [...(updatedProc.selfReports ?? []), report];
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_event",
+          message: `self_report efficiency=${cmd.efficiency} pressure=${cmd.resourcePressure} action=${cmd.suggestedAction}`,
+        });
+        break;
+      }
+
+      case "cancel_defer": {
+        const matches = [...deferrals.entries()].filter(
+          ([, d]) => d.descriptor.name === cmd.name && d.registeredByPid === event.pid
+        );
+        if (matches.length === 0) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: `cancel_defer: no pending deferral with name "${cmd.name}" from this process`,
+          });
+        } else {
+          for (const [id] of matches) {
+            deferrals.delete(id);
+          }
+          effects.push({
+            type: "emit_protocol",
+            action: "os_defer",
+            message: `cancel_defer: removed ${matches.length} deferral(s) for "${cmd.name}" reason="${cmd.reason}"`,
+          });
+        }
+        break;
+      }
+
+      case "checkpoint": {
+        // State: mark process as checkpoint state
+        updatedProc.state = "checkpoint";
+        updatedProc.checkpoint = {
+          pid: event.pid,
+          capturedAt: now,
+          conversationSummary: cmd.summary ?? `auto-checkpoint at tick ${state.tickCount}`,
+          pendingObjectives: cmd.pendingObjectives ?? [],
+          artifacts: cmd.artifacts ?? {},
+          runId: state.runId,
+          tickCount: updatedProc.tickCount,
+          tokensUsed: updatedProc.tokensUsed,
+          processName: updatedProc.name,
+          processType: updatedProc.type,
+          processObjective: updatedProc.objective,
+          processPriority: updatedProc.priority,
+          processModel: updatedProc.model,
+          processWorkingDir: updatedProc.workingDir,
+          parentPid: updatedProc.parentPid,
+          backend: updatedProc.backend,
+        };
+        effects.push({
+          type: "persist_memory",
+          operation: `checkpoint:${event.pid}`,
+        });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_checkpoint",
+          message: `checkpoint saved: ${cmd.summary ?? "auto-checkpoint"}`,
+        });
+        break;
+      }
+
+      case "spawn_child": {
+        const [childProc, spawnEffects, deferEntry] = processSpawnChild(state, processes, deferrals, updatedProc, cmd);
+        if (deferEntry) {
+          deferrals.set(deferEntry.id, deferEntry);
+          effects.push(...spawnEffects);
+        } else if (childProc) {
+          processes.set(childProc.pid, childProc);
+          // Register as child
+          updatedProc.children = [...(updatedProc.children ?? []), childProc.pid];
+          effects.push(...spawnEffects);
+        }
+        break;
+      }
+
+      case "spawn_graph": {
+        let immediateCount = 0;
+        let deferredCount = 0;
+        for (const node of cmd.nodes) {
+          const nodeDescriptor = {
+            type: node.type as "daemon" | "lifecycle" | "event",
+            name: node.name,
+            objective: node.objective,
+            priority: node.priority ?? 50,
+            completionCriteria: node.completionCriteria,
+            capabilities: node.capabilities,
+            parentPid: event.pid,
+            model: state.config.kernel.processModel,
+            workingDir: updatedProc.workingDir,
+          };
+
+          if (!node.after || node.after.length === 0) {
+            // Immediate spawn
+            const childPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+            const child: OsProcess = {
+              pid: childPid,
+              ...nodeDescriptor,
+              state: "running",
+              spawnedAt: now,
+              lastActiveAt: now,
+              tickCount: 0,
+              tokensUsed: 0,
+              children: [],
+              onParentDeath: "orphan",
+              restartPolicy: "never",
+            };
+            processes.set(childPid, child);
+            updatedProc.children = [...(updatedProc.children ?? []), childPid];
+            immediateCount++;
+            effects.push({
+              type: "emit_protocol",
+              action: "os_process_spawn",
+              message: `parent=${event.pid} (graph immediate: "${node.name}")`,
+            });
+            effects.push({
+              type: "submit_llm",
+              pid: childPid,
+              name: node.name,
+              model: state.config.kernel.processModel,
+            });
+          } else {
+            // Parse after strings into DeferCondition
+            const conditions: DeferCondition[] = node.after.map(dep => {
+              if (dep.includes(":")) {
+                return { type: "blackboard_key_exists" as const, key: dep };
+              }
+              return { type: "process_dead_by_name" as const, name: dep };
+            });
+            const condition: DeferCondition = conditions.length === 1
+              ? conditions[0]!
+              : { type: "all_of", conditions };
+
+            // Dedup check
+            const hasDup = [...deferrals.values()].some(
+              d => d.descriptor.name === node.name && d.registeredByPid === event.pid
+            );
+            if (hasDup) {
+              effects.push({
+                type: "emit_protocol",
+                action: "os_command_rejected",
+                message: `defer dedup: graph node "${node.name}" already has pending deferral`,
+              });
+              continue;
+            }
+
+            const ds: DeferEntry = {
+              id: randomUUID(),
+              descriptor: nodeDescriptor,
+              condition,
+              registeredAt: now,
+              registeredAtMs: Date.now(),
+              registeredByTick: state.tickCount,
+              registeredByPid: event.pid,
+              reason: `graph node "${node.name}" after=[${node.after.join(", ")}]`,
+            };
+            deferrals.set(ds.id, ds);
+            deferredCount++;
+            effects.push({
+              type: "emit_protocol",
+              action: "os_defer",
+              message: `graph deferred: "${node.name}" after=[${node.after.join(", ")}]`,
+            });
+          }
+        }
+        effects.push({
+          type: "emit_protocol",
+          action: "os_defer",
+          message: `spawn_graph: ${immediateCount} immediate, ${deferredCount} deferred (${cmd.nodes.length} total nodes)`,
+        });
+        break;
+      }
+
+      case "spawn_ephemeral": {
+        const [ephProc, ephEffects] = processSpawnEphemeral(state, processes, updatedProc, cmd);
+        if (ephProc) {
+          processes.set(ephProc.pid, ephProc);
+          updatedProc.ephemeralSpawnCount = (updatedProc.ephemeralSpawnCount ?? 0) + 1;
+          effects.push(...ephEffects);
+        } else {
+          effects.push(...ephEffects); // rejection effects
+        }
+        break;
+      }
+
+      case "spawn_system": {
+        if (!state.config.systemProcess?.enabled) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: "spawn_system rejected: systemProcess.enabled is false",
+          });
+          break;
+        }
+        const systemCount = [...processes.values()].filter(
+          p => p.backend?.kind === "system" && p.state !== "dead"
+        ).length;
+        if (systemCount >= state.config.systemProcess.maxSystemProcesses) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: `spawn_system rejected: max system processes (${state.config.systemProcess.maxSystemProcesses}) reached`,
+          });
+          break;
+        }
+        const sysPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const sysChild: OsProcess = {
+          pid: sysPid,
+          type: "lifecycle",
+          state: "running",
+          name: cmd.name,
+          parentPid: event.pid,
+          objective: `System process: ${cmd.command} ${(cmd.args ?? []).join(" ")}`,
+          priority: 50,
+          spawnedAt: now,
+          lastActiveAt: now,
+          tickCount: 0,
+          tokensUsed: 0,
+          model: state.config.kernel.processModel,
+          workingDir: updatedProc.workingDir,
+          children: [],
+          onParentDeath: "orphan",
+          restartPolicy: "never",
+          backend: { kind: "system", command: cmd.command, args: cmd.args, env: cmd.env },
+        };
+        processes.set(sysPid, sysChild);
+        updatedProc.children = [...(updatedProc.children ?? []), sysPid];
+        effects.push({
+          type: "start_shell",
+          pid: sysPid,
+          name: cmd.name,
+          command: cmd.command,
+          args: cmd.args ?? [],
+        });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_system_spawn",
+          message: `command=${cmd.command} parent=${event.pid}`,
+        });
+        break;
+      }
+
+      case "spawn_kernel": {
+        if (!state.config.childKernel?.enabled) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: "spawn_kernel rejected: childKernel.enabled is false",
+          });
+          break;
+        }
+        if (state.config.kernel.parentKernelId) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: "spawn_kernel rejected: this kernel is already a child (depth limit)",
+          });
+          break;
+        }
+        const kernelCount = [...processes.values()].filter(
+          p => p.backend?.kind === "kernel" && p.state !== "dead"
+        ).length;
+        if (kernelCount >= state.config.childKernel.maxChildKernels) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: `spawn_kernel rejected: max child kernels (${state.config.childKernel.maxChildKernels}) reached`,
+          });
+          break;
+        }
+        const kPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const kernelChild: OsProcess = {
+          pid: kPid,
+          type: "lifecycle",
+          state: "running",
+          name: cmd.name,
+          parentPid: event.pid,
+          objective: `Sub-kernel: ${cmd.goal}`,
+          priority: 50,
+          spawnedAt: now,
+          lastActiveAt: now,
+          tickCount: 0,
+          tokensUsed: 0,
+          model: state.config.kernel.processModel,
+          workingDir: updatedProc.workingDir,
+          children: [],
+          onParentDeath: "orphan",
+          restartPolicy: "never",
+          backend: { kind: "kernel", goal: cmd.goal, maxTicks: cmd.maxTicks },
+        };
+        processes.set(kPid, kernelChild);
+        updatedProc.children = [...(updatedProc.children ?? []), kPid];
+        effects.push({
+          type: "start_subkernel",
+          pid: kPid,
+          name: cmd.name,
+          goal: cmd.goal,
+        });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_subkernel_spawn",
+          message: `goal=${cmd.goal} parent=${event.pid}`,
+        });
+        break;
+      }
+
+      case "exit": {
+        // Executive Exit Prevention — orchestrator must not exit while topology is active
+        if (
+          !updatedProc.parentPid &&
+          updatedProc.type === "lifecycle" &&
+          updatedProc.name === "goal-orchestrator"
+        ) {
+          const livingChildren = [...processes.values()].filter(
+            p => p.parentPid === event.pid && p.state !== "dead"
+          );
+          if (livingChildren.length > 0 || deferrals.size > 0) {
+            updatedProc.state = "idle";
+            updatedProc.wakeOnSignals = livingChildren.length > 0
+              ? ["child:done"]
+              : ["tick:1", "child:done"];
+            effects.push({
+              type: "emit_protocol",
+              action: "os_command_rejected",
+              message: `executive exit prevented: ${livingChildren.length} living children, ${deferrals.size} pending deferrals`,
+            });
+            pendingTriggers.push("goal_drift");
+            break;
+          }
+        }
+
+        // Kill the process
+        updatedProc.state = "dead";
+        updatedProc.exitCode = cmd.code;
+        updatedProc.exitReason = cmd.reason;
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_kill",
+          message: `exit: ${cmd.reason}`,
+        });
+
+        // Auto-signal parent
+        if (updatedProc.parentPid) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_signal_emit",
+            message: `child:done pid=${event.pid} name=${updatedProc.name} parent=${updatedProc.parentPid} code=${cmd.code}`,
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  // --- Auto-exit daemons ---
+  // Daemons that complete a turn without issuing exit/idle/sleep/checkpoint are done
+  const hasLifecycleCmd = event.commands.some(
+    c => c.kind === "exit" || c.kind === "idle" || c.kind === "sleep" || c.kind === "checkpoint"
+  );
+  if (!hasLifecycleCmd && updatedProc.type === "daemon" && updatedProc.state === "running") {
+    updatedProc.state = "dead";
+    updatedProc.exitReason = "auto-exit: daemon completed turn without lifecycle command";
+    effects.push({
+      type: "emit_protocol",
+      action: "os_process_exit",
+      message: "auto-exit: daemon completed turn without lifecycle command",
+    });
+  }
+
+  // Emit turn summary
+  if (event.commands.length > 0) {
+    const kindCounts: Record<string, number> = {};
+    for (const cmd of event.commands) {
+      kindCounts[cmd.kind] = (kindCounts[cmd.kind] ?? 0) + 1;
+    }
+    const summary = Object.entries(kindCounts).map(([k, v]) => v > 1 ? `${k}×${v}` : k).join(", ");
+    effects.push({
+      type: "emit_protocol",
+      action: "os_turn_summary",
+      message: `Turn ${updatedProc.tickCount} complete → ${summary}`,
+    });
+  }
+
+  processes.set(event.pid, updatedProc);
+
+  return [
+    {
+      ...state,
+      processes,
+      blackboard,
+      deferrals,
+      pendingTriggers,
+      lastProcessCompletionTime: Date.now(),
+    },
+    assignEffectSeqs(effects),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// process_completed helpers
+// ---------------------------------------------------------------------------
+
+/** Update blackboard with a write and track which keys the process has written. */
+function processBlackboardWrite(
+  blackboard: Map<string, BlackboardEntry>,
+  proc: OsProcess,
+  key: string,
+  value: unknown,
+): void {
+  const existing = blackboard.get(key);
+  blackboard.set(key, {
+    value,
+    writtenBy: proc.pid,
+    version: (existing?.version ?? 0) + 1,
+  });
+  if (!proc.blackboardKeysWritten) proc.blackboardKeysWritten = [];
+  if (!proc.blackboardKeysWritten.includes(key)) {
+    proc.blackboardKeysWritten.push(key);
+  }
+}
+
+/** Spawn a child process (immediate or deferred). Returns [process | null, effects, deferEntry | null]. */
+function processSpawnChild(
+  state: KernelState,
+  processes: Map<string, OsProcess>,
+  deferrals: Map<string, DeferEntry>,
+  parent: OsProcess,
+  cmd: Extract<OsProcessCommand, { kind: "spawn_child" }>,
+): [OsProcess | null, KernelEffectInput[], DeferEntry | null] {
+  const effects: KernelEffectInput[] = [];
+  const now = new Date().toISOString();
+
+  const resolvedDescriptor = {
+    ...cmd.descriptor,
+    parentPid: parent.pid,
+    model: state.config.kernel.processModel,
+    workingDir: cmd.descriptor.workingDir ?? parent.workingDir,
+  };
+
+  if (cmd.condition) {
+    // Dedup check
+    const hasDup = [...deferrals.values()].some(
+      d => d.descriptor.name === cmd.descriptor.name && d.registeredByPid === parent.pid
+    );
+    if (hasDup) {
+      effects.push({
+        type: "emit_protocol",
+        action: "os_command_rejected",
+        message: `defer dedup: "${cmd.descriptor.name}" already has pending deferral from same parent`,
+      });
+      return [null, effects, null];
+    }
+    const ds: DeferEntry = {
+      id: randomUUID(),
+      descriptor: resolvedDescriptor,
+      condition: cmd.condition,
+      registeredAt: now,
+      registeredAtMs: Date.now(),
+      registeredByTick: state.tickCount,
+      registeredByPid: parent.pid,
+      reason: `conditional spawn_child from ${parent.pid}: ${cmd.descriptor.name}`,
+      maxWaitTicks: cmd.maxWaitTicks,
+      maxWaitMs: cmd.maxWaitTicks ? cmd.maxWaitTicks * 30_000 : undefined,
+    };
+    effects.push({
+      type: "emit_protocol",
+      action: "os_defer",
+      message: `deferred spawn of "${cmd.descriptor.name}" condition=${JSON.stringify(cmd.condition)}`,
+    });
+    return [null, effects, ds];
+  }
+
+  // Immediate spawn
+  const childPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const child: OsProcess = {
+    pid: childPid,
+    type: resolvedDescriptor.type ?? "lifecycle",
+    state: "running",
+    name: resolvedDescriptor.name,
+    parentPid: parent.pid,
+    objective: resolvedDescriptor.objective,
+    priority: resolvedDescriptor.priority ?? 50,
+    spawnedAt: now,
+    lastActiveAt: now,
+    tickCount: 0,
+    tokensUsed: 0,
+    model: resolvedDescriptor.model,
+    workingDir: resolvedDescriptor.workingDir ?? parent.workingDir,
+    children: [],
+    onParentDeath: resolvedDescriptor.onParentDeath ?? "orphan",
+    restartPolicy: resolvedDescriptor.restartPolicy ?? "never",
+    tokenBudget: resolvedDescriptor.tokenBudget,
+    completionCriteria: resolvedDescriptor.completionCriteria,
+    capabilities: resolvedDescriptor.capabilities,
+    backend: resolvedDescriptor.backend,
+  };
+
+  effects.push({
+    type: "emit_protocol",
+    action: "os_process_spawn",
+    message: `parent=${parent.pid}`,
+  });
+  effects.push({
+    type: "submit_llm",
+    pid: childPid,
+    name: resolvedDescriptor.name,
+    model: resolvedDescriptor.model,
+  });
+
+  return [child, effects, null];
+}
+
+/** Spawn an ephemeral process. Returns [process | null, effects]. */
+function processSpawnEphemeral(
+  state: KernelState,
+  processes: Map<string, OsProcess>,
+  parent: OsProcess,
+  cmd: Extract<OsProcessCommand, { kind: "spawn_ephemeral" }>,
+): [OsProcess | null, KernelEffectInput[]] {
+  const effects: KernelEffectInput[] = [];
+  const now = new Date().toISOString();
+
+  if (!state.config.ephemeral.enabled) {
+    return [null, []];
+  }
+
+  const spawnCount = parent.ephemeralSpawnCount ?? 0;
+  if (spawnCount >= state.config.ephemeral.maxPerProcess) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_command_rejected",
+      message: `Per-process ephemeral limit reached (${state.config.ephemeral.maxPerProcess})`,
+    });
+    return [null, effects];
+  }
+
+  const ephPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const ephName = cmd.name ?? "ephemeral";
+  const ephModel = state.config.ephemeral.defaultModel;
+
+  const ephProc: OsProcess = {
+    pid: ephPid,
+    type: "event",
+    state: "running",
+    name: ephName,
+    parentPid: parent.pid,
+    objective: cmd.objective,
+    priority: 30,
+    spawnedAt: now,
+    lastActiveAt: now,
+    tickCount: 0,
+    tokensUsed: 0,
+    model: ephModel,
+    workingDir: parent.workingDir,
+    children: [],
+    onParentDeath: "orphan",
+    restartPolicy: "never",
+  };
+
+  effects.push({
+    type: "emit_protocol",
+    action: "os_process_spawn",
+    message: `parent=${parent.name} type=ephemeral model=${ephModel}`,
+  });
+  effects.push({
+    type: "submit_ephemeral",
+    pid: ephPid,
+    ephemeralId: `eph-${randomUUID().slice(0, 12)}`,
+    name: ephName,
+    model: ephModel,
+  });
+
+  return [ephProc, effects];
 }
 
 function handleExternalCommand(state: KernelState, event: ExternalCommandEvent): TransitionResult {

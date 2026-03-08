@@ -290,17 +290,32 @@ describe("transition — unhandled events", () => {
   test("unhandled event returns state unchanged with no effects", () => {
     const state = makeState();
     const [newState, effects] = transition(state, {
+      type: "timer_fired",
+      timer: "housekeep",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    expect(newState).toBe(state); // same reference — no mutation
+    expect(effects).toHaveLength(0);
+  });
+
+  test("process_completed for unknown PID is a no-op", () => {
+    const state = makeState();
+    const [newState, effects] = transition(state, {
       type: "process_completed",
-      pid: "p1",
+      pid: "nonexistent",
       name: "test",
       success: true,
       tokensUsed: 10,
       commandCount: 0,
+      commands: [],
+      response: "",
       timestamp: Date.now(),
       seq: 0,
-    } as KernelEvent);
+    });
 
-    expect(newState).toBe(state); // same reference — no mutation
+    expect(newState).toBe(state);
     expect(effects).toHaveLength(0);
   });
 });
@@ -442,5 +457,413 @@ describe("transition — integration roundtrip", () => {
     // s1 should differ from original
     expect(s1.goal).not.toBe(original.goal);
     expect(s1.processes.size).not.toBe(original.processes.size);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// process_completed
+// ---------------------------------------------------------------------------
+
+function bootAndGetOrchestrator(overrides?: Parameters<typeof makeState>[0]): { state: KernelState; orchestratorPid: string } {
+  const [state] = transition(makeState(overrides), bootEvent("test"));
+  const orchestrator = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!;
+  return { state, orchestratorPid: orchestrator.pid };
+}
+
+function processCompletedEvent(
+  pid: string,
+  opts: {
+    commands?: import("../../../src/os/types.js").OsProcessCommand[];
+    success?: boolean;
+    tokensUsed?: number;
+    response?: string;
+  } = {},
+): KernelEvent {
+  const commands = opts.commands ?? [];
+  return {
+    type: "process_completed",
+    pid,
+    name: "test",
+    success: opts.success ?? true,
+    commandCount: commands.length,
+    tokensUsed: opts.tokensUsed ?? 100,
+    commands,
+    response: opts.response ?? "",
+    timestamp: Date.now(),
+    seq: 0,
+  };
+}
+
+describe("transition — process_completed basics", () => {
+  test("updates process tickCount and tokensUsed", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // Need spawn commands since it's first tick
+    const [newState] = transition(state, processCompletedEvent(orchestratorPid, {
+      tokensUsed: 500,
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    const proc = newState.processes.get(orchestratorPid)!;
+    expect(proc.tickCount).toBe(1);
+    expect(proc.tokensUsed).toBe(500);
+  });
+
+  test("failed process is killed and emits protocol effect", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      success: false,
+      response: "LLM error",
+    }));
+
+    const proc = newState.processes.get(orchestratorPid)!;
+    expect(proc.state).toBe("dead");
+    expect(proc.exitReason).toContain("execution_failed");
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_kill")).toBe(true);
+    expect(newState.pendingTriggers).toContain("process_failed");
+  });
+
+  test("does not mutate input state", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const originalProcessCount = state.processes.size;
+    const originalProc = state.processes.get(orchestratorPid)!;
+    const originalTickCount = originalProc.tickCount;
+
+    transition(state, processCompletedEvent(orchestratorPid, {
+      tokensUsed: 500,
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    // Original state unchanged
+    expect(state.processes.size).toBe(originalProcessCount);
+    expect(state.processes.get(orchestratorPid)!.tickCount).toBe(originalTickCount);
+  });
+});
+
+describe("transition — process_completed commands", () => {
+  test("idle command sets process state to idle", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // First: satisfy hard spawn enforcement with a spawn, then do idle on second tick
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    // Find the worker we spawned
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    // Worker goes idle
+    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "idle", wakeOnSignals: ["tick:1"] }],
+    }));
+
+    const updatedWorker = s2.processes.get(worker.pid)!;
+    expect(updatedWorker.state).toBe("idle");
+    expect(updatedWorker.wakeOnSignals).toEqual(["tick:1"]);
+  });
+
+  test("exit command kills process and emits protocol effect", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [s2, effects] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+    }));
+
+    const updatedWorker = s2.processes.get(worker.pid)!;
+    expect(updatedWorker.state).toBe("dead");
+    expect(updatedWorker.exitCode).toBe(0);
+    expect(updatedWorker.exitReason).toBe("done");
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_kill")).toBe(true);
+    // Should emit child:done signal to parent
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("child:done"))).toBe(true);
+  });
+
+  test("bb_write updates blackboard and tracks written keys", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "bb_write", key: "result:test", value: { data: "hello" } },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    const entry = s1.blackboard.get("result:test");
+    expect(entry).toBeDefined();
+    expect(entry!.value).toEqual({ data: "hello" });
+    expect(entry!.writtenBy).toBe(orchestratorPid);
+
+    const proc = s1.processes.get(orchestratorPid)!;
+    expect(proc.blackboardKeysWritten).toContain("result:test");
+  });
+
+  test("bb_read writes results to inbox", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // First write something to the blackboard
+    const s0 = { ...state, blackboard: new Map(state.blackboard) };
+    s0.blackboard.set("data:x", { value: 42, writtenBy: "test", version: 1 });
+
+    const [s1] = transition(s0, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "bb_read", keys: ["data:x", "data:missing"] },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    const inbox = s1.blackboard.get(`_inbox:${orchestratorPid}`);
+    expect(inbox).toBeDefined();
+    const inboxValue = inbox!.value as Record<string, unknown>;
+    expect(inboxValue["data:x"]).toBe(42);
+    expect(inboxValue["data:missing"]).toBeUndefined();
+  });
+
+  test("spawn_child creates new process and emits submit_llm effect", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{
+        kind: "spawn_child",
+        descriptor: { type: "lifecycle", name: "worker-1", objective: "do work", priority: 70 },
+      }],
+    }));
+
+    // New process created
+    expect(newState.processes.size).toBe(state.processes.size + 1);
+    const worker = [...newState.processes.values()].find(p => p.name === "worker-1")!;
+    expect(worker).toBeDefined();
+    expect(worker.type).toBe("lifecycle");
+    expect(worker.parentPid).toBe(orchestratorPid);
+    expect(worker.state).toBe("running");
+    expect(worker.priority).toBe(70);
+
+    // submit_llm effect emitted
+    expect(effects.some(e => e.type === "submit_llm" && (e as any).name === "worker-1")).toBe(true);
+    // Protocol effect
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_spawn")).toBe(true);
+  });
+
+  test("spawn_graph with immediate and deferred nodes", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{
+        kind: "spawn_graph",
+        nodes: [
+          { name: "phase-0", type: "lifecycle", objective: "gather", after: [], priority: 80 },
+          { name: "phase-1", type: "lifecycle", objective: "process", after: ["phase-0"], priority: 70 },
+        ],
+      }],
+    }));
+
+    // phase-0 spawned immediately
+    const phase0 = [...newState.processes.values()].find(p => p.name === "phase-0");
+    expect(phase0).toBeDefined();
+    expect(phase0!.state).toBe("running");
+    expect(effects.some(e => e.type === "submit_llm" && (e as any).name === "phase-0")).toBe(true);
+
+    // phase-1 deferred
+    expect(newState.deferrals.size).toBe(1);
+    const deferral = [...newState.deferrals.values()][0];
+    expect(deferral.descriptor.name).toBe("phase-1");
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("graph deferred"))).toBe(true);
+  });
+
+  test("cancel_defer removes matching deferrals", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // First spawn a deferred process
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{
+        kind: "spawn_graph",
+        nodes: [
+          { name: "immediate", type: "lifecycle", objective: "now", after: [] },
+          { name: "deferred-work", type: "lifecycle", objective: "later", after: ["immediate"] },
+        ],
+      }],
+    }));
+    expect(s1.deferrals.size).toBe(1);
+
+    // Now cancel it (from the orchestrator's second tick)
+    const [s2, effects] = transition(s1, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "cancel_defer", name: "deferred-work", reason: "no longer needed" }],
+    }));
+    expect(s2.deferrals.size).toBe(0);
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("cancel_defer"))).toBe(true);
+  });
+
+  test("self_report is recorded on process", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        {
+          kind: "self_report",
+          efficiency: 0.8,
+          blockers: [],
+          resourcePressure: "low",
+          suggestedAction: "continue",
+        },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    const proc = s1.processes.get(orchestratorPid)!;
+    expect(proc.selfReports).toHaveLength(1);
+    expect(proc.selfReports![0].efficiency).toBe(0.8);
+  });
+
+  test("sleep command sets sleeping state", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [{ kind: "sleep", durationMs: 5000 }],
+    }));
+
+    const updatedWorker = s2.processes.get(worker.pid)!;
+    expect(updatedWorker.state).toBe("sleeping");
+    expect(updatedWorker.sleepUntil).toBeDefined();
+  });
+
+  test("exit is reordered to run last (after bb_write)", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+
+    // Exit first in array, bb_write second — should still write before killing
+    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+      commands: [
+        { kind: "exit", code: 0, reason: "done" },
+        { kind: "bb_write", key: "result:w1", value: "final output" },
+      ],
+    }));
+
+    // bb_write should have executed despite exit being first in command list
+    expect(s2.blackboard.get("result:w1")).toBeDefined();
+    expect(s2.processes.get(worker.pid)!.state).toBe("dead");
+  });
+});
+
+describe("transition — process_completed enforcement", () => {
+  test("hard spawn enforcement: orchestrator first tick without spawn is rejected", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "bb_write", key: "plan", value: "I will do it myself" },
+        { kind: "idle" },
+      ],
+    }));
+
+    // bb_write preserved
+    expect(newState.blackboard.get("plan")).toBeDefined();
+
+    // Idle was rejected — process should still be running (not idle)
+    const proc = newState.processes.get(orchestratorPid)!;
+    expect(proc.state).toBe("running");
+
+    // Rejection effect emitted
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && (e as any).action === "os_command_rejected"
+    )).toBe(true);
+  });
+
+  test("auto-exit: daemon without lifecycle command is killed", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const metacog = [...state.processes.values()].find(p => p.name === "metacog-daemon")!;
+
+    // Daemon completes a turn with only bb_write — no idle/exit/sleep
+    // First set state to running (it starts as idle)
+    const s0 = { ...state, processes: new Map(state.processes) };
+    s0.processes.set(metacog.pid, { ...metacog, state: "running" });
+
+    const [newState, effects] = transition(s0, processCompletedEvent(metacog.pid, {
+      commands: [{ kind: "bb_write", key: "metacog:result", value: "ok" }],
+    }));
+
+    const updated = newState.processes.get(metacog.pid)!;
+    expect(updated.state).toBe("dead");
+    expect(updated.exitReason).toContain("auto-exit");
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_exit")).toBe(true);
+  });
+
+  test("executive exit prevention: orchestrator cannot exit while children live", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // Spawn a child first
+    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    // Now orchestrator tries to exit
+    const [s2, effects] = transition(s1, processCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+    }));
+
+    // Exit should be rejected — orchestrator should be idle instead
+    const orch = s2.processes.get(orchestratorPid)!;
+    expect(orch.state).toBe("idle");
+    expect(orch.wakeOnSignals).toContain("child:done");
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && (e as any).message.includes("executive exit prevented")
+    )).toBe(true);
+  });
+});
+
+describe("transition — process_completed spawn_system / spawn_kernel", () => {
+  test("spawn_system creates shell process and emits start_shell effect", () => {
+    const config = parseOsConfig({
+      enabled: true,
+      kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
+      systemProcess: { enabled: true, maxSystemProcesses: 5 },
+    });
+    const [state] = transition(initialState(config, "test"), bootEvent("test"));
+    const orchestratorPid = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!.pid;
+
+    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "spawn_system", name: "dev-server", command: "npm", args: ["run", "dev"] },
+      ],
+    }));
+
+    const shell = [...newState.processes.values()].find(p => p.name === "dev-server");
+    expect(shell).toBeDefined();
+    expect(shell!.backend).toEqual({ kind: "system", command: "npm", args: ["run", "dev"] });
+    expect(effects.some(e => e.type === "start_shell")).toBe(true);
+  });
+
+  test("spawn_system rejected when disabled", () => {
+    const config = parseOsConfig({
+      enabled: true,
+      kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
+      systemProcess: { enabled: false },
+    });
+    const [state] = transition(initialState(config, "test"), bootEvent("test"));
+    const orchestratorPid = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!.pid;
+
+    const [, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "spawn_system", name: "srv", command: "node" },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && (e as any).message.includes("spawn_system rejected")
+    )).toBe(true);
+  });
+
+  test("spawn_kernel rejected when disabled", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [, effects] = transition(state, processCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "spawn_kernel", name: "sub", goal: "sub-goal" },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && (e as any).message.includes("spawn_kernel rejected")
+    )).toBe(true);
   });
 });

@@ -14,6 +14,7 @@ import fc from "fast-check";
 import { transition } from "../../../src/os/state-machine/transition.js";
 import { initialState, type KernelState } from "../../../src/os/state-machine/state.js";
 import type { KernelEvent } from "../../../src/os/state-machine/events.js";
+import type { OsProcessCommand } from "../../../src/os/types.js";
 import { parseOsConfig } from "../../../src/os/config.js";
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,29 @@ const arbState = fc.integer({ min: 0, max: 5 }).chain(numProcs => {
   });
 });
 
+/** Generate a simple OsProcessCommand. */
+const arbCommand: fc.Arbitrary<OsProcessCommand> = fc.oneof(
+  fc.record({ kind: fc.constant("idle" as const) }),
+  fc.record({ kind: fc.constant("exit" as const), code: fc.integer({ min: 0, max: 1 }), reason: fc.string({ minLength: 1, maxLength: 20 }) }),
+  fc.record({ kind: fc.constant("bb_write" as const), key: fc.string({ minLength: 1, maxLength: 20 }), value: fc.string({ minLength: 1, maxLength: 50 }) }),
+  fc.record({ kind: fc.constant("sleep" as const), durationMs: fc.integer({ min: 100, max: 30000 }) }),
+  fc.record({
+    kind: fc.constant("self_report" as const),
+    efficiency: fc.double({ min: 0, max: 1 }),
+    blockers: fc.constant([] as string[]),
+    resourcePressure: fc.constantFrom("low" as const, "medium" as const, "high" as const),
+    suggestedAction: fc.constantFrom("continue" as const, "need_help" as const),
+  }),
+  fc.record({
+    kind: fc.constant("spawn_child" as const),
+    descriptor: fc.record({
+      type: fc.constantFrom("lifecycle" as const, "event" as const),
+      name: fc.string({ minLength: 1, maxLength: 20 }),
+      objective: fc.string({ minLength: 1, maxLength: 50 }),
+    }),
+  }),
+);
+
 /** Generate a KernelEvent that the transition function handles. */
 const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
   fc.record({
@@ -84,6 +108,19 @@ const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
   fc.record({
     type: fc.constant("external_command" as const),
     command: fc.constantFrom("halt" as const, "pause" as const, "resume" as const),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  // process_completed with random commands for processes that may or may not exist
+  fc.record({
+    type: fc.constant("process_completed" as const),
+    pid: fc.constantFrom("p0", "p1", "p2", "p3", "p4", "nonexistent"),
+    name: fc.string({ minLength: 1, maxLength: 20 }),
+    success: fc.boolean(),
+    commandCount: fc.nat({ max: 5 }),
+    tokensUsed: fc.nat({ max: 5000 }),
+    commands: fc.array(arbCommand, { minLength: 0, maxLength: 3 }),
+    response: fc.string({ maxLength: 50 }),
     timestamp: fc.constant(Date.now()),
     seq: fc.nat(),
   }),
