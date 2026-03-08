@@ -21,6 +21,21 @@ export class OsScheduler {
     this.maxConcurrent = config.maxConcurrentProcesses;
   }
 
+  /** Expose round-robin index for state extraction (Wave 4). */
+  getRoundRobinIndex(): number {
+    return this.roundRobinIndex;
+  }
+
+  /** Expose current strategies for state extraction (Wave 4). */
+  getCurrentStrategies(): SchedulingStrategy[] {
+    return this.currentStrategies;
+  }
+
+  /** Set round-robin index from state sync (Wave 4). */
+  setRoundRobinIndex(index: number): void {
+    this.roundRobinIndex = index;
+  }
+
   /** Inject learned heuristics for the "learned" scheduling strategy. */
   setHeuristics(heuristics: OsHeuristic[]): void {
     this.heuristics = heuristics;

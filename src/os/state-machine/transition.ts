@@ -14,7 +14,7 @@
 import type { KernelState, BlackboardEntry } from "./state.js";
 import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
-import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger } from "../types.js";
+import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology } from "../types.js";
 import { randomUUID } from "node:crypto";
 
 export type TransitionResult = readonly [KernelState, KernelEffect[]];
@@ -1598,6 +1598,39 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
   // 10. Rebuild DAG after all process changes
   effects.push({ type: "rebuild_dag" });
 
+  // 11. Scheduling pass — select runnable processes and emit submit_llm effects (Wave 4)
+  const allProcs = [...processes.values()];
+  const schedulerInput = {
+    strategy: state.schedulerStrategy,
+    maxConcurrent: state.schedulerMaxConcurrent,
+    roundRobinIndex: state.schedulerRoundRobinIndex,
+    heuristics: state.schedulerHeuristics,
+    currentStrategies: state.currentStrategies,
+    topology: state.dagTopology,
+  };
+  const { selected, roundRobinIndex: newRoundRobinIndex } = selectRunnable(allProcs, allProcs, schedulerInput);
+
+  // Collect PIDs that already have a submit_llm effect from earlier steps
+  // (e.g., daemon restart, dead executive recovery) to avoid duplicates
+  const alreadySubmitted = new Set<string>();
+  for (const eff of effects) {
+    if (eff.type === "submit_llm") {
+      alreadySubmitted.add(eff.pid);
+    }
+  }
+
+  // Emit submit_llm for each selected process not already inflight or submitted
+  for (const proc of selected) {
+    if (state.inflight.has(proc.pid)) continue;
+    if (alreadySubmitted.has(proc.pid)) continue;
+    effects.push({
+      type: "submit_llm",
+      pid: proc.pid,
+      name: proc.name,
+      model: proc.model,
+    });
+  }
+
   return [
     {
       ...state,
@@ -1607,6 +1640,7 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       housekeepCount,
       consecutiveIdleTicks,
       activeStrategyId,
+      schedulerRoundRobinIndex: newRoundRobinIndex,
     },
     assignEffectSeqs(effects),
   ];
@@ -1876,6 +1910,280 @@ function evaluateDeferConditionPure(
     case "any_of":
       return cond.conditions.some(c => evaluateDeferConditionPure(c, blackboard, processes));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pure Scheduling — selectRunnable (Wave 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scheduling state needed by selectRunnable. Extracted from KernelState
+ * so the function signature is explicit about its inputs.
+ */
+type SchedulerInput = {
+  strategy: OsSchedulerStrategy;
+  maxConcurrent: number;
+  roundRobinIndex: number;
+  heuristics: OsHeuristic[];
+  currentStrategies: SchedulingStrategy[];
+  topology?: OsDagTopology;
+};
+
+/**
+ * Pure scheduling function — mirrors OsScheduler.selectRunnable().
+ * Takes data in, returns data out, no side effects.
+ *
+ * Returns:
+ * - `selected`: processes chosen for submission
+ * - `roundRobinIndex`: updated index (only changes for round-robin strategy)
+ */
+export function selectRunnable(
+  processes: OsProcess[],
+  allProcesses: OsProcess[],
+  input: SchedulerInput,
+): { selected: OsProcess[]; roundRobinIndex: number } {
+  const runnable = processes.filter(p => p.state === "running");
+  let roundRobinIndex = input.roundRobinIndex;
+
+  if (runnable.length === 0) {
+    return { selected: [], roundRobinIndex };
+  }
+
+  let selected: OsProcess[];
+
+  switch (input.strategy) {
+    case "priority": {
+      const sorted = [...runnable].sort((a, b) => b.priority - a.priority);
+      selected = sorted.slice(0, input.maxConcurrent);
+      break;
+    }
+
+    case "learned": {
+      const result = learnedSelect(runnable, allProcesses, input);
+      selected = result;
+      break;
+    }
+
+    case "round-robin": {
+      selected = [];
+      const count = Math.min(input.maxConcurrent, runnable.length);
+      for (let i = 0; i < count; i++) {
+        const index = (roundRobinIndex + i) % runnable.length;
+        selected.push(runnable[index]!);
+      }
+      roundRobinIndex = (roundRobinIndex + count) % runnable.length;
+      break;
+    }
+
+    case "deadline": {
+      const sorted = [...runnable].sort((a, b) => {
+        const aDeadline = a.sleepUntil ?? "";
+        const bDeadline = b.sleepUntil ?? "";
+        const aNum = typeof aDeadline === "number" ? aDeadline : (aDeadline ? new Date(aDeadline).getTime() : Number.MAX_SAFE_INTEGER);
+        const bNum = typeof bDeadline === "number" ? bDeadline : (bDeadline ? new Date(bDeadline).getTime() : Number.MAX_SAFE_INTEGER);
+        return aNum - bNum;
+      });
+      selected = sorted.slice(0, input.maxConcurrent);
+      break;
+    }
+
+    default: {
+      const _exhaustive: never = input.strategy;
+      selected = runnable.slice(0, input.maxConcurrent);
+      break;
+    }
+  }
+
+  return { selected, roundRobinIndex };
+}
+
+/**
+ * Learned scheduling strategy (pure).
+ * Mirrors OsScheduler.learnedSelect() exactly.
+ */
+function learnedSelect(
+  runnable: OsProcess[],
+  allProcesses: OsProcess[],
+  input: SchedulerInput,
+): OsProcess[] {
+  const effectivePriority = new Map<string, number>();
+  for (const proc of runnable) {
+    effectivePriority.set(proc.pid, proc.priority);
+  }
+
+  // Rule 1: Sibling contention prevention (S-001, S-002)
+  const siblingGroups = new Map<string, OsProcess[]>();
+  for (const proc of runnable) {
+    const parent = proc.parentPid ?? "__root__";
+    const group = siblingGroups.get(parent) ?? [];
+    group.push(proc);
+    siblingGroups.set(parent, group);
+  }
+
+  for (const [, siblings] of siblingGroups) {
+    if (siblings.length < 2) continue;
+    const priorities = new Set(siblings.map(s => s.priority));
+    if (priorities.size === 1) {
+      const sorted = [...siblings].sort((a, b) => a.spawnedAt.localeCompare(b.spawnedAt));
+      for (let i = 0; i < sorted.length; i++) {
+        const base = effectivePriority.get(sorted[i]!.pid)!;
+        effectivePriority.set(sorted[i]!.pid, base - i * 2);
+      }
+    }
+  }
+
+  // Rule 2: Synthesis deprioritization (G-004)
+  for (const proc of runnable) {
+    const isSynthesis =
+      proc.name.includes("synth") ||
+      proc.name.includes("consolidat") ||
+      (proc.name === "goal-orchestrator" && proc.tickCount > 0);
+
+    if (isSynthesis) {
+      const siblings = allProcesses.filter(
+        p => p.parentPid === proc.parentPid && p.pid !== proc.pid && p.state !== "dead",
+      );
+      if (siblings.length > 0) {
+        const minWorkerPriority = Math.min(
+          ...siblings.map(s => effectivePriority.get(s.pid) ?? s.priority),
+        );
+        const current = effectivePriority.get(proc.pid)!;
+        if (current >= minWorkerPriority) {
+          effectivePriority.set(proc.pid, minWorkerPriority - 5);
+        }
+      }
+    }
+  }
+
+  // Rule 3: Liveness boost (L-001)
+  for (const proc of runnable) {
+    if (proc.tickCount > 0 && proc.tokensUsed > 0) {
+      const tokensPerTick = proc.tokensUsed / proc.tickCount;
+      if (tokensPerTick > 50) {
+        const current = effectivePriority.get(proc.pid)!;
+        effectivePriority.set(proc.pid, current + 1);
+      }
+    }
+  }
+
+  // Phase 4: Heuristic-driven scoring
+  if (input.heuristics.length > 0) {
+    const scores = new Map<string, number>();
+    for (const proc of runnable) {
+      scores.set(proc.pid, 0);
+    }
+
+    for (const h of input.heuristics) {
+      const text = h.heuristic.toLowerCase();
+
+      // Synthesis signal
+      if (text.includes("synthesis") || text.includes("aggregat") || text.includes("consolidat") || text.includes("fan-in")) {
+        for (const proc of runnable) {
+          const nameLower = proc.name.toLowerCase();
+          const objLower = proc.objective.toLowerCase();
+          const isSynthesisLike =
+            nameLower.includes("synthesis") || nameLower.includes("aggregat") ||
+            nameLower.includes("consolidat") || nameLower.includes("fan-in") ||
+            objLower.includes("synthesis") || objLower.includes("aggregat") ||
+            objLower.includes("consolidat") || objLower.includes("fan-in");
+          if (isSynthesisLike) {
+            scores.set(proc.pid, (scores.get(proc.pid) ?? 0) - 5);
+          }
+        }
+      }
+
+      // Flat-priority / contention signal
+      if (text.includes("flat-priority") || text.includes("gradient") || text.includes("contention") || text.includes("sibling")) {
+        const byEffPriority = new Map<number, OsProcess[]>();
+        for (const proc of runnable) {
+          const ep = effectivePriority.get(proc.pid) ?? proc.priority;
+          const group = byEffPriority.get(ep) ?? [];
+          group.push(proc);
+          byEffPriority.set(ep, group);
+        }
+        for (const [, group] of byEffPriority) {
+          if (group.length < 2) continue;
+          const winner = group.reduce((best, cur) => {
+            if (cur.priority > best.priority) return cur;
+            if (cur.priority === best.priority && cur.name < best.name) return cur;
+            return best;
+          });
+          for (const proc of group) {
+            if (proc.pid !== winner.pid) {
+              scores.set(proc.pid, (scores.get(proc.pid) ?? 0) - 3);
+            }
+          }
+        }
+      }
+
+      // Liveness / watchdog signal
+      if (text.includes("liveness") || text.includes("watchdog") || text.includes("token")) {
+        for (const proc of runnable) {
+          if (proc.tokensUsed > 0) {
+            scores.set(proc.pid, (scores.get(proc.pid) ?? 0) + 2);
+          }
+        }
+      }
+    }
+
+    // Apply accumulated heuristic scores
+    for (const [pid, score] of scores) {
+      if (score !== 0) {
+        const current = effectivePriority.get(pid) ?? 0;
+        effectivePriority.set(pid, current + score);
+      }
+    }
+  }
+
+  // Rule 5: Apply SchedulingStrategy adjustments from cross-run memory
+  if (input.currentStrategies.length > 0) {
+    for (const proc of runnable) {
+      const nameLower = proc.name.toLowerCase();
+      let strategyDelta = 0;
+
+      for (const strategy of input.currentStrategies) {
+        const { adjustments } = strategy;
+
+        if (adjustments.priorityBias) {
+          for (const [pattern, delta] of Object.entries(adjustments.priorityBias)) {
+            if (nameLower.includes(pattern.toLowerCase())) {
+              strategyDelta += delta;
+            }
+          }
+        }
+
+        if (adjustments.disfavorPatterns) {
+          for (const pattern of adjustments.disfavorPatterns) {
+            if (nameLower.includes(pattern.toLowerCase())) {
+              strategyDelta -= 5;
+            }
+          }
+        }
+
+        if (adjustments.favorPatterns) {
+          for (const pattern of adjustments.favorPatterns) {
+            if (nameLower.includes(pattern.toLowerCase())) {
+              strategyDelta += 5;
+            }
+          }
+        }
+      }
+
+      if (strategyDelta !== 0) {
+        const current = effectivePriority.get(proc.pid) ?? proc.priority;
+        effectivePriority.set(proc.pid, current + strategyDelta);
+      }
+    }
+  }
+
+  // Sort by effective priority and select
+  const sorted = [...runnable].sort((a, b) => {
+    const aPri = effectivePriority.get(a.pid) ?? a.priority;
+    const bPri = effectivePriority.get(b.pid) ?? b.priority;
+    return bPri - aPri;
+  });
+
+  return sorted.slice(0, input.maxConcurrent);
 }
 
 /** Assign monotonic seq numbers to effect inputs. */

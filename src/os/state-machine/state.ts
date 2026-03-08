@@ -17,6 +17,9 @@ import type {
   OsDagTopology,
   DeferEntry,
   OsMetacogTrigger,
+  OsSchedulerStrategy,
+  OsHeuristic,
+  SchedulingStrategy,
 } from "../types.js";
 
 /** The deterministic kernel state — everything needed to compute the next transition. */
@@ -38,6 +41,11 @@ export type KernelState = {
 
   // --- Scheduling ---
   tickCount: number;
+  schedulerStrategy: OsSchedulerStrategy;
+  schedulerMaxConcurrent: number;
+  schedulerRoundRobinIndex: number;
+  schedulerHeuristics: OsHeuristic[];
+  currentStrategies: SchedulingStrategy[];
 
   // --- DAG topology ---
   dagTopology: OsDagTopology;
@@ -86,6 +94,11 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     blackboard: new Map(),
 
     tickCount: 0,
+    schedulerStrategy: config.scheduler.strategy,
+    schedulerMaxConcurrent: config.scheduler.maxConcurrentProcesses,
+    schedulerRoundRobinIndex: 0,
+    schedulerHeuristics: [],
+    currentStrategies: [],
 
     dagTopology: { nodes: [], edges: [] },
 

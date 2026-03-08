@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { transition, type TransitionResult } from "../../../src/os/state-machine/transition.js";
+import { transition, selectRunnable, type TransitionResult } from "../../../src/os/state-machine/transition.js";
 import { initialState, type KernelState } from "../../../src/os/state-machine/state.js";
 import type { KernelEvent } from "../../../src/os/state-machine/events.js";
 import { parseOsConfig } from "../../../src/os/config.js";
@@ -1659,6 +1659,402 @@ describe("transition — deferral processing", () => {
       e.type === "emit_protocol" && "message" in e && e.message.includes("expired_but_spawned")
     )).toBe(true);
   });
+
+  test("deferral TTL expiry via maxWaitTicks spawns process anyway", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-tick-ttl", makeDeferral({
+      id: "defer-tick-ttl",
+      condition: { type: "blackboard_key_exists", key: "never-written" },
+      descriptor: { name: "tick-expired-worker", objective: "Do work" },
+      registeredByTick: 0,
+      maxWaitTicks: 3, // Expired: current tickCount > registeredByTick + maxWaitTicks
+    }));
+
+    // Advance tickCount past the TTL
+    const deferState = { ...s1, deferrals, tickCount: 5 };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "tick-expired-worker");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && "message" in e && e.message.includes("expired_but_spawned")
+    )).toBe(true);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("blackboard_key_match condition triggers when value matches", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-match", makeDeferral({
+      id: "defer-match",
+      condition: { type: "blackboard_key_match", key: "status", value: "ready" },
+      descriptor: { name: "match-worker", objective: "Work when ready" },
+    }));
+
+    // Set matching value
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("status", { value: "ready", writtenBy: "coordinator", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "match-worker");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("blackboard_key_match condition does NOT trigger when value differs", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-match", makeDeferral({
+      id: "defer-match",
+      condition: { type: "blackboard_key_match", key: "status", value: "ready" },
+      descriptor: { name: "match-worker", objective: "Work when ready" },
+    }));
+
+    // Set NON-matching value
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("status", { value: "pending", writtenBy: "coordinator", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(1);
+    const workers = [...s2.processes.values()].filter(p => p.name === "match-worker");
+    expect(workers.length).toBe(0);
+  });
+
+  test("blackboard_value_contains condition triggers on substring match", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-contains", makeDeferral({
+      id: "defer-contains",
+      condition: { type: "blackboard_value_contains", key: "log", substring: "ERROR" },
+      descriptor: { name: "error-handler", objective: "Handle error" },
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("log", { value: "Step 1 OK, Step 2 ERROR: timeout", writtenBy: "monitor", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "error-handler");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("blackboard_value_contains works with non-string values (JSON serialized)", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-json", makeDeferral({
+      id: "defer-json",
+      condition: { type: "blackboard_value_contains", key: "data", substring: "critical" },
+      descriptor: { name: "json-worker", objective: "Handle critical" },
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("data", { value: { status: "critical", count: 5 }, writtenBy: "sensor", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "json-worker");
+    expect(workers.length).toBe(1);
+  });
+
+  test("process_dead_by_name triggers when all matching processes are dead", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Add two workers with the same name
+    const processes = new Map(s1.processes);
+    processes.set("w1", {
+      pid: "w1", type: "lifecycle" as const, state: "dead" as const,
+      name: "researcher", parentPid: orch.pid, objective: "Research A",
+      priority: 50, spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+    processes.set("w2", {
+      pid: "w2", type: "lifecycle" as const, state: "dead" as const,
+      name: "researcher", parentPid: orch.pid, objective: "Research B",
+      priority: 50, spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-by-name", makeDeferral({
+      id: "defer-by-name",
+      condition: { type: "process_dead_by_name", name: "researcher" },
+      descriptor: { name: "synthesizer", objective: "Combine research" },
+    }));
+
+    const deferState = { ...s1, processes, deferrals };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const synths = [...s2.processes.values()].filter(p => p.name === "synthesizer");
+    expect(synths.length).toBe(1);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("process_dead_by_name does NOT trigger when some matching processes still alive", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set("w1", {
+      pid: "w1", type: "lifecycle" as const, state: "dead" as const,
+      name: "researcher", parentPid: orch.pid, objective: "Research A",
+      priority: 50, spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+    processes.set("w2", {
+      pid: "w2", type: "lifecycle" as const, state: "running" as const, // still alive
+      name: "researcher", parentPid: orch.pid, objective: "Research B",
+      priority: 50, spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-by-name", makeDeferral({
+      id: "defer-by-name",
+      condition: { type: "process_dead_by_name", name: "researcher" },
+      descriptor: { name: "synthesizer", objective: "Combine research" },
+    }));
+
+    const deferState = { ...s1, processes, deferrals };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(1);
+    const synths = [...s2.processes.values()].filter(p => p.name === "synthesizer");
+    expect(synths.length).toBe(0);
+  });
+
+  test("all_of composite condition triggers when all sub-conditions met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-all", makeDeferral({
+      id: "defer-all",
+      condition: {
+        type: "all_of",
+        conditions: [
+          { type: "blackboard_key_exists", key: "data:ready" },
+          { type: "blackboard_key_match", key: "mode", value: "production" },
+        ],
+      },
+      descriptor: { name: "all-met-worker", objective: "Both conditions met" },
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("data:ready", { value: true, writtenBy: "loader", version: 1 });
+    blackboard.set("mode", { value: "production", writtenBy: "config", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "all-met-worker");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("all_of composite condition does NOT trigger when one sub-condition not met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-all", makeDeferral({
+      id: "defer-all",
+      condition: {
+        type: "all_of",
+        conditions: [
+          { type: "blackboard_key_exists", key: "data:ready" },
+          { type: "blackboard_key_match", key: "mode", value: "production" },
+        ],
+      },
+      descriptor: { name: "all-met-worker", objective: "Both conditions met" },
+    }));
+
+    // Only one condition met
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("data:ready", { value: true, writtenBy: "loader", version: 1 });
+    // "mode" key missing
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(1);
+  });
+
+  test("any_of composite condition triggers when at least one sub-condition met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-any", makeDeferral({
+      id: "defer-any",
+      condition: {
+        type: "any_of",
+        conditions: [
+          { type: "blackboard_key_exists", key: "fast-path:done" },
+          { type: "blackboard_key_exists", key: "slow-path:done" },
+        ],
+      },
+      descriptor: { name: "any-met-worker", objective: "One path complete" },
+    }));
+
+    // Only one condition met
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("fast-path:done", { value: true, writtenBy: "fast", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "any-met-worker");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("any_of composite condition does NOT trigger when no sub-conditions met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-any", makeDeferral({
+      id: "defer-any",
+      condition: {
+        type: "any_of",
+        conditions: [
+          { type: "blackboard_key_exists", key: "fast-path:done" },
+          { type: "blackboard_key_exists", key: "slow-path:done" },
+        ],
+      },
+      descriptor: { name: "any-met-worker", objective: "One path complete" },
+    }));
+
+    // No conditions met — empty blackboard
+    const deferState = { ...s1, deferrals };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    expect(s2.deferrals.size).toBe(1);
+  });
+
+  test("triggered deferrals are removed while untriggered remain", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    // This one will trigger
+    deferrals.set("defer-triggered", makeDeferral({
+      id: "defer-triggered",
+      condition: { type: "blackboard_key_exists", key: "signal:go" },
+      descriptor: { name: "triggered-worker", objective: "Go" },
+    }));
+    // This one will NOT trigger
+    deferrals.set("defer-waiting", makeDeferral({
+      id: "defer-waiting",
+      condition: { type: "blackboard_key_exists", key: "signal:later" },
+      descriptor: { name: "waiting-worker", objective: "Wait" },
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("signal:go", { value: true, writtenBy: "controller", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    // Only the triggered deferral consumed
+    expect(s2.deferrals.size).toBe(1);
+    expect(s2.deferrals.has("defer-waiting")).toBe(true);
+    expect(s2.deferrals.has("defer-triggered")).toBe(false);
+
+    // New process spawned only for triggered
+    const triggered = [...s2.processes.values()].filter(p => p.name === "triggered-worker");
+    expect(triggered.length).toBe(1);
+    const waiting = [...s2.processes.values()].filter(p => p.name === "waiting-worker");
+    expect(waiting.length).toBe(0);
+
+    // submit_llm effect for triggered process only
+    const submitEffects = effects.filter(e => e.type === "submit_llm");
+    expect(submitEffects.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("deferral-spawned process is registered as child of parent", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-child", makeDeferral({
+      id: "defer-child",
+      condition: { type: "blackboard_key_exists", key: "ready" },
+      descriptor: { name: "child-worker", objective: "Child work" },
+      registeredByPid: orch.pid,
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("ready", { value: true, writtenBy: "setup", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    // Child worker should have parentPid set
+    const child = [...s2.processes.values()].find(p => p.name === "child-worker")!;
+    expect(child.parentPid).toBe(orch.pid);
+
+    // Parent should have child in children array
+    const parent = s2.processes.get(orch.pid)!;
+    expect(parent.children).toContain(child.pid);
+  });
+
+  test("deferral emit_protocol effect includes trigger reason", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-reason", makeDeferral({
+      id: "defer-reason",
+      condition: { type: "blackboard_key_exists", key: "signal" },
+      descriptor: { name: "reason-worker", objective: "Work" },
+      reason: "waiting for upstream data",
+    }));
+
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("signal", { value: true, writtenBy: "upstream", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [, effects] = transition(deferState, timerEvent("housekeep"));
+
+    const protocolEffect = effects.find(e =>
+      e.type === "emit_protocol" && "message" in e && e.message.includes("waiting for upstream data")
+    );
+    expect(protocolEffect).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2828,5 +3224,243 @@ describe("transition — housekeep rebuild_dag effect", () => {
 
     const dagEffects = effects.filter(e => e.type === "rebuild_dag");
     expect(dagEffects).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 4: Scheduling Through Transition
+// ---------------------------------------------------------------------------
+
+function makeProcess(overrides: Partial<import("../../../src/os/types.js").OsProcess> & { pid: string; name: string }): import("../../../src/os/types.js").OsProcess {
+  return {
+    type: "lifecycle",
+    state: "running",
+    parentPid: null,
+    objective: "test objective",
+    priority: 50,
+    spawnedAt: new Date().toISOString(),
+    lastActiveAt: new Date().toISOString(),
+    tickCount: 0,
+    tokensUsed: 0,
+    model: "gpt-4",
+    workingDir: "/tmp",
+    children: [],
+    onParentDeath: "orphan",
+    restartPolicy: "never",
+    ...overrides,
+  };
+}
+
+describe("selectRunnable — pure scheduling (Wave 4)", () => {
+  test("priority strategy selects highest priority processes", () => {
+    const procs = [
+      makeProcess({ pid: "a", name: "low", priority: 10, state: "running" }),
+      makeProcess({ pid: "b", name: "high", priority: 90, state: "running" }),
+      makeProcess({ pid: "c", name: "mid", priority: 50, state: "running" }),
+    ];
+    const { selected } = selectRunnable(procs, procs, {
+      strategy: "priority",
+      maxConcurrent: 2,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    });
+
+    expect(selected).toHaveLength(2);
+    expect(selected[0]!.pid).toBe("b"); // highest priority
+    expect(selected[1]!.pid).toBe("c"); // second highest
+  });
+
+  test("excludes non-running processes", () => {
+    const procs = [
+      makeProcess({ pid: "a", name: "running", priority: 50, state: "running" }),
+      makeProcess({ pid: "b", name: "idle", priority: 90, state: "idle" }),
+      makeProcess({ pid: "c", name: "dead", priority: 80, state: "dead" }),
+    ];
+    const { selected } = selectRunnable(procs, procs, {
+      strategy: "priority",
+      maxConcurrent: 5,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    });
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]!.pid).toBe("a");
+  });
+
+  test("maxConcurrent limit is respected", () => {
+    const procs = [
+      makeProcess({ pid: "a", name: "p1", priority: 90, state: "running" }),
+      makeProcess({ pid: "b", name: "p2", priority: 80, state: "running" }),
+      makeProcess({ pid: "c", name: "p3", priority: 70, state: "running" }),
+      makeProcess({ pid: "d", name: "p4", priority: 60, state: "running" }),
+    ];
+    const { selected } = selectRunnable(procs, procs, {
+      strategy: "priority",
+      maxConcurrent: 2,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    });
+
+    expect(selected).toHaveLength(2);
+    expect(selected[0]!.pid).toBe("a");
+    expect(selected[1]!.pid).toBe("b");
+  });
+
+  test("round-robin strategy cycles through processes", () => {
+    const procs = [
+      makeProcess({ pid: "a", name: "p1", state: "running" }),
+      makeProcess({ pid: "b", name: "p2", state: "running" }),
+      makeProcess({ pid: "c", name: "p3", state: "running" }),
+    ];
+    const input = {
+      strategy: "round-robin" as const,
+      maxConcurrent: 1,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    };
+
+    // First call: index 0
+    const r1 = selectRunnable(procs, procs, input);
+    expect(r1.selected).toHaveLength(1);
+    expect(r1.selected[0]!.pid).toBe("a");
+    expect(r1.roundRobinIndex).toBe(1);
+
+    // Second call with updated index
+    const r2 = selectRunnable(procs, procs, { ...input, roundRobinIndex: r1.roundRobinIndex });
+    expect(r2.selected[0]!.pid).toBe("b");
+    expect(r2.roundRobinIndex).toBe(2);
+
+    // Third call wraps around
+    const r3 = selectRunnable(procs, procs, { ...input, roundRobinIndex: r2.roundRobinIndex });
+    expect(r3.selected[0]!.pid).toBe("c");
+    expect(r3.roundRobinIndex).toBe(0);
+  });
+
+  test("learned strategy applies sibling contention gradient", () => {
+    const now = new Date().toISOString();
+    const procs = [
+      makeProcess({ pid: "a", name: "worker-1", priority: 50, state: "running", parentPid: "root", spawnedAt: now }),
+      makeProcess({ pid: "b", name: "worker-2", priority: 50, state: "running", parentPid: "root", spawnedAt: new Date(Date.now() + 1000).toISOString() }),
+    ];
+    const { selected } = selectRunnable(procs, procs, {
+      strategy: "learned",
+      maxConcurrent: 1,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    });
+
+    // First sibling (by spawnedAt) keeps priority, second gets -2
+    expect(selected).toHaveLength(1);
+    expect(selected[0]!.pid).toBe("a");
+  });
+
+  test("returns empty when no processes are running", () => {
+    const procs = [
+      makeProcess({ pid: "a", name: "idle", state: "idle" }),
+      makeProcess({ pid: "b", name: "dead", state: "dead" }),
+    ];
+    const { selected } = selectRunnable(procs, procs, {
+      strategy: "priority",
+      maxConcurrent: 5,
+      roundRobinIndex: 0,
+      heuristics: [],
+      currentStrategies: [],
+    });
+
+    expect(selected).toHaveLength(0);
+  });
+});
+
+describe("transition — housekeep scheduling (Wave 4)", () => {
+  test("handleHousekeep emits submit_llm effects for runnable processes", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    // goal-orchestrator is in "running" state after boot
+    const orchestrator = [...s1.processes.values()].find(p => p.name === "goal-orchestrator");
+    expect(orchestrator).toBeDefined();
+    expect(orchestrator!.state).toBe("running");
+
+    const [, effects] = transition(s1, timerEvent("housekeep"));
+
+    // Should emit submit_llm for the running goal-orchestrator
+    const submitEffects = effects.filter(e => e.type === "submit_llm");
+    expect(submitEffects.length).toBeGreaterThanOrEqual(1);
+
+    const orchSubmit = submitEffects.find(e => "pid" in e && e.pid === orchestrator!.pid);
+    expect(orchSubmit).toBeDefined();
+  });
+
+  test("inflight processes are excluded from scheduling submission", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const orchestrator = [...s1.processes.values()].find(p => p.name === "goal-orchestrator");
+    expect(orchestrator).toBeDefined();
+
+    // Mark orchestrator as inflight
+    const stateWithInflight = {
+      ...s1,
+      inflight: new Set([orchestrator!.pid]),
+    };
+
+    const [, effects] = transition(stateWithInflight, timerEvent("housekeep"));
+
+    // submit_llm should NOT contain the inflight orchestrator
+    const orchSubmits = effects.filter(
+      e => e.type === "submit_llm" && "pid" in e && e.pid === orchestrator!.pid
+    );
+    expect(orchSubmits).toHaveLength(0);
+  });
+
+  test("schedulerRoundRobinIndex is updated in state after round-robin scheduling", () => {
+    const state = makeState({ maxConcurrentProcesses: 1 });
+    const [s1] = transition(state, bootEvent("test"));
+
+    // Override state to use round-robin strategy with multiple running processes
+    const processes = new Map(s1.processes);
+    processes.set("w1", makeProcess({ pid: "w1", name: "worker-1", priority: 50, state: "running" }));
+    processes.set("w2", makeProcess({ pid: "w2", name: "worker-2", priority: 50, state: "running" }));
+
+    const rrState: KernelState = {
+      ...s1,
+      processes,
+      schedulerStrategy: "round-robin",
+      schedulerMaxConcurrent: 1,
+      schedulerRoundRobinIndex: 0,
+    };
+
+    const [newState] = transition(rrState, timerEvent("housekeep"));
+
+    // Round-robin index should have advanced
+    expect(newState.schedulerRoundRobinIndex).toBeGreaterThan(0);
+  });
+
+  test("maxConcurrent limit is respected in housekeep scheduling", () => {
+    const state = makeState({ maxConcurrentProcesses: 1 });
+    const [s1] = transition(state, bootEvent("test"));
+
+    const processes = new Map(s1.processes);
+    // Add multiple running workers
+    processes.set("w1", makeProcess({ pid: "w1", name: "worker-1", priority: 80, state: "running" }));
+    processes.set("w2", makeProcess({ pid: "w2", name: "worker-2", priority: 70, state: "running" }));
+    processes.set("w3", makeProcess({ pid: "w3", name: "worker-3", priority: 60, state: "running" }));
+
+    const stateWithWorkers: KernelState = {
+      ...s1,
+      processes,
+      schedulerMaxConcurrent: 2,
+    };
+
+    const [, effects] = transition(stateWithWorkers, timerEvent("housekeep"));
+
+    // Should emit at most schedulerMaxConcurrent submit_llm effects
+    const submitEffects = effects.filter(e => e.type === "submit_llm");
+    expect(submitEffects.length).toBeLessThanOrEqual(2);
   });
 });
