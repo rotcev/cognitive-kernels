@@ -1812,6 +1812,13 @@ export class OsKernel {
     if (this.halted) return;
     if (this.inflight.has(proc.pid)) return;
 
+    this.logEvent({
+      type: "process_submitted",
+      pid: proc.pid,
+      name: proc.name,
+      model: proc.model ?? this.config.kernel.processModel,
+    });
+
     this.turnStartTimes.set(proc.pid, Date.now());
 
     const execPromise = (!proc.backend || proc.backend.kind === "llm")

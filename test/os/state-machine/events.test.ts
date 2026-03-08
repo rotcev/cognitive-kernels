@@ -104,4 +104,27 @@ describe("Kernel event log", () => {
       expect(log[i].seq).toBeGreaterThan(log[i - 1].seq);
     }
   });
+
+  test("submitting a process records process_submitted event", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    // Stub scheduling pass to prevent infinite re-submission loop
+    k.doSchedulingPass = () => {};
+
+    // Find the goal-orchestrator process and submit it directly
+    const proc = k.table.getAll().find((p: any) => p.name === "goal-orchestrator");
+    expect(proc).toBeTruthy();
+    k.submitProcess(proc);
+
+    const log = kernel.getEventLog();
+    const submitted = log.filter((e: any) => e.type === "process_submitted");
+    expect(submitted.length).toBeGreaterThanOrEqual(1);
+    const first = submitted[0] as any;
+    expect(first.pid).toBeTruthy();
+    expect(first.name).toBeTruthy();
+    expect(first.seq).toBeGreaterThan(0);
+  });
 });
