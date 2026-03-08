@@ -70,4 +70,22 @@ describe("Kernel effect log", () => {
     const log = kernel.getEffectLog();
     expect(Array.isArray(log)).toBe(true);
   });
+
+  test("collectEffect records submit_llm effect", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.collectEffect({ type: "submit_llm", pid: "p1", name: "test-proc", model: "gpt-4" });
+
+    const effects = kernel.getEffectLog();
+    const submits = effects.filter((e: any) => e.type === "submit_llm");
+    expect(submits).toHaveLength(1);
+    const first = submits[0] as any;
+    expect(first.pid).toBe("p1");
+    expect(first.name).toBe("test-proc");
+    expect(first.model).toBe("gpt-4");
+    expect(first.seq).toBe(0);
+  });
 });

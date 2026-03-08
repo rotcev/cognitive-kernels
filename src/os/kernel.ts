@@ -1858,6 +1858,13 @@ export class OsKernel {
       model: proc.model ?? this.config.kernel.processModel,
     });
 
+    this.collectEffect({
+      type: "submit_llm",
+      pid: proc.pid,
+      name: proc.name,
+      model: proc.model ?? this.config.kernel.processModel,
+    });
+
     this.turnStartTimes.set(proc.pid, Date.now());
 
     const execPromise = (!proc.backend || proc.backend.kind === "llm")
