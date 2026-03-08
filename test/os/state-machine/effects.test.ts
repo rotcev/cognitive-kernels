@@ -113,6 +113,102 @@ describe("Kernel effect log", () => {
     expect(testEffects).toHaveLength(1);
     expect((testEffects[0] as any).message).toBe("test message");
   });
+
+  test("eventLoop collects schedule_timer effects for housekeep, snapshot, metacog, watchdog", async () => {
+    const config = parseOsConfig({
+      enabled: true,
+      memory: { basePath: tmpDir },
+      awareness: { enabled: false },
+      kernel: {
+        telemetryEnabled: false,
+        housekeepIntervalMs: 1000,
+        snapshotIntervalMs: 5000,
+        metacogIntervalMs: 30000,
+        watchdogIntervalMs: 60000,
+      },
+    });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+
+    // Start eventLoop (sets up housekeep, snapshot, metacog, watchdog timers)
+    const loopPromise = k.eventLoop();
+
+    // Immediately halt to stop the loop
+    k.haltResolve?.();
+    await loopPromise;
+
+    const effects = kernel.getEffectLog();
+    const timerEffects = effects.filter((e: any) => e.type === "schedule_timer");
+
+    // Should have schedule_timer effects for all 4 timers
+    const timerNames = timerEffects.map((e: any) => e.timer);
+    expect(timerNames).toContain("housekeep");
+    expect(timerNames).toContain("snapshot");
+    expect(timerNames).toContain("metacog");
+    expect(timerNames).toContain("watchdog");
+
+    // Verify delayMs values match config
+    const housekeep = timerEffects.find((e: any) => e.timer === "housekeep") as any;
+    expect(housekeep.delayMs).toBe(1000);
+
+    const snapshot = timerEffects.find((e: any) => e.timer === "snapshot") as any;
+    expect(snapshot.delayMs).toBe(5000);
+
+    const watchdog = timerEffects.find((e: any) => e.timer === "watchdog") as any;
+    expect(watchdog.delayMs).toBe(60000);
+
+    // metacog: initial call is scheduleNextMetacog(120_000), clamped to min(120000, metacogIntervalMs=30000) = 30000
+    const metacog = timerEffects.find((e: any) => e.timer === "metacog") as any;
+    expect(metacog.delayMs).toBe(30000);
+  });
+
+  test("scheduleNextMetacog collects schedule_timer effect with clamped delay", () => {
+    const config = parseOsConfig({
+      enabled: true,
+      memory: { basePath: tmpDir },
+      awareness: { enabled: false },
+      kernel: { telemetryEnabled: false, metacogIntervalMs: 45000, watchdogIntervalMs: 600000 },
+    });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.scheduleNextMetacog(20000);
+
+    const effects = kernel.getEffectLog();
+    const metacogTimers = effects.filter((e: any) => e.type === "schedule_timer" && e.timer === "metacog");
+    expect(metacogTimers.length).toBeGreaterThanOrEqual(1);
+    // 20000 is within [1000, 45000], so not clamped
+    const last = metacogTimers[metacogTimers.length - 1] as any;
+    expect(last.delayMs).toBe(20000);
+
+    // Clean up timer
+    if (k.metacogTimer) { clearTimeout(k.metacogTimer); k.metacogTimer = null; }
+  });
+
+  test("startWatchdog collects schedule_timer effect", () => {
+    const config = parseOsConfig({
+      enabled: true,
+      memory: { basePath: tmpDir },
+      awareness: { enabled: false },
+      kernel: { telemetryEnabled: false, watchdogIntervalMs: 90000 },
+    });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.startWatchdog();
+
+    const effects = kernel.getEffectLog();
+    const watchdogTimers = effects.filter((e: any) => e.type === "schedule_timer" && e.timer === "watchdog");
+    expect(watchdogTimers.length).toBeGreaterThanOrEqual(1);
+    expect((watchdogTimers[0] as any).delayMs).toBe(90000);
+
+    // Clean up timer
+    k.stopWatchdog();
+  });
 });
 
 describe("Effect log integration", () => {
