@@ -2149,3 +2149,382 @@ describe("transition — typed effects: housekeep deadlock detection emits activ
     expect(deadlockProtocol).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2: Process Lifecycle Through Effects
+// ---------------------------------------------------------------------------
+
+describe("transition — Wave 2: parent wake via activate_process on child exit", () => {
+  test("child exit emits activate_process for idle parent", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Set up: orchestrator is idle, has a running child
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, {
+      ...orch,
+      state: "idle" as const,
+      tickCount: 2,
+      wakeOnSignals: ["child:done"],
+      children: ["child-1"],
+    });
+    processes.set("child-1", {
+      pid: "child-1", type: "lifecycle" as const, state: "running" as const,
+      name: "worker-1", parentPid: orch.pid, objective: "do work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const stateWithChild = { ...s1, processes };
+
+    // Child completes with exit
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: "child-1",
+      name: "worker-1",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 50,
+      commands: [{ kind: "exit" as const, code: 0, reason: "done" }],
+      response: "work complete",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [newState, effects] = transition(stateWithChild, event);
+
+    // Parent should be activated
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === orch.pid
+    );
+    expect(activateEffects.length).toBe(1);
+
+    // Parent state should be running in the new state
+    const parentState = newState.processes.get(orch.pid);
+    expect(parentState?.state).toBe("running");
+  });
+
+  test("child failure emits activate_process for idle parent", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, {
+      ...orch,
+      state: "idle" as const,
+      tickCount: 2,
+      wakeOnSignals: ["child:done"],
+      children: ["child-fail"],
+    });
+    processes.set("child-fail", {
+      pid: "child-fail", type: "lifecycle" as const, state: "running" as const,
+      name: "failing-worker", parentPid: orch.pid, objective: "fail", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const stateWithChild = { ...s1, processes };
+
+    // Child fails
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: "child-fail",
+      name: "failing-worker",
+      success: false,
+      commandCount: 0,
+      tokensUsed: 30,
+      commands: [],
+      response: "error occurred",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [newState, effects] = transition(stateWithChild, event);
+
+    // Parent should be activated via effects
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === orch.pid
+    );
+    expect(activateEffects.length).toBe(1);
+
+    // Parent state should be running
+    const parentState = newState.processes.get(orch.pid);
+    expect(parentState?.state).toBe("running");
+  });
+
+  test("no activate_process for already-running parent when child exits", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    // Parent is already running
+    processes.set(orch.pid, {
+      ...orch,
+      state: "running" as const,
+      tickCount: 2,
+      children: ["child-2"],
+    });
+    processes.set("child-2", {
+      pid: "child-2", type: "lifecycle" as const, state: "running" as const,
+      name: "worker-2", parentPid: orch.pid, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const stateWithChild = { ...s1, processes };
+
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: "child-2",
+      name: "worker-2",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 50,
+      commands: [{ kind: "exit" as const, code: 0, reason: "done" }],
+      response: "complete",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [, effects] = transition(stateWithChild, event);
+
+    // No activate_process for parent since it's already running
+    const activateParent = effects.filter(
+      e => e.type === "activate_process" && e.pid === orch.pid
+    );
+    expect(activateParent.length).toBe(0);
+  });
+});
+
+describe("transition — Wave 2: daemon idle emits idle_process effect", () => {
+  test("daemon idle command emits idle_process effect", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    // Create a daemon process that's running
+    const processes = new Map(s1.processes);
+    processes.set("daemon-1", {
+      pid: "daemon-1", type: "daemon" as const, state: "running" as const,
+      name: "test-daemon", parentPid: null, objective: "monitor", priority: 40,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
+    });
+
+    const stateWithDaemon = { ...s1, processes };
+
+    // Daemon completes with idle command
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: "daemon-1",
+      name: "test-daemon",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 20,
+      commands: [{ kind: "idle" as const, wakeOnSignals: ["tick:1"] }],
+      response: "monitoring complete",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [newState, effects] = transition(stateWithDaemon, event);
+
+    // idle_process effect should be emitted
+    const idleEffects = effects.filter(e => e.type === "idle_process");
+    expect(idleEffects.length).toBe(1);
+    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.pid).toBe("daemon-1");
+    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.wakeOnSignals).toEqual(["tick:1"]);
+
+    // Process state should be idle
+    const daemonState = newState.processes.get("daemon-1");
+    expect(daemonState?.state).toBe("idle");
+  });
+
+  test("idle command without wakeOnSignals still emits idle_process", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    processes.set("daemon-2", {
+      pid: "daemon-2", type: "daemon" as const, state: "running" as const,
+      name: "test-daemon-2", parentPid: null, objective: "watch", priority: 40,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 50, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
+    });
+
+    const stateWithDaemon = { ...s1, processes };
+
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: "daemon-2",
+      name: "test-daemon-2",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 10,
+      commands: [{ kind: "idle" as const }],
+      response: "done",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [, effects] = transition(stateWithDaemon, event);
+
+    const idleEffects = effects.filter(e => e.type === "idle_process");
+    expect(idleEffects.length).toBe(1);
+    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.wakeOnSignals).toBeUndefined();
+  });
+});
+
+describe("transition — Wave 2: sleeper waking emits activate_process", () => {
+  test("expired sleeper gets activate_process in housekeep", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    // Add a sleeping process with an expired sleepUntil
+    const expiredTime = new Date(Date.now() - 5000).toISOString(); // 5 seconds ago
+    processes.set("sleeper-1", {
+      pid: "sleeper-1", type: "lifecycle" as const, state: "sleeping" as const,
+      name: "sleeping-worker", parentPid: null, objective: "wait", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      sleepUntil: expiredTime,
+    });
+
+    const stateWithSleeper = { ...s1, processes };
+
+    const [newState, effects] = transition(stateWithSleeper, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+    }));
+
+    // activate_process effect for the woken sleeper
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === "sleeper-1"
+    );
+    expect(activateEffects.length).toBe(1);
+
+    // Process should be running now
+    const sleeperState = newState.processes.get("sleeper-1");
+    expect(sleeperState?.state).toBe("running");
+    expect(sleeperState?.sleepUntil).toBeUndefined();
+  });
+
+  test("non-expired sleeper does NOT get activate_process", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    const futureTime = new Date(Date.now() + 60000).toISOString(); // 60 seconds from now
+    processes.set("sleeper-2", {
+      pid: "sleeper-2", type: "lifecycle" as const, state: "sleeping" as const,
+      name: "still-sleeping", parentPid: null, objective: "wait", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      sleepUntil: futureTime,
+    });
+
+    const stateWithSleeper = { ...s1, processes };
+
+    const [newState, effects] = transition(stateWithSleeper, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+    }));
+
+    // No activate_process for non-expired sleeper
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === "sleeper-2"
+    );
+    expect(activateEffects.length).toBe(0);
+
+    // Process should still be sleeping
+    const sleeperState = newState.processes.get("sleeper-2");
+    expect(sleeperState?.state).toBe("sleeping");
+  });
+});
+
+describe("transition — Wave 2: checkpoint restoration emits activate_process", () => {
+  test("checkpointed process gets activate_process in housekeep", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    processes.set("cp-1", {
+      pid: "cp-1", type: "lifecycle" as const, state: "checkpoint" as const,
+      name: "checkpointed-worker", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 200, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const stateWithCheckpoint = { ...s1, processes };
+
+    const [newState, effects] = transition(stateWithCheckpoint, timerEvent("housekeep", {
+      pendingEphemeralCount: 0,
+    }));
+
+    // activate_process effect for the restored process
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === "cp-1"
+    );
+    expect(activateEffects.length).toBe(1);
+
+    // Process should be running now
+    const procState = newState.processes.get("cp-1");
+    expect(procState?.state).toBe("running");
+  });
+});
+
+describe("transition — Wave 2: executive exit prevention emits idle_process", () => {
+  test("orchestrator prevented from exiting emits idle_process with wakeOnSignals", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
+    // Add a living child
+    processes.set("child-alive", {
+      pid: "child-alive", type: "lifecycle" as const, state: "running" as const,
+      name: "active-child", parentPid: orch.pid, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    const stateWithChildren = { ...s1, processes };
+
+    // Orchestrator tries to exit
+    const event: KernelEvent = {
+      type: "process_completed",
+      pid: orch.pid,
+      name: "goal-orchestrator",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 50,
+      commands: [{ kind: "exit" as const, code: 0, reason: "done" }],
+      response: "exiting",
+      timestamp: Date.now(),
+      seq: 1,
+    };
+
+    const [newState, effects] = transition(stateWithChildren, event);
+
+    // Orchestrator should be idle (exit prevented)
+    const orchState = newState.processes.get(orch.pid);
+    expect(orchState?.state).toBe("idle");
+
+    // idle_process effect with child:done signal
+    const idleEffects = effects.filter(e => e.type === "idle_process");
+    expect(idleEffects.length).toBe(1);
+    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.pid).toBe(orch.pid);
+    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.wakeOnSignals).toContain("child:done");
+  });
+});

@@ -657,6 +657,10 @@ export class OsMetacognitiveAgent {
     this.pendingTriggers.push(trigger);
   }
 
+  setTriggers(triggers: OsMetacogTrigger[]): void {
+    this.pendingTriggers = [...triggers];
+  }
+
   hasPendingTriggers(): boolean {
     return this.pendingTriggers.length > 0;
   }

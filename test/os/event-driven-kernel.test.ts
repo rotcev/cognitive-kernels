@@ -735,3 +735,87 @@ describe("Event-driven kernel: stability hardening", () => {
     kernel.halt("test_complete");
   }, 10000);
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2: Process lifecycle through effects (haiku bug regression)
+// ---------------------------------------------------------------------------
+
+describe("Event-driven kernel: Wave 2 — parent wake via effects (haiku bug)", () => {
+  test("child process completion wakes idle parent through transition effects, not bridge diffing", async () => {
+    const brain = new MockBrain();
+    brain.delayMs = 20;
+    const kernel = bootKernel(brain);
+    stubSchedulingPass(kernel);
+
+    const supervisor = priv(kernel).supervisor;
+
+    // Create parent process (simulating orchestrator idling after spawning child)
+    const parent = supervisor.spawn({
+      type: "lifecycle" as const,
+      name: "test-parent",
+      objective: "Wait for child",
+      priority: 70,
+      model: "mock",
+      workingDir: tmpDir,
+    });
+    // Activate first (spawned → running), then idle (running → idle)
+    supervisor.activate(parent.pid);
+    // Parent is idle, waiting for child:done signal
+    supervisor.idle(parent.pid, { signals: ["child:done"] });
+
+    // Create child process
+    const child = supervisor.spawn({
+      type: "lifecycle" as const,
+      name: "test-child",
+      objective: "Do work and exit",
+      priority: 60,
+      model: "mock",
+      parentPid: parent.pid,
+      workingDir: tmpDir,
+    });
+    supervisor.activate(child.pid);
+
+    // Verify initial state: parent is idle, child is running
+    expect(priv(kernel).table.get(parent.pid)?.state).toBe("idle");
+    expect(priv(kernel).table.get(child.pid)?.state).toBe("running");
+
+    // Simulate child completion via processOneResult (the transition path)
+    const result: OsProcessTurnResult = {
+      pid: child.pid,
+      success: true,
+      response: "work done",
+      tokensUsed: 50,
+      commands: [{ kind: "exit" as const, code: 0, reason: "completed" }],
+    };
+
+    // Call processOneResult — this goes through transition, which should emit
+    // activate_process for the parent, and applyStateChanges should sync it.
+    await priv(kernel).processOneResult(result);
+
+    // The child should now be dead
+    const childState = priv(kernel).table.get(child.pid);
+    expect(childState?.state).toBe("dead");
+
+    // The parent should be set to running in the process table
+    // (transition emitted activate_process and changed state to running)
+    const parentState = priv(kernel).table.get(parent.pid);
+    expect(parentState?.state).toBe("running");
+
+    kernel.halt("test_complete");
+  }, 10000);
+
+  test("applyStateChanges no longer calls supervisor.activate for state changes", () => {
+    // This test verifies that applyStateChanges is a trivial field copier
+    // and does NOT contain bridge diffing logic.
+    const kernel = bootKernel();
+
+    // Get the source of applyStateChanges
+    const applyFn = priv(kernel).applyStateChanges.toString();
+
+    // It should NOT contain the bridge diffing pattern
+    expect(applyFn).not.toContain("prevState");
+    expect(applyFn).not.toContain('supervisor.activate');
+
+    kernel.halt("test_complete");
+  });
+});

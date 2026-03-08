@@ -14,7 +14,7 @@
 import type { KernelState, BlackboardEntry } from "./state.js";
 import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
-import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport } from "../types.js";
+import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger } from "../types.js";
 import { randomUUID } from "node:crypto";
 
 export type TransitionResult = readonly [KernelState, KernelEffect[]];
@@ -339,7 +339,28 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         action: "os_signal_emit",
         message: `child:done pid=${event.pid} name=${updatedProc.name} parent=${updatedProc.parentPid} code=1`,
       });
+      effects.push({
+        type: "child_done_signal",
+        childPid: event.pid,
+        childName: updatedProc.name,
+        parentPid: updatedProc.parentPid,
+        exitCode: 1,
+      });
+      effects.push({ type: "flush_ipc" });
+      // Wake parent directly so it can process child:done
+      const parentProc = processes.get(updatedProc.parentPid);
+      if (parentProc && (parentProc.state === "idle" || parentProc.state === "sleeping")) {
+        const wokenParent = { ...parentProc, state: "running" as const, lastActiveAt: new Date().toISOString() };
+        processes.set(updatedProc.parentPid, wokenParent);
+        effects.push({
+          type: "activate_process",
+          pid: updatedProc.parentPid,
+        });
+      }
     }
+
+    // Rebuild DAG after process death
+    effects.push({ type: "rebuild_dag" });
 
     return [
       { ...state, processes, pendingTriggers, lastProcessCompletionTime: Date.now() },
@@ -439,6 +460,11 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         if (cmd.wakeOnSignals) {
           updatedProc.wakeOnSignals = cmd.wakeOnSignals;
         }
+        effects.push({
+          type: "idle_process",
+          pid: event.pid,
+          wakeOnSignals: cmd.wakeOnSignals,
+        });
         break;
 
       case "sleep":
@@ -472,6 +498,12 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
           action: "os_signal_emit",
           message: `signal=${cmd.signal} from=${event.pid}`,
         });
+        effects.push({
+          type: "signal_emit",
+          signal: cmd.signal,
+          sender: event.pid,
+        });
+        effects.push({ type: "flush_ipc" });
         break;
 
       case "request_kernel":
@@ -819,6 +851,11 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
               ? ["child:done"]
               : ["tick:1", "child:done"];
             effects.push({
+              type: "idle_process",
+              pid: updatedProc.pid,
+              wakeOnSignals: updatedProc.wakeOnSignals,
+            });
+            effects.push({
               type: "emit_protocol",
               action: "os_command_rejected",
               message: `executive exit prevented: ${livingChildren.length} living children, ${deferrals.size} pending deferrals`,
@@ -845,7 +882,28 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
             action: "os_signal_emit",
             message: `child:done pid=${event.pid} name=${updatedProc.name} parent=${updatedProc.parentPid} code=${cmd.code}`,
           });
+          effects.push({
+            type: "child_done_signal",
+            childPid: event.pid,
+            childName: updatedProc.name,
+            parentPid: updatedProc.parentPid,
+            exitCode: cmd.code,
+            exitReason: cmd.reason,
+          });
+          effects.push({ type: "flush_ipc" });
+          // Wake parent directly so it can process child:done
+          const parentProc = processes.get(updatedProc.parentPid);
+          if (parentProc && (parentProc.state === "idle" || parentProc.state === "sleeping")) {
+            const wokenParent = { ...parentProc, state: "running" as const, lastActiveAt: new Date().toISOString() };
+            processes.set(updatedProc.parentPid, wokenParent);
+            effects.push({
+              type: "activate_process",
+              pid: updatedProc.parentPid,
+            });
+          }
         }
+        // Rebuild DAG after process death
+        effects.push({ type: "rebuild_dag" });
         break;
       }
     }
@@ -1179,6 +1237,18 @@ function handleEphemeralCompleted(state: KernelState, event: EphemeralCompletedE
       action: "os_signal_emit",
       message: `ephemeral:ready pid=kernel name=${event.name} parent=${event.parentPid ?? "unknown"} id=${event.id}${!event.success ? " error=true" : ""}`,
     });
+    effects.push({
+      type: "signal_emit",
+      signal: `ephemeral:ready`,
+      sender: "kernel",
+      payload: {
+        name: event.name,
+        parentPid: event.parentPid ?? "unknown",
+        id: event.id,
+        error: !event.success,
+      },
+    });
+    effects.push({ type: "flush_ipc" });
   }
 
   return [
@@ -1231,7 +1301,17 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
         action: "os_signal_emit",
         message: `tick:${cadence} pid=kernel cadence=${cadence} tick=${housekeepCount}`,
       });
+      effects.push({
+        type: "signal_emit",
+        signal: `tick:${cadence}`,
+        sender: "kernel",
+        payload: { cadence, tick: housekeepCount },
+      });
     }
+  }
+  // Flush IPC after all cadence signals
+  if (cadences.some(c => housekeepCount % c === 0)) {
+    effects.push({ type: "flush_ipc" });
   }
 
   // 2. Wake expired sleepers (pure: set state from sleeping to running)
@@ -1243,6 +1323,10 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       if (nowMs >= sleepUntilMs) {
         const updated = { ...proc, state: "running" as const, sleepUntil: undefined, lastActiveAt: now };
         processes.set(pid, updated);
+        effects.push({
+          type: "activate_process",
+          pid,
+        });
       }
     }
   }
@@ -1252,6 +1336,10 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     if (proc.state === "checkpoint") {
       const updated = { ...proc, state: "running" as const, lastActiveAt: now };
       processes.set(pid, updated);
+      effects.push({
+        type: "activate_process",
+        pid,
+      });
     }
   }
 
@@ -1276,6 +1364,10 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
         for (const proc of idleProcs) {
           const updated = { ...proc, state: "running" as const, lastActiveAt: now };
           processes.set(proc.pid, updated);
+          effects.push({
+            type: "activate_process",
+            pid: proc.pid,
+          });
         }
         effects.push({
           type: "emit_protocol",
@@ -1308,6 +1400,10 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       if (nothingLeft || bbChanged || wallCooldownExpired) {
         const updated = { ...orchestrator, state: "running" as const, lastActiveAt: now };
         processes.set(orchestrator.pid, updated);
+        effects.push({
+          type: "activate_process",
+          pid: orchestrator.pid,
+        });
         effects.push({
           type: "emit_protocol",
           action: "os_process_event",
@@ -1402,7 +1498,7 @@ function handleMetacogEvaluated(state: KernelState, event: MetacogEvaluatedEvent
   const effects: KernelEffectInput[] = [];
 
   // Clear pending triggers — metacog has consumed them
-  const pendingTriggers: string[] = [];
+  const pendingTriggers: OsMetacogTrigger[] = [];
 
   effects.push({
     type: "emit_protocol",

@@ -515,6 +515,7 @@ export class OsKernel {
         (p) => p.name === "metacog-daemon" && p.state !== "dead",
       );
       if (metacogDaemonProc) {
+        // TODO(Wave 7): Move metacog daemon lifecycle to transition effects
         this.supervisor.activate(metacogDaemonProc.pid);
         const stateEntry = this.ipcBus.bbRead("metacog:system-state", metacogDaemonProc.pid);
         if (stateEntry) {
@@ -526,6 +527,7 @@ export class OsKernel {
             // Daemon evaluation failed — continue without it
           }
         }
+        // TODO(Wave 7): Move metacog daemon idle to transition effects
         // Return daemon to idle after its turn
         this.supervisor.idle(metacogDaemonProc.pid, {});
       }
@@ -577,6 +579,7 @@ export class OsKernel {
         const awarenessProc = this.table.getAll().find(
           (p) => p.name === "awareness-daemon" && p.state !== "dead",
         );
+        // TODO(Wave 7): Move awareness daemon lifecycle to transition effects
         if (awarenessProc) {
           this.supervisor.activate(awarenessProc.pid);
         }
@@ -634,6 +637,7 @@ export class OsKernel {
           // Awareness eval failed — continue without notes
         }
 
+        // TODO(Wave 7): Move awareness daemon idle to transition effects
         // Return awareness process to idle
         if (awarenessProc) {
           this.supervisor.idle(awarenessProc.pid, {});
@@ -932,6 +936,7 @@ export class OsKernel {
           const awarenessProc = this.table.getAll().find(
             (p) => p.name === "awareness-daemon" && p.state !== "dead",
           );
+          // TODO(Wave 7): Move watchdog awareness daemon lifecycle to transition effects
           if (awarenessProc) {
             this.supervisor.activate(awarenessProc.pid);
           }
@@ -1037,6 +1042,7 @@ export class OsKernel {
     this.processDeferrals();
 
     // 3. Flush IPC bus — get woken PIDs, wake idle processes
+    // TODO(Wave 7): Legacy tick() path — remove when sub-kernels use eventLoop()
     const { wokenPids } = this.ipcBus.flush();
     for (const pid of wokenPids) {
       const proc = this.table.get(pid);
@@ -1413,6 +1419,7 @@ export class OsKernel {
         const metacogDaemonProc = this.table.getAll().find(
           (p) => p.name === "metacog-daemon" && p.state !== "dead",
         );
+        // TODO(Wave 7): Move watchdog metacog daemon lifecycle to transition effects
         if (metacogDaemonProc) {
           this.supervisor.activate(metacogDaemonProc.pid);
           const stateEntry = this.ipcBus.bbRead("metacog:system-state", metacogDaemonProc.pid);
@@ -1425,6 +1432,7 @@ export class OsKernel {
               // Daemon evaluation failed — continue without it
             }
           }
+          // TODO(Wave 7): Move watchdog metacog daemon idle to transition effects
           // Return daemon to idle after its turn
           this.supervisor.idle(metacogDaemonProc.pid, {});
         }
@@ -1681,6 +1689,8 @@ export class OsKernel {
     this.processDeferrals();
 
     // 3. Flush IPC bus — get woken PIDs, wake idle processes
+    // TODO(Wave 3): Move housekeep I/O flush to transition effects; these activate calls
+    // handle I/O-side signals emitted by housekeepIO itself (cadence signals, deferrals).
     const { wokenPids } = this.ipcBus.flush();
     for (const pid of wokenPids) {
       const proc = this.table.get(pid);
@@ -1834,6 +1844,8 @@ export class OsKernel {
       void this.drainPendingEphemerals();
 
       // Flush IPC — wake processes unblocked by bb writes / signals
+      // TODO(Wave 3): Transition already emits flush_ipc effects for its own signals;
+      // this flush catches I/O-side signals from processDeferrals() and drainPendingEphemerals().
       const { wokenPids } = this.ipcBus.flush();
       for (const pid of wokenPids) {
         const p = this.table.get(pid);
@@ -2308,6 +2320,8 @@ export class OsKernel {
           }
 
           // Flush IPC + wake + reschedule
+          // TODO(Wave 3): Transition already emits flush_ipc; this flush catches
+          // post-transition I/O signals emitted above (ipcBus.emitSignal).
           const { wokenPids } = this.ipcBus.flush();
           for (const pid of wokenPids) {
             const p = this.table.get(pid);
@@ -2379,6 +2393,8 @@ export class OsKernel {
           }
 
           // Flush IPC + wake + reschedule
+          // TODO(Wave 3): Transition already emits flush_ipc; this flush catches
+          // post-transition I/O signals emitted above (ipcBus.emitSignal).
           const { wokenPids } = this.ipcBus.flush();
           for (const pid of wokenPids) {
             const p = this.table.get(pid);
@@ -2502,6 +2518,8 @@ export class OsKernel {
 
   /**
    * Execute a single metacognitive command.
+   * TODO(Wave 7): Metacog commands bypass the transition function and directly call
+   * supervisor.activate/spawn/kill. These should be migrated to transition effects.
    */
   private executeMetacogCommand(cmd: MetacogCommand): void {
     // Capture pre-snapshot for intervention outcome tracking
@@ -3392,7 +3410,9 @@ export class OsKernel {
         // Existing process — sync state changes
         const existing = this.table.get(pid)!;
 
-        // Sync all mutable fields from transition state
+        // Sync all mutable fields from transition state — trivial field copy, NO decisions.
+        // Process lifecycle activation is driven by activate_process / idle_process effects
+        // emitted by the transition function and interpreted by interpretTransitionEffects().
         existing.state = proc.state;
         existing.tickCount = proc.tickCount;
         existing.tokensUsed = proc.tokensUsed;
@@ -3406,11 +3426,6 @@ export class OsKernel {
         existing.checkpoint = proc.checkpoint;
         existing.sleepUntil = proc.sleepUntil;
         existing.wakeOnSignals = proc.wakeOnSignals;
-
-        // Dispose thread for dead processes
-        if (proc.state === "dead" && existing.state === "dead") {
-          // Already marked dead — disposal happens in interpretTransitionEffects
-        }
       }
     }
 
@@ -3427,10 +3442,9 @@ export class OsKernel {
     this.deferrals = new Map(newState.deferrals);
 
     // ── Sync pending triggers ──
-    // Append new triggers from transition (don't lose existing ones not consumed yet)
-    for (const trigger of newState.pendingTriggers) {
-      this.addTrigger(trigger);
-    }
+    // Replace with transition's authoritative list (transition may have cleared them)
+    this.pendingTriggers = [...newState.pendingTriggers];
+    this.metacog.setTriggers(newState.pendingTriggers);
   }
 
   /**
@@ -3449,19 +3463,6 @@ export class OsKernel {
             status: "completed",
             message: effect.message,
           });
-          // Handle signal dispatch: os_signal_emit effects need to go through ipcBus
-          if (effect.action === "os_signal_emit") {
-            const match = effect.message.match(/signal=(\S+)\s+from=(\S+)/);
-            if (match) {
-              this.ipcBus.emitSignal(match[1], match[2]);
-              this.tickSignals.push(match[1]);
-            }
-            // child:done signals need full dispatch through emitChildDoneSignal
-            const childMatch = effect.message.match(/child:done pid=(\S+) name=(\S+) parent=(\S+) code=(\S+)/);
-            if (childMatch) {
-              this.emitChildDoneSignal(childMatch[1], childMatch[2], childMatch[3], parseInt(childMatch[4]), undefined);
-            }
-          }
           break;
 
         case "halt":
@@ -3566,6 +3567,53 @@ export class OsKernel {
           if (wakeProc && (wakeProc.state === "idle" || wakeProc.state === "sleeping")) {
             this.supervisor.activate(effect.pid);
           }
+          break;
+        }
+
+        case "activate_process": {
+          const proc = this.table.get(effect.pid);
+          if (proc && (proc.state === "idle" || proc.state === "sleeping")) {
+            this.supervisor.activate(effect.pid);
+          }
+          break;
+        }
+        case "idle_process": {
+          const idleProc = this.table.get(effect.pid);
+          // Guard: applyStateChanges already synced state to idle — only call supervisor.idle
+          // if the process is NOT already idle (avoids invalid idle→idle transition).
+          if (idleProc && idleProc.state !== "idle") {
+            this.supervisor.idle(effect.pid, effect.wakeOnSignals ? { signals: effect.wakeOnSignals } : {});
+          } else if (idleProc && effect.wakeOnSignals) {
+            // Process already idle — just update wakeOnSignals without state transition
+            idleProc.wakeOnSignals = effect.wakeOnSignals;
+          }
+          break;
+        }
+        case "signal_emit": {
+          this.ipcBus.emitSignal(effect.signal, effect.sender, effect.payload);
+          this.tickSignals.push(effect.signal);
+          break;
+        }
+        case "child_done_signal": {
+          this.emitChildDoneSignal(effect.childPid, effect.childName, effect.parentPid, effect.exitCode, effect.exitReason);
+          break;
+        }
+        case "flush_ipc": {
+          const { wokenPids } = this.ipcBus.flush();
+          for (const pid of wokenPids) {
+            const proc = this.table.get(pid);
+            if (proc && proc.state === "idle") {
+              this.supervisor.activate(pid);
+            }
+          }
+          break;
+        }
+        case "rebuild_dag": {
+          this.dagEngine.buildFromProcesses(this.table.getAll());
+          break;
+        }
+        case "schedule_pass": {
+          this.doSchedulingPass();
           break;
         }
 
@@ -3987,6 +4035,8 @@ Example: ["strategy-123", "strategy-456"]`;
   /**
    * Check all deferral conditions and spawn processes whose conditions are met.
    * Called once per tick (step 2c).
+   * TODO(Wave 5): I/O-based deferral processing — supervisor.activate calls here should
+   * be migrated to transition effects once deferral processing is fully pure.
    */
   private processDeferrals(): void {
     if (this.deferrals.size === 0) return;
