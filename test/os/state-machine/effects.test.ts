@@ -114,3 +114,57 @@ describe("Kernel effect log", () => {
     expect((testEffects[0] as any).message).toBe("test message");
   });
 });
+
+describe("Effect log integration", () => {
+  test("a minimal kernel run captures submit_llm, schedule_timer, and emit_protocol effects", async () => {
+    const config = parseOsConfig({
+      enabled: true,
+      memory: { basePath: tmpDir },
+      awareness: { enabled: false },
+      kernel: {
+        telemetryEnabled: false,
+        watchdogIntervalMs: 600000,
+        maxConcurrentProcesses: 3,
+        tokenBudget: 100, // very low — forces quick halt
+      },
+    });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+
+    try {
+      await kernel.run("Quick test");
+    } catch {
+      // May throw on very low token budget, that's fine
+    }
+
+    const effects = kernel.getEffectLog();
+
+    // Must have effects
+    expect(effects.length).toBeGreaterThanOrEqual(1);
+
+    // Seq is monotonically increasing
+    for (let i = 1; i < effects.length; i++) {
+      expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);
+    }
+
+    // Should have schedule_timer effects (timers set up during eventLoop)
+    const timerEffects = effects.filter((e: any) => e.type === "schedule_timer");
+    expect(timerEffects.length).toBeGreaterThanOrEqual(1);
+    const timerNames = timerEffects.map((e: any) => e.timer);
+    expect(timerNames).toContain("housekeep");
+
+    // Should have emit_protocol effects (boot spawn at minimum)
+    const protocolEffects = effects.filter((e: any) => e.type === "emit_protocol");
+    expect(protocolEffects.length).toBeGreaterThanOrEqual(1);
+
+    // Should have submit_llm effects (goal-orchestrator gets submitted)
+    const submitEffects = effects.filter((e: any) => e.type === "submit_llm");
+    expect(submitEffects.length).toBeGreaterThanOrEqual(1);
+
+    // Log the effect type distribution for debugging
+    const typeCounts: Record<string, number> = {};
+    for (const e of effects) {
+      typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1;
+    }
+    console.log("Effect type distribution:", typeCounts);
+  });
+});
