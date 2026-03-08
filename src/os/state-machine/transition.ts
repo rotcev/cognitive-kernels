@@ -12,9 +12,9 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
-import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology } from "../types.js";
+import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology, MetacogHistoryEntry, MetacogCommand } from "../types.js";
 import { reconcile } from "../topology/reconcile.js";
 import { validateTopology } from "../topology/validate.js";
 import { optimizeTopology } from "../topology/optimize.js";
@@ -53,6 +53,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return [state, []];
     case "topology_declared":
       return handleTopologyDeclared(state, event);
+    case "metacog_response_received":
+      return handleMetacogResponseReceived(state, event);
     default:
       return [state, []];
   }
@@ -2187,7 +2189,85 @@ function learnedSelect(
   return sorted.slice(0, input.maxConcurrent);
 }
 
-/** Assign monotonic seq numbers to effect inputs. */
+// ---------------------------------------------------------------------------
+// Topology Reconciliation Helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared topology reconciliation: validate → optimize → reconcile → emit effects.
+ * Used by both handleTopologyDeclared and handleMetacogResponseReceived.
+ */
+function reconcileTopologyInto(
+  state: KernelState,
+  topology: TopologyExpr,
+  effects: KernelEffectInput[],
+): { state: KernelState; effects: KernelEffectInput[] } {
+  // Validate
+  const validation = validateTopology(topology);
+  if (!validation.valid) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_topology_error",
+      message: `invalid topology: ${validation.errors.map(e => e.message).join(", ")}`,
+    });
+    return { state, effects };
+  }
+
+  // Optimize
+  const { optimized, warnings } = optimizeTopology(topology);
+  for (const w of warnings) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_topology_warning",
+      message: `${w.type}: ${w.message}`,
+    });
+  }
+
+  // Reconcile — cast blackboard to reconciler's interface (writtenBy: string|null → string|undefined)
+  const reconcileEffects = reconcile(
+    state.processes,
+    optimized,
+    state.blackboard as Map<string, { value: unknown; writtenBy?: string }>,
+    state.inflight,
+  );
+
+  // Convert reconcile effects to kernel effects
+  for (const re of reconcileEffects) {
+    switch (re.type) {
+      case "spawn_process":
+        effects.push({
+          type: "spawn_topology_process",
+          name: re.name,
+          objective: re.objective,
+          model: re.model,
+          priority: re.priority,
+          backend: re.backend,
+        });
+        break;
+      case "kill_process":
+        effects.push({ type: "kill_process", pid: re.pid, name: re.name });
+        break;
+      case "drain_process":
+        effects.push({ type: "drain_process", pid: re.pid, name: re.name });
+        break;
+      case "activate_process":
+        if (re.pid) {
+          effects.push({ type: "activate_process", pid: re.pid });
+        }
+        break;
+      case "emit_protocol":
+        effects.push({ type: "emit_protocol", action: re.action, message: re.message });
+        break;
+    }
+  }
+
+  return { state, effects };
+}
+
+// ---------------------------------------------------------------------------
+// Topology Declared Handler (delegates to reconcileTopologyInto)
+// ---------------------------------------------------------------------------
+
 function handleTopologyDeclared(state: KernelState, event: TopologyDeclaredEvent): TransitionResult {
   if (state.halted) return [state, []];
 
@@ -2212,67 +2292,160 @@ function handleTopologyDeclared(state: KernelState, event: TopologyDeclaredEvent
 
   // Handle topology declaration
   if (event.topology !== null) {
-    // Validate
-    const validation = validateTopology(event.topology);
-    if (!validation.valid) {
-      effects.push({
-        type: "emit_protocol",
-        action: "os_topology_error",
-        message: `invalid topology: ${validation.errors.map(e => e.message).join(", ")}`,
-      });
-      return [state, assignEffectSeqs(effects)];
-    }
-
-    // Optimize
-    const { optimized, warnings } = optimizeTopology(event.topology);
-    for (const w of warnings) {
-      effects.push({
-        type: "emit_protocol",
-        action: "os_topology_warning",
-        message: `${w.type}: ${w.message}`,
-      });
-    }
-
-    // Reconcile — cast blackboard to reconciler's interface (writtenBy: string|null → string|undefined)
-    const reconcileEffects = reconcile(
-      state.processes,
-      optimized,
-      state.blackboard as Map<string, { value: unknown; writtenBy?: string }>,
-      state.inflight,
-    );
-
-    // Convert reconcile effects to kernel effects
-    for (const re of reconcileEffects) {
-      switch (re.type) {
-        case "spawn_process":
-          effects.push({
-            type: "spawn_topology_process",
-            name: re.name,
-            objective: re.objective,
-            model: re.model,
-            priority: re.priority,
-            backend: re.backend,
-          });
-          break;
-        case "kill_process":
-          effects.push({ type: "kill_process", pid: re.pid, name: re.name });
-          break;
-        case "drain_process":
-          effects.push({ type: "drain_process", pid: re.pid, name: re.name });
-          break;
-        case "activate_process":
-          if (re.pid) {
-            effects.push({ type: "activate_process", pid: re.pid });
-          }
-          break;
-        case "emit_protocol":
-          effects.push({ type: "emit_protocol", action: re.action, message: re.message });
-          break;
-      }
-    }
+    const result = reconcileTopologyInto(state, event.topology, effects);
+    return [result.state, assignEffectSeqs(result.effects)];
   }
 
   return [state, assignEffectSeqs(effects)];
+}
+
+// ---------------------------------------------------------------------------
+// Metacog Response Received Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Absorbs kernel.ts parseMetacogResponse() + topology reconciliation.
+ * Parses raw metacog JSON, detects format (topology vs legacy), processes
+ * topology/memory/halt, records history, clears inflight flag.
+ */
+function handleMetacogResponseReceived(
+  state: KernelState,
+  event: MetacogResponseReceivedEvent,
+): TransitionResult {
+  // Always clear inflight
+  let newState: KernelState = { ...state, metacogInflight: false };
+
+  // Parse JSON
+  let parsed: any;
+  try {
+    parsed = JSON.parse(event.response);
+  } catch {
+    // Non-JSON response — emit error, clear triggers, increment eval count
+    return [
+      {
+        ...newState,
+        pendingTriggers: [],
+        metacogEvalCount: newState.metacogEvalCount + 1,
+        lastMetacogTick: newState.tickCount,
+      },
+      assignEffectSeqs([{
+        type: "emit_protocol",
+        action: "os_metacog_error",
+        message: "metacog response was not valid JSON",
+      }]),
+    ];
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return [
+      {
+        ...newState,
+        pendingTriggers: [],
+        metacogEvalCount: newState.metacogEvalCount + 1,
+        lastMetacogTick: newState.tickCount,
+      },
+      assignEffectSeqs([{
+        type: "emit_protocol",
+        action: "os_metacog_error",
+        message: "metacog response was not a valid object",
+      }]),
+    ];
+  }
+
+  // Detect format: topology-based vs legacy commands-based
+  const isTopologyFormat = "topology" in parsed || "memory" in parsed;
+
+  if (!isTopologyFormat) {
+    // Legacy commands-based format — graceful passthrough
+    const effects: KernelEffectInput[] = [{
+      type: "emit_protocol",
+      action: "os_metacog",
+      message: `legacy commands format: ${Array.isArray(parsed.commands) ? parsed.commands.length : 0} commands`,
+    }];
+    return [
+      {
+        ...newState,
+        pendingTriggers: [],
+        metacogEvalCount: newState.metacogEvalCount + 1,
+        lastMetacogTick: newState.tickCount,
+      },
+      assignEffectSeqs(effects),
+    ];
+  }
+
+  // ── Topology format: { assessment, topology, memory, halt, citedHeuristicIds } ──
+  const topology: TopologyExpr | null = parsed.topology ?? null;
+  const memory: MetacogMemoryCommand[] = Array.isArray(parsed.memory) ? parsed.memory : [];
+  const halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null = parsed.halt ?? null;
+  const assessment: string = parsed.assessment ?? "";
+
+  const effects: KernelEffectInput[] = [];
+
+  // Record in metacogHistory
+  const syntheticCommands: MetacogCommand[] = [];
+  if (topology !== null) {
+    syntheticCommands.push({ kind: "noop", reason: "topology declared" } as any);
+  }
+  for (const m of memory) {
+    syntheticCommands.push(m as any);
+  }
+  if (halt) {
+    syntheticCommands.push({ kind: "halt", status: halt.status, summary: halt.summary, reason: halt.summary } as any);
+  }
+
+  const historyEntry: MetacogHistoryEntry = {
+    tick: newState.tickCount,
+    assessment,
+    commands: syntheticCommands,
+    trigger: newState.pendingTriggers.length > 0 ? newState.pendingTriggers[0] : undefined,
+  };
+
+  const metacogHistory = [...newState.metacogHistory, historyEntry];
+  const historyWindow = newState.config.awareness.historyWindow ?? 50;
+  const cappedHistory = metacogHistory.length > historyWindow
+    ? metacogHistory.slice(-historyWindow)
+    : metacogHistory;
+
+  // Emit observability protocol event
+  effects.push({
+    type: "emit_protocol",
+    action: "os_metacog",
+    message: `assessment=${assessment.slice(0, 100)} topology=${topology !== null ? "declared" : "null"} memory=${memory.length} halt=${halt?.status ?? "none"}`,
+  });
+
+  // Update state with history, cleared triggers, incremented eval count
+  newState = {
+    ...newState,
+    metacogHistory: cappedHistory,
+    pendingTriggers: [],
+    metacogEvalCount: newState.metacogEvalCount + 1,
+    lastMetacogTick: newState.tickCount,
+  };
+
+  // Handle halt
+  if (halt) {
+    return haltWith(
+      newState,
+      `metacog: ${halt.status} — ${halt.summary}`,
+      effects,
+    );
+  }
+
+  // Handle memory commands → persist_memory effects
+  for (const cmd of memory) {
+    effects.push({
+      type: "persist_memory",
+      operation: cmd.kind,
+    });
+  }
+
+  // Handle topology → reconcile
+  if (topology !== null) {
+    const result = reconcileTopologyInto(newState, topology, effects);
+    return [result.state, assignEffectSeqs(result.effects)];
+  }
+
+  return [newState, assignEffectSeqs(effects)];
 }
 
 function assignEffectSeqs(inputs: KernelEffectInput[]): KernelEffect[] {

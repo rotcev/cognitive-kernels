@@ -3733,3 +3733,176 @@ describe("handleTopologyDeclared", () => {
     expect(warnings.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// metacog_response_received
+// ---------------------------------------------------------------------------
+
+describe("transition — metacog_response_received", () => {
+  function metacogResponseEvent(response: string, seq = 0): KernelEvent {
+    return {
+      type: "metacog_response_received",
+      response,
+      timestamp: Date.now(),
+      seq,
+    };
+  }
+
+  test("null topology produces no spawn/kill effects and clears inflight", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const response = JSON.stringify({
+      assessment: "all good",
+      topology: null,
+      memory: [],
+      halt: null,
+    });
+    const [newState, effects] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogInflight).toBe(false);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    const kills = effects.filter(e => e.type === "kill_process");
+    expect(spawns).toHaveLength(0);
+    expect(kills).toHaveLength(0);
+  });
+
+  test("topology with par tasks spawns processes via reconciliation", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const response = JSON.stringify({
+      assessment: "need workers",
+      topology: {
+        type: "par",
+        children: [
+          { type: "task", name: "A", objective: "do A" },
+          { type: "task", name: "B", objective: "do B" },
+        ],
+      },
+      memory: [],
+      halt: null,
+    });
+    const [newState, effects] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogInflight).toBe(false);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(2);
+  });
+
+  test("halt command sets halted state", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const response = JSON.stringify({
+      assessment: "goal achieved",
+      topology: null,
+      memory: [],
+      halt: { status: "achieved", summary: "goal completed" },
+    });
+    const [newState, effects] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.halted).toBe(true);
+    expect(newState.haltReason).toContain("achieved");
+    expect(newState.metacogInflight).toBe(false);
+    const haltEffects = effects.filter(e => e.type === "halt");
+    expect(haltEffects).toHaveLength(1);
+  });
+
+  test("invalid JSON response clears inflight and produces no effects", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const [newState, effects] = transition(state, metacogResponseEvent("not json at all"));
+
+    expect(newState.metacogInflight).toBe(false);
+    // Should produce an error protocol effect
+    const errorEffects = effects.filter(
+      e => e.type === "emit_protocol" && (e as any).action === "os_metacog_error",
+    );
+    expect(errorEffects).toHaveLength(1);
+    // No spawn/kill effects
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(0);
+  });
+
+  test("clears pending triggers after processing", () => {
+    const state = {
+      ...makeState(),
+      metacogInflight: true,
+      pendingTriggers: ["boot", "process_completed"] as any[],
+    };
+    const response = JSON.stringify({
+      assessment: "processed",
+      topology: null,
+      memory: [],
+      halt: null,
+    });
+    const [newState] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.pendingTriggers).toHaveLength(0);
+  });
+
+  test("records metacog history entry with assessment and trigger", () => {
+    const state = {
+      ...makeState(),
+      metacogInflight: true,
+      pendingTriggers: ["boot"] as any[],
+      tickCount: 5,
+    };
+    const response = JSON.stringify({
+      assessment: "system healthy",
+      topology: null,
+      memory: [],
+      halt: null,
+    });
+    const [newState] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogHistory).toHaveLength(1);
+    expect(newState.metacogHistory[0].tick).toBe(5);
+    expect(newState.metacogHistory[0].assessment).toBe("system healthy");
+    expect(newState.metacogHistory[0].trigger).toBe("boot");
+  });
+
+  test("increments metacogEvalCount", () => {
+    const state = {
+      ...makeState(),
+      metacogInflight: true,
+      metacogEvalCount: 3,
+    };
+    const response = JSON.stringify({
+      assessment: "check",
+      topology: null,
+      memory: [],
+      halt: null,
+    });
+    const [newState] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogEvalCount).toBe(4);
+    expect(newState.lastMetacogTick).toBe(state.tickCount);
+  });
+
+  test("legacy commands format is handled gracefully (no crash)", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const response = JSON.stringify({
+      assessment: "legacy",
+      commands: [{ kind: "noop", reason: "test" }],
+    });
+    const [newState, effects] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogInflight).toBe(false);
+    // Should produce a protocol event acknowledging legacy format
+    const protocolEffects = effects.filter(e => e.type === "emit_protocol");
+    expect(protocolEffects.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("memory commands emit persist_memory effects", () => {
+    const state = { ...makeState(), metacogInflight: true };
+    const response = JSON.stringify({
+      assessment: "learning",
+      topology: null,
+      memory: [
+        { kind: "learn", heuristic: "test heuristic", confidence: 0.9, context: "test context" },
+        { kind: "record_strategy", strategy: { id: "s1", name: "test" } },
+      ],
+      halt: null,
+    });
+    const [newState, effects] = transition(state, metacogResponseEvent(response));
+
+    expect(newState.metacogInflight).toBe(false);
+    const memoryEffects = effects.filter(e => e.type === "persist_memory");
+    expect(memoryEffects).toHaveLength(2);
+  });
+});
