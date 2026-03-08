@@ -113,6 +113,23 @@ describe("Event-driven kernel: boot sanity", () => {
 
     kernel.halt("test_complete");
   });
+
+  test("boot emits submit_metacog effect (metacog is the orchestrator)", () => {
+    const kernel = bootKernel();
+    const snap = kernel.snapshot();
+    const names = snap.processes.map((p) => p.name);
+
+    // submit_metacog effect was interpreted: transitionApprovedMetacog flag is set
+    expect(priv(kernel).transitionApprovedMetacog).toBe(true);
+
+    // No goal-orchestrator process — metacog declares topology instead
+    expect(names.find((n: string) => n === "goal-orchestrator")).toBeUndefined();
+
+    // metacog-daemon exists
+    expect(names).toContain("metacog-daemon");
+
+    kernel.halt("test_complete");
+  });
 });
 
 describe("Event-driven kernel: concurrency", () => {

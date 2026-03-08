@@ -3558,4 +3558,138 @@ describe("handleTopologyDeclared", () => {
     const memEffects = effects.filter(e => e.type === "emit_protocol" && (e as any).action === "os_metacog_memory");
     expect(memEffects).toHaveLength(1);
   });
+
+  test("topology with seq: only entry node spawned", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "seq", children: [
+        { type: "task", name: "A", objective: "first" },
+        { type: "task", name: "B", objective: "second" },
+      ]},
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].name).toBe("A");
+  });
+
+  test("topology with gate (unmet): gated nodes not spawned", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "gate",
+        condition: { type: "blackboard_key_exists", key: "data" },
+        child: { type: "task", name: "worker", objective: "process data" },
+      },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(0);
+  });
+
+  test("topology with gate (met): gated nodes spawned", () => {
+    const stateWithBB = { ...makeState(), blackboard: new Map([["data", { value: "test", writtenBy: "system", version: 1 }]]) };
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "gate",
+        condition: { type: "blackboard_key_exists", key: "data" },
+        child: { type: "task", name: "worker", objective: "process data" },
+      },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(stateWithBB, event);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].name).toBe("worker");
+  });
+
+  test("existing process matched by name: no spawn, no kill", () => {
+    const state = addProcess(makeState(), "A", { objective: "do A" });
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "task", name: "A", objective: "do A" },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    const kills = effects.filter(e => e.type === "kill_process");
+    expect(spawns).toHaveLength(0);
+    expect(kills).toHaveLength(0);
+  });
+
+  test("process not in topology: killed", () => {
+    const state = addProcess(
+      addProcess(makeState(), "A"),
+      "B",
+    );
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "task", name: "A", objective: "do A" },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const kills = effects.filter(e => e.type === "kill_process");
+    expect(kills).toHaveLength(1);
+    expect(kills[0].name).toBe("B");
+  });
+
+  test("inflight process not in topology: drained (not killed)", () => {
+    const stateWithProcs = addProcess(
+      addProcess(makeState(), "A"),
+      "B",
+    );
+    // Mark A as inflight (by its pid)
+    const stateWithInflight = { ...stateWithProcs, inflight: new Set(["os-proc-test-A"]) };
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "task", name: "B", objective: "do B" },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(stateWithInflight, event);
+    const drains = effects.filter(e => e.type === "drain_process");
+    const kills = effects.filter(e => e.type === "kill_process");
+    expect(drains).toHaveLength(1);
+    expect(drains[0].name).toBe("A");
+    expect(kills).toHaveLength(0);
+  });
+
+  test("optimizer warnings emitted as protocol effects", () => {
+    const state = makeState();
+    // Create a wide parallel topology (>8 children) to trigger width warning
+    const children = Array.from({ length: 10 }, (_, i) => ({
+      type: "task" as const, name: `T${i}`, objective: `task ${i}`,
+    }));
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "par", children },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const warnings = effects.filter(e => e.type === "emit_protocol" && (e as any).action === "os_topology_warning");
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+  });
 });
