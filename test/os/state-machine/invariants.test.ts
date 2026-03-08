@@ -257,8 +257,8 @@ describe("Transition invariants (property-based)", () => {
             type: "boot", goal, timestamp: Date.now(), seq: 0,
           });
 
-          // Boot always creates at least 2 processes (orchestrator + metacog)
-          expect(newState.processes.size).toBeGreaterThanOrEqual(2);
+          // Boot always creates at least 1 process (metacog-daemon)
+          expect(newState.processes.size).toBeGreaterThanOrEqual(1);
 
           // Boot produces emit_protocol effects (no submit_llm — tick loop handles that)
           expect(effects.some(e => e.type === "emit_protocol")).toBe(true);

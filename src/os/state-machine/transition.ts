@@ -99,32 +99,10 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     });
   }
 
-  // Spawn goal-orchestrator
-  const orchestratorPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-  const orchestrator: OsProcess = {
-    pid: orchestratorPid,
-    type: "lifecycle",
-    state: "running",
-    name: "goal-orchestrator",
-    parentPid: null,
-    objective: event.goal,
-    priority: 90,
-    spawnedAt: now,
-    lastActiveAt: now,
-    tickCount: 0,
-    tokensUsed: 0,
-    model: state.config.kernel.processModel,
-    workingDir,
-    children: [],
-    onParentDeath: "orphan",
-    restartPolicy: "never",
-  };
-  processes.set(orchestratorPid, orchestrator);
-
+  // Trigger metacog to evaluate immediately after boot and declare initial topology
   effects.push({
-    type: "emit_protocol",
-    action: "os_process_spawn",
-    message: "boot goal-orchestrator",
+    type: "submit_metacog",
+    triggerCount: 0,
   });
 
   // NOTE: No submit_llm effect here — boot only sets up the process topology.
@@ -842,11 +820,10 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
       }
 
       case "exit": {
-        // Executive Exit Prevention — orchestrator must not exit while topology is active
+        // Executive Exit Prevention — root lifecycle process must not exit while topology is active
         if (
           !updatedProc.parentPid &&
-          updatedProc.type === "lifecycle" &&
-          updatedProc.name === "goal-orchestrator"
+          updatedProc.type === "lifecycle"
         ) {
           const livingChildren = [...processes.values()].filter(
             p => p.parentPid === event.pid && p.state !== "dead"
@@ -1471,66 +1448,7 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     }
   }
 
-  // 5. Dead executive recovery
-  const deadOrchestrator = [...processes.values()].find(
-    p => !p.parentPid && p.type === "lifecycle" && p.state === "dead" && p.name === "goal-orchestrator"
-  );
-  if (deadOrchestrator) {
-    const livingGoalProcesses = [...processes.values()].filter(
-      p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type === "lifecycle"
-    );
-    const hasPendingDeferrals = deferrals.size > 0;
-
-    if (livingGoalProcesses.length > 0 || hasPendingDeferrals) {
-      // Respawn orchestrator
-      const newOrchPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      const newOrch: OsProcess = {
-        pid: newOrchPid,
-        type: "lifecycle",
-        state: "running",
-        name: "goal-orchestrator",
-        parentPid: null,
-        objective: state.goal,
-        priority: deadOrchestrator.priority,
-        spawnedAt: now,
-        lastActiveAt: now,
-        tickCount: 0,
-        tokensUsed: 0,
-        model: deadOrchestrator.model,
-        workingDir: deadOrchestrator.workingDir,
-        children: [],
-        onParentDeath: "orphan",
-        restartPolicy: "never",
-      };
-
-      // Reparent orphaned lifecycle children
-      for (const proc of livingGoalProcesses) {
-        if (!proc.parentPid && proc.type === "lifecycle") {
-          const updated = { ...proc, parentPid: newOrchPid };
-          processes.set(proc.pid, updated);
-          newOrch.children.push(proc.pid);
-        }
-      }
-
-      processes.set(newOrchPid, newOrch);
-      pendingTriggers.push("process_failed");
-
-      effects.push({
-        type: "submit_llm",
-        pid: newOrchPid,
-        name: "goal-orchestrator",
-        model: newOrch.model,
-      });
-
-      effects.push({
-        type: "emit_protocol",
-        action: "os_process_event",
-        message: `dead_executive_recovery: restarted orchestrator as ${newOrchPid}, reparented ${livingGoalProcesses.filter(p => p.type === "lifecycle").length} orphans, ${deferrals.size} deferrals pending`,
-      });
-    }
-  }
-
-  // 6. Zombie reaping — reparent orphaned children of dead processes to root
+  // 5. Zombie reaping — reparent orphaned children of dead processes to root
   const rootPid = [...processes.values()].find(p => !p.parentPid && p.type === "lifecycle")?.pid;
   for (const [pid, proc] of processes) {
     if (proc.state === "dead" && proc.children.length > 0) {
@@ -2108,8 +2026,7 @@ function learnedSelect(
   for (const proc of runnable) {
     const isSynthesis =
       proc.name.includes("synth") ||
-      proc.name.includes("consolidat") ||
-      (proc.name === "goal-orchestrator" && proc.tickCount > 0);
+      proc.name.includes("consolidat");
 
     if (isSynthesis) {
       const siblings = allProcesses.filter(

@@ -49,17 +49,33 @@ function makeTestConfig() {
 }
 
 describe("OsKernel executive exit prevention", () => {
-  test("orchestrator with pending deferrals and no children wakes on tick as well as child completion", async () => {
+  test("root lifecycle process with pending deferrals and no children wakes on tick as well as child completion", async () => {
     const kernel = new OsKernel(makeTestConfig(), new MockBrain(), tmpDir);
     kernel.boot("Test exit prevention with deferrals");
 
-    const orchestrator = kernel.snapshot().processes.find((process) => process.name === "goal-orchestrator");
-    expect(orchestrator).toBeDefined();
+    // Manually add a root lifecycle process since boot no longer creates goal-orchestrator
+    const testPid = "os-proc-test-root";
+    (kernel as any).table.addDirect({
+      pid: testPid,
+      type: "lifecycle",
+      state: "running",
+      name: "test-root",
+      parentPid: null,
+      objective: "Test exit prevention with deferrals",
+      priority: 90,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 1, // Already past first tick to bypass hard-spawn enforcement
+      tokensUsed: 0,
+      model: makeTestConfig().kernel.processModel,
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan",
+      restartPolicy: "never",
+    });
 
-    // Simulate the orchestrator having already completed tick 1 (with spawns)
-    // so we bypass the hard-spawn enforcement that rejects exit on first tick
-    const orchProc = (kernel as any).table.get(orchestrator!.pid);
-    orchProc.tickCount = 1;
+    const orchestrator = kernel.snapshot().processes.find((process) => process.name === "test-root");
+    expect(orchestrator).toBeDefined();
 
     // Register a deferral via metacog command
     await (kernel as any).executeMetacogCommand({

@@ -26,7 +26,7 @@ describe("Replay harness", () => {
     expect(result.eventCount).toBe(3);
     expect(result.stateHistory).toHaveLength(3);
     expect(result.finalState.goal).toBe("test replay");
-    expect(result.finalState.processes.size).toBe(2); // orchestrator + metacog
+    expect(result.finalState.processes.size).toBe(1); // metacog-daemon (no goal-orchestrator)
     expect(result.effectLog.length).toBeGreaterThan(0);
   });
 
@@ -60,7 +60,7 @@ describe("Replay harness", () => {
 
     // Step 0: after boot
     expect(result.stateHistory[0].state.goal).toBe("time travel test");
-    expect(result.stateHistory[0].state.processes.size).toBe(2);
+    expect(result.stateHistory[0].state.processes.size).toBe(1); // metacog-daemon only
 
     // Step 1: after halt_check
     expect(result.stateHistory[1].state.halted).toBe(false); // under budget

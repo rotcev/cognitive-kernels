@@ -108,8 +108,8 @@ describe("Event-driven kernel: boot sanity", () => {
     const snap = kernel.snapshot();
     const names = snap.processes.map((p) => p.name);
 
-    expect(names).toContain("goal-orchestrator");
     expect(names).toContain("metacog-daemon");
+    // goal-orchestrator no longer spawned at boot — metacog declares topology
 
     kernel.halt("test_complete");
   });

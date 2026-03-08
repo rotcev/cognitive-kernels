@@ -24,6 +24,32 @@ function timerEvent(timer: "housekeep" | "snapshot" | "metacog" | "watchdog", ex
   return { type: "timer_fired", timer, timestamp: Date.now(), seq: 0, ...extra };
 }
 
+function addProcess(state: KernelState, name: string, overrides?: Partial<import("../../../src/os/types.js").OsProcess>): KernelState {
+  const pid = `os-proc-test-${name}`;
+  const proc: import("../../../src/os/types.js").OsProcess = {
+    pid,
+    type: "lifecycle" as const,
+    state: "running" as const,
+    name,
+    parentPid: null,
+    objective: "test objective",
+    priority: 70,
+    spawnedAt: new Date().toISOString(),
+    lastActiveAt: new Date().toISOString(),
+    tickCount: 0,
+    tokensUsed: 0,
+    model: state.config.kernel.processModel,
+    workingDir: "/tmp",
+    children: [] as string[],
+    onParentDeath: "orphan" as const,
+    restartPolicy: "never" as const,
+    ...overrides,
+  };
+  const processes = new Map(state.processes);
+  processes.set(pid, proc);
+  return { ...state, processes };
+}
+
 describe("transition — boot", () => {
   test("boot sets goal on state", () => {
     const state = makeState();
@@ -32,33 +58,35 @@ describe("transition — boot", () => {
     expect(newState.goal).toBe("build a calculator");
   });
 
-  test("boot creates goal-orchestrator and metacog-daemon processes", () => {
+  test("boot creates metacog-daemon and emits submit_metacog", () => {
     const state = makeState();
-    const [newState] = transition(state, bootEvent());
+    const [newState, effects] = transition(state, bootEvent());
 
-    expect(newState.processes.size).toBe(2);
+    expect(newState.processes.size).toBe(1);
 
     const procs = [...newState.processes.values()];
-    const orchestrator = procs.find(p => p.name === "goal-orchestrator");
     const metacog = procs.find(p => p.name === "metacog-daemon");
-
-    expect(orchestrator).toBeDefined();
-    expect(orchestrator!.type).toBe("lifecycle");
-    expect(orchestrator!.state).toBe("running");
-    expect(orchestrator!.priority).toBe(90);
 
     expect(metacog).toBeDefined();
     expect(metacog!.type).toBe("daemon");
     expect(metacog!.state).toBe("idle");
     expect(metacog!.priority).toBe(50);
+
+    // submit_metacog effect is emitted so metacog evaluates immediately after boot
+    const submitMetacog = effects.find(e => e.type === "submit_metacog");
+    expect(submitMetacog).toBeDefined();
   });
 
-  test("boot produces emit_protocol effects (no submit_llm — tick loop handles submission)", () => {
+  test("boot produces emit_protocol and submit_metacog effects (no submit_llm — tick loop handles submission)", () => {
     const state = makeState();
     const [, effects] = transition(state, bootEvent());
 
     const spawnEffects = effects.filter(e => e.type === "emit_protocol");
     expect(spawnEffects.length).toBeGreaterThanOrEqual(1);
+
+    // Boot emits submit_metacog so metacog declares initial topology
+    const metacogEffects = effects.filter(e => e.type === "submit_metacog");
+    expect(metacogEffects).toHaveLength(1);
 
     // Boot does NOT emit submit_llm — process scheduling happens in the tick loop
     const submitEffects = effects.filter(e => e.type === "submit_llm");
@@ -396,18 +424,19 @@ describe("transition — integration roundtrip", () => {
     // 1. Boot
     const [s1, e1] = transition(state, { type: "boot", goal: "test", timestamp: Date.now(), seq: seq++ });
     expect(s1.goal).toBe("test");
-    expect(s1.processes.size).toBe(2);
+    expect(s1.processes.size).toBe(1); // just metacog-daemon
     expect(e1.some(e => e.type === "emit_protocol")).toBe(true);
 
-    // 2. Orchestrator completes first turn with spawn (50 tokens used)
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
-    const [s2] = transition(s1, {
+    // 2. Add a worker process and have it complete with spawn (50 tokens used)
+    const s1WithProc = addProcess(s1, "worker-A", { priority: 90 });
+    const orch = [...s1WithProc.processes.values()].find(p => p.name === "worker-A")!;
+    const [s2] = transition(s1WithProc, {
       type: "process_completed", pid: orch.pid, name: orch.name,
       success: true, commandCount: 1, tokensUsed: 50,
       commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
       response: "", timestamp: Date.now(), seq: seq++,
     });
-    expect(s2.processes.size).toBe(3); // orch + metacog + w1
+    expect(s2.processes.size).toBe(3); // worker-A + metacog + w1
     expect(s2.processes.get(orch.pid)!.tokensUsed).toBe(50);
 
     // 3. Halt check — should not halt (50 < 200 budget)
@@ -480,8 +509,9 @@ describe("transition — integration roundtrip", () => {
 // ---------------------------------------------------------------------------
 
 function bootAndGetOrchestrator(overrides?: Parameters<typeof makeState>[0]): { state: KernelState; orchestratorPid: string } {
-  const [state] = transition(makeState(overrides), bootEvent("test"));
-  const orchestrator = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!;
+  const [bootState] = transition(makeState(overrides), bootEvent("test"));
+  const state = addProcess(bootState, "worker-A", { priority: 90 });
+  const orchestrator = [...state.processes.values()].find(p => p.name === "worker-A")!;
   return { state, orchestratorPid: orchestrator.pid };
 }
 
@@ -832,8 +862,9 @@ describe("transition — process_completed spawn_system / spawn_kernel", () => {
       kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
       systemProcess: { enabled: true, maxSystemProcesses: 5 },
     });
-    const [state] = transition(initialState(config, "test"), bootEvent("test"));
-    const orchestratorPid = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!.pid;
+    const [bootState] = transition(initialState(config, "test"), bootEvent("test"));
+    const state = addProcess(bootState, "worker-A", { priority: 90 });
+    const orchestratorPid = [...state.processes.values()].find(p => p.name === "worker-A")!.pid;
 
     const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
       commands: [
@@ -853,8 +884,9 @@ describe("transition — process_completed spawn_system / spawn_kernel", () => {
       kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
       systemProcess: { enabled: false },
     });
-    const [state] = transition(initialState(config, "test"), bootEvent("test"));
-    const orchestratorPid = [...state.processes.values()].find(p => p.name === "goal-orchestrator")!.pid;
+    const [bootState] = transition(initialState(config, "test"), bootEvent("test"));
+    const state = addProcess(bootState, "worker-A", { priority: 90 });
+    const orchestratorPid = [...state.processes.values()].find(p => p.name === "worker-A")!.pid;
 
     const [, effects] = transition(state, processCompletedEvent(orchestratorPid, {
       commands: [
@@ -890,8 +922,9 @@ describe("transition — process_completed spawn_system / spawn_kernel", () => {
 describe("transition — ephemeral_completed", () => {
   function setupWithEphemeral() {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     // Manually add an ephemeral process to the state
     const ephPid = "eph-proc-1";
@@ -1043,10 +1076,11 @@ describe("transition — timer_fired (housekeep)", () => {
 
   test("housekeep wakes expired sleepers", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
-    // Put orchestrator to sleep (already expired)
+    // Put worker to sleep (already expired)
     const processes = new Map(s1.processes);
     processes.set(orch.pid, {
       ...orch,
@@ -1061,8 +1095,9 @@ describe("transition — timer_fired (housekeep)", () => {
 
   test("housekeep restores checkpointed processes", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "checkpoint" as const });
@@ -1074,10 +1109,11 @@ describe("transition — timer_fired (housekeep)", () => {
 
   test("housekeep stall detection force-wakes idle processes", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
-    // Set up stall conditions: no inflight, orchestrator idle, 3+ idle ticks
+    // Set up stall conditions: no inflight, worker idle, 3+ idle ticks
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "idle" as const });
     const stallState = {
@@ -1092,48 +1128,6 @@ describe("transition — timer_fired (housekeep)", () => {
     expect(s2.processes.get(orch.pid)?.state).toBe("running");
     expect(s2.consecutiveIdleTicks).toBe(0);
     expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("stall_detected"))).toBe(true);
-  });
-
-  test("housekeep dead executive recovery respawns orchestrator", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
-
-    // Kill orchestrator, add a living child
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "dead" as const, exitReason: "test" });
-    const childPid = "child-1";
-    processes.set(childPid, {
-      pid: childPid,
-      type: "lifecycle" as const,
-      state: "running" as const,
-      name: "worker-1",
-      parentPid: null,
-      objective: "work",
-      priority: 50,
-      spawnedAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
-      tickCount: 0,
-      tokensUsed: 0,
-      model: "gpt-4",
-      workingDir: "/tmp",
-      children: [],
-      onParentDeath: "orphan" as const,
-      restartPolicy: "never" as const,
-    });
-
-    const [s2, effects] = transition({ ...s1, processes }, timerEvent("housekeep"));
-
-    // New orchestrator should exist
-    const newOrch = [...s2.processes.values()].find(
-      p => p.name === "goal-orchestrator" && p.state === "running"
-    );
-    expect(newOrch).toBeDefined();
-    expect(newOrch!.pid).not.toBe(orch.pid);
-
-    // submit_llm effect for new orchestrator
-    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
-    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("dead_executive_recovery"))).toBe(true);
   });
 
   test("snapshot timer emits persist_snapshot effect", () => {
@@ -1270,7 +1264,8 @@ describe("transition — awareness_evaluated", () => {
 describe("transition — shell_output", () => {
   test("shell exit marks process dead and writes bb entry", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
 
     // Add a shell process
     const processes = new Map(s1.processes);
@@ -1280,7 +1275,7 @@ describe("transition — shell_output", () => {
       type: "lifecycle" as const,
       state: "running" as const,
       name: "dev-server",
-      parentPid: [...s1.processes.values()].find(p => p.name === "goal-orchestrator")?.pid ?? null,
+      parentPid: [...s1.processes.values()].find(p => p.name === "worker-A")?.pid ?? null,
       objective: "Run dev server",
       priority: 50,
       spawnedAt: new Date().toISOString(),
@@ -1412,8 +1407,9 @@ describe("transition — shell_output", () => {
 
   test("shell exit emits activate_process for parent", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     const shellPid = "shell-004";
@@ -1573,8 +1569,9 @@ describe("transition — deferral processing", () => {
 
   test("process_completed triggers process_dead deferral", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     // Add a worker process
     const processes = new Map(s1.processes);
@@ -1780,8 +1777,9 @@ describe("transition — deferral processing", () => {
 
   test("process_dead_by_name triggers when all matching processes are dead", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     // Add two workers with the same name
     const processes = new Map(s1.processes);
@@ -1818,8 +1816,9 @@ describe("transition — deferral processing", () => {
 
   test("process_dead_by_name does NOT trigger when some matching processes still alive", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set("w1", {
@@ -2006,8 +2005,9 @@ describe("transition — deferral processing", () => {
 
   test("deferral-spawned process is registered as child of parent", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
     deferrals.set("defer-child", makeDeferral({
@@ -2239,8 +2239,9 @@ describe("transition — typed effects: signal_emit command emits signal_emit ef
 describe("transition — typed effects: ephemeral_completed emits signal_emit + flush_ipc", () => {
   function setupWithEphemeral() {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const ephPid = "eph-typed-1";
     const processes = new Map(s1.processes);
@@ -2345,11 +2346,12 @@ describe("transition — typed effects: ephemeral_completed emits signal_emit + 
 describe("transition — typed effects: housekeep stall detection emits activate_process", () => {
   test("stall detection emits activate_process for each idle process", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
     const metacog = [...s1.processes.values()].find(p => p.name === "metacog-daemon")!;
 
-    // Set up: orchestrator and metacog both idle, stall conditions met
+    // Set up: worker and metacog both idle, stall conditions met
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "idle" as const });
     processes.set(metacog.pid, { ...metacog, state: "idle" as const });
@@ -2364,7 +2366,7 @@ describe("transition — typed effects: housekeep stall detection emits activate
     const [, effects] = transition(stallState, timerEvent("housekeep"));
 
     const activateEffects = effects.filter(e => e.type === "activate_process");
-    expect(activateEffects.length).toBe(2); // both orch and metacog
+    expect(activateEffects.length).toBe(2); // both worker and metacog
     const activatedPids = activateEffects.map(e => e.type === "activate_process" ? e.pid : "");
     expect(activatedPids).toContain(orch.pid);
     expect(activatedPids).toContain(metacog.pid);
@@ -2372,8 +2374,9 @@ describe("transition — typed effects: housekeep stall detection emits activate
 
   test("no stall detection when inflight work exists", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "idle" as const });
@@ -2458,15 +2461,16 @@ describe("transition — typed effects: housekeep cadence signals emit signal_em
 });
 
 describe("transition — typed effects: housekeep deadlock detection emits activate_process", () => {
-  test("deadlock detection emits activate_process for idle orchestrator", () => {
+  test("deadlock detection emits activate_process for idle root process", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
-    // Set up: orchestrator idle with tick >= 1, no living workers, no ephemerals
+    // Set up: worker idle with tick >= 1, no living workers, no ephemerals
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
-    // Kill or remove any non-daemon, non-orchestrator processes
+    // Kill or remove any non-daemon, non-worker-A processes
     for (const [pid, proc] of processes) {
       if (pid !== orch.pid && proc.type !== "daemon") {
         processes.set(pid, { ...proc, state: "dead" as const });
@@ -2494,12 +2498,13 @@ describe("transition — typed effects: housekeep deadlock detection emits activ
     expect(activateEffect!.type === "activate_process" && activateEffect!.pid).toBe(orch.pid);
   });
 
-  test("no deadlock detection when orchestrator is running", () => {
+  test("no deadlock detection when root process is running", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
-    // Orchestrator is running, not idle
+    // Worker is running, not idle
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
 
@@ -2519,8 +2524,9 @@ describe("transition — typed effects: housekeep deadlock detection emits activ
 
   test("no deadlock detection when living workers exist", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
@@ -2553,10 +2559,11 @@ describe("transition — typed effects: housekeep deadlock detection emits activ
 describe("transition — Wave 2: parent wake via activate_process on child exit", () => {
   test("child exit emits activate_process for idle parent", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
-    // Set up: orchestrator is idle, has a running child
+    // Set up: parent is idle, has a running child
     const processes = new Map(s1.processes);
     processes.set(orch.pid, {
       ...orch,
@@ -2604,8 +2611,9 @@ describe("transition — Wave 2: parent wake via activate_process on child exit"
 
   test("child failure emits activate_process for idle parent", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set(orch.pid, {
@@ -2654,8 +2662,9 @@ describe("transition — Wave 2: parent wake via activate_process on child exit"
 
   test("no activate_process for already-running parent when child exits", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     // Parent is already running
@@ -2879,10 +2888,11 @@ describe("transition — Wave 2: checkpoint restoration emits activate_process",
 });
 
 describe("transition — Wave 2: executive exit prevention emits idle_process", () => {
-  test("orchestrator prevented from exiting emits idle_process with wakeOnSignals", () => {
+  test("root lifecycle process prevented from exiting emits idle_process with wakeOnSignals", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent());
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent());
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
     processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
@@ -2897,11 +2907,11 @@ describe("transition — Wave 2: executive exit prevention emits idle_process", 
 
     const stateWithChildren = { ...s1, processes };
 
-    // Orchestrator tries to exit
+    // Root process tries to exit
     const event: KernelEvent = {
       type: "process_completed",
       pid: orch.pid,
-      name: "goal-orchestrator",
+      name: "worker-A",
       success: true,
       commandCount: 1,
       tokensUsed: 50,
@@ -2913,7 +2923,7 @@ describe("transition — Wave 2: executive exit prevention emits idle_process", 
 
     const [newState, effects] = transition(stateWithChildren, event);
 
-    // Orchestrator should be idle (exit prevented)
+    // Root process should be idle (exit prevented)
     const orchState = newState.processes.get(orch.pid);
     expect(orchState?.state).toBe("idle");
 
@@ -2932,8 +2942,9 @@ describe("transition — Wave 2: executive exit prevention emits idle_process", 
 describe("transition — housekeep zombie reaping", () => {
   test("dead parent's living children are reparented to root", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent("test"));
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
 
@@ -2982,8 +2993,9 @@ describe("transition — housekeep zombie reaping", () => {
 
   test("dead parent with only dead children does not trigger reparenting", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s1boot] = transition(state, bootEvent("test"));
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
+    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
 
     const processes = new Map(s1.processes);
 
@@ -3379,16 +3391,17 @@ describe("selectRunnable — pure scheduling (Wave 4)", () => {
 describe("transition — housekeep scheduling (Wave 4)", () => {
   test("handleHousekeep emits submit_llm effects for runnable processes", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
+    const [s1boot] = transition(state, bootEvent("test"));
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
 
-    // goal-orchestrator is in "running" state after boot
-    const orchestrator = [...s1.processes.values()].find(p => p.name === "goal-orchestrator");
+    // worker-A is in "running" state after addProcess
+    const orchestrator = [...s1.processes.values()].find(p => p.name === "worker-A");
     expect(orchestrator).toBeDefined();
     expect(orchestrator!.state).toBe("running");
 
     const [, effects] = transition(s1, timerEvent("housekeep"));
 
-    // Should emit submit_llm for the running goal-orchestrator
+    // Should emit submit_llm for the running worker-A
     const submitEffects = effects.filter(e => e.type === "submit_llm");
     expect(submitEffects.length).toBeGreaterThanOrEqual(1);
 
@@ -3398,12 +3411,13 @@ describe("transition — housekeep scheduling (Wave 4)", () => {
 
   test("inflight processes are excluded from scheduling submission", () => {
     const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
+    const [s1boot] = transition(state, bootEvent("test"));
+    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
 
-    const orchestrator = [...s1.processes.values()].find(p => p.name === "goal-orchestrator");
+    const orchestrator = [...s1.processes.values()].find(p => p.name === "worker-A");
     expect(orchestrator).toBeDefined();
 
-    // Mark orchestrator as inflight
+    // Mark worker as inflight
     const stateWithInflight = {
       ...s1,
       inflight: new Set([orchestrator!.pid]),
@@ -3411,7 +3425,7 @@ describe("transition — housekeep scheduling (Wave 4)", () => {
 
     const [, effects] = transition(stateWithInflight, timerEvent("housekeep"));
 
-    // submit_llm should NOT contain the inflight orchestrator
+    // submit_llm should NOT contain the inflight worker
     const orchSubmits = effects.filter(
       e => e.type === "submit_llm" && "pid" in e && e.pid === orchestrator!.pid
     );

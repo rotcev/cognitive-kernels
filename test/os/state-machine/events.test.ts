@@ -117,8 +117,27 @@ describe("Kernel event log", () => {
     // Stub scheduling pass to prevent infinite re-submission loop
     k.doSchedulingPass = () => {};
 
-    // Find the goal-orchestrator process and submit it directly
-    const proc = k.table.getAll().find((p: any) => p.name === "goal-orchestrator");
+    // Add a test process manually since boot no longer creates goal-orchestrator
+    const testPid = "test-proc-1";
+    k.table.addDirect({
+      pid: testPid,
+      type: "lifecycle",
+      state: "running",
+      name: "test-worker",
+      parentPid: null,
+      objective: "test",
+      priority: 70,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: config.kernel.processModel,
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan",
+      restartPolicy: "never",
+    });
+    const proc = k.table.get(testPid);
     expect(proc).toBeTruthy();
     k.submitProcess(proc);
 
@@ -153,11 +172,29 @@ describe("Kernel event log", () => {
     const k = kernel as any;
     k.doSchedulingPass = () => {};
 
-    const proc = k.table.getAll().find((p: any) => p.name === "goal-orchestrator");
-    expect(proc).toBeTruthy();
+    // Add a test process manually since boot no longer creates goal-orchestrator
+    const testPid = "test-proc-complete";
+    k.table.addDirect({
+      pid: testPid,
+      type: "lifecycle",
+      state: "running",
+      name: "test-worker",
+      parentPid: null,
+      objective: "test",
+      priority: 70,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: config.kernel.processModel,
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan",
+      restartPolicy: "never",
+    });
 
     await k.onProcessComplete({
-      pid: proc.pid,
+      pid: testPid,
       success: true,
       response: "test",
       tokensUsed: 500,
@@ -168,8 +205,8 @@ describe("Kernel event log", () => {
     const completed = log.filter((e: any) => e.type === "process_completed");
     expect(completed.length).toBe(1);
     const evt = completed[0] as any;
-    expect(evt.pid).toBe(proc.pid);
-    expect(evt.name).toBe("goal-orchestrator");
+    expect(evt.pid).toBe(testPid);
+    expect(evt.name).toBe("test-worker");
     expect(evt.success).toBe(true);
     expect(evt.tokensUsed).toBe(500);
     expect(evt.commandCount).toBe(1);

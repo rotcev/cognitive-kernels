@@ -138,15 +138,14 @@ describe("Kernel effect log", () => {
     expect(typeof first.seq).toBe("number");
   });
 
-  test("boot collects emit_protocol effect for os_process_spawn", () => {
+  test("boot collects submit_metacog effect for immediate metacog evaluation", () => {
     const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
     const kernel = new OsKernel(config, new MockBrain(), tmpDir);
     kernel.boot("Test goal");
 
     const effects = kernel.getEffectLog();
-    const spawns = effects.filter((e: any) => e.type === "emit_protocol" && e.action === "os_process_spawn");
-    expect(spawns.length).toBeGreaterThanOrEqual(1);
-    expect((spawns[0] as any).message).toContain("goal-orchestrator");
+    const metacogEffects = effects.filter((e: any) => e.type === "submit_metacog");
+    expect(metacogEffects.length).toBeGreaterThanOrEqual(1);
   });
 
   test("emitProtocol collects emit_protocol effect", () => {
@@ -345,9 +344,9 @@ describe("Effect log integration", () => {
     const protocolEffects = effects.filter((e: any) => e.type === "emit_protocol");
     expect(protocolEffects.length).toBeGreaterThanOrEqual(1);
 
-    // Should have submit_llm effects (goal-orchestrator gets submitted)
-    const submitEffects = effects.filter((e: any) => e.type === "submit_llm");
-    expect(submitEffects.length).toBeGreaterThanOrEqual(1);
+    // Should have submit_metacog effects (boot triggers immediate metacog evaluation)
+    const metacogEffects = effects.filter((e: any) => e.type === "submit_metacog");
+    expect(metacogEffects.length).toBeGreaterThanOrEqual(1);
 
     // Log the effect type distribution for debugging
     const typeCounts: Record<string, number> = {};
