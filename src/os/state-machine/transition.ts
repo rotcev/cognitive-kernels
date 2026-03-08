@@ -11,7 +11,7 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport } from "../types.js";
 import { randomUUID } from "node:crypto";
@@ -32,6 +32,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleExternalCommand(state, event);
     case "process_completed":
       return handleProcessCompleted(state, event);
+    case "ephemeral_completed":
+      return handleEphemeralCompleted(state, event);
     default:
       // Unhandled events are no-ops — the kernel class still handles them
       // via its existing code paths (strangler pattern).
@@ -47,10 +49,42 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
   const effects: KernelEffectInput[] = [];
   const processes = new Map(state.processes);
   const blackboard = new Map(state.blackboard);
+  const workingDir = event.workingDir ?? "/tmp";
+
+  const now = new Date().toISOString();
+
+  // Spawn memory-consolidator daemon (conditionally)
+  if (event.hasNewEpisodicData && event.consolidatorObjective) {
+    const consolidatorPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const consolidator: OsProcess = {
+      pid: consolidatorPid,
+      type: "daemon",
+      state: "running",
+      name: "memory-consolidator",
+      parentPid: null,
+      objective: event.consolidatorObjective,
+      priority: 20,
+      spawnedAt: now,
+      lastActiveAt: now,
+      tickCount: 0,
+      tokensUsed: 0,
+      model: state.config.kernel.processModel,
+      workingDir,
+      children: [],
+      onParentDeath: "orphan",
+      restartPolicy: "never",
+    };
+    processes.set(consolidatorPid, consolidator);
+  } else {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_boot",
+      message: "memory-consolidator skipped: no new episodic data",
+    });
+  }
 
   // Spawn goal-orchestrator
   const orchestratorPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-  const now = new Date().toISOString();
   const orchestrator: OsProcess = {
     pid: orchestratorPid,
     type: "lifecycle",
@@ -64,7 +98,7 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     tickCount: 0,
     tokensUsed: 0,
     model: state.config.kernel.processModel,
-    workingDir: "/tmp",
+    workingDir,
     children: [],
     onParentDeath: "orphan",
     restartPolicy: "never",
@@ -77,12 +111,8 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     message: "boot goal-orchestrator",
   });
 
-  effects.push({
-    type: "submit_llm",
-    pid: orchestratorPid,
-    name: "goal-orchestrator",
-    model: state.config.kernel.processModel,
-  });
+  // NOTE: No submit_llm effect here — boot only sets up the process topology.
+  // The kernel's tick loop / scheduling pass handles actual LLM submission.
 
   // Spawn metacog-daemon
   const metacogPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
@@ -99,12 +129,41 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     tickCount: 0,
     tokensUsed: 0,
     model: state.config.kernel.metacogModel,
-    workingDir: "/tmp",
+    workingDir,
     children: [],
     onParentDeath: "orphan",
     restartPolicy: "always",
   };
   processes.set(metacogPid, metacogDaemon);
+
+  // Spawn awareness-daemon (conditionally)
+  if (event.awarenessEnabled) {
+    const awarenessPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const awarenessDaemon: OsProcess = {
+      pid: awarenessPid,
+      type: "daemon",
+      state: "idle",
+      name: "awareness-daemon",
+      parentPid: null,
+      objective: "Monitor metacog decision quality and inject corrective awareness notes",
+      priority: 30,
+      spawnedAt: now,
+      lastActiveAt: now,
+      tickCount: 0,
+      tokensUsed: 0,
+      model: event.awarenessModel ?? state.config.kernel.processModel,
+      workingDir,
+      children: [],
+      onParentDeath: "orphan",
+      restartPolicy: "on-failure",
+    };
+    processes.set(awarenessPid, awarenessDaemon);
+    effects.push({
+      type: "emit_protocol",
+      action: "os_process_spawn",
+      message: "boot awareness-daemon",
+    });
+  }
 
   // Pre-seed design guidelines on blackboard
   blackboard.set("system:design-guidelines", {
@@ -1039,6 +1098,80 @@ function haltWith(
   ];
   return [
     { ...state, halted: true, haltReason: reason },
+    assignEffectSeqs(effects),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral Completed Handler
+// ---------------------------------------------------------------------------
+
+function handleEphemeralCompleted(state: KernelState, event: EphemeralCompletedEvent): TransitionResult {
+  const effects: KernelEffectInput[] = [];
+  const processes = new Map(state.processes);
+  const blackboard = new Map(state.blackboard);
+
+  // Write ephemeral result to blackboard
+  if (event.tablePid) {
+    const tokensEstimate = event.success
+      ? Math.ceil((event.response?.length ?? 0) / 4)
+      : 0;
+
+    const ephResult = {
+      ephemeralId: event.id,
+      name: event.name,
+      success: event.success,
+      response: event.response ?? "",
+      ...(event.error ? { error: event.error } : {}),
+      durationMs: event.durationMs ?? 0,
+      model: event.model ?? "",
+      tokensEstimate,
+    };
+
+    blackboard.set(`ephemeral:${event.name}:${event.id}`, {
+      value: ephResult,
+      writtenBy: "kernel",
+      version: (blackboard.get(`ephemeral:${event.name}:${event.id}`)?.version ?? 0) + 1,
+    });
+
+    // Kill the process table entry
+    const proc = processes.get(event.tablePid);
+    if (proc) {
+      const updatedProc = { ...proc };
+      updatedProc.state = "dead" as const;
+      updatedProc.exitReason = event.success
+        ? "ephemeral completed"
+        : `ephemeral failed: ${event.error ?? "unknown"}`;
+      processes.set(event.tablePid, updatedProc);
+    }
+
+    // Protocol effects
+    effects.push({
+      type: "emit_protocol",
+      action: "os_process_exit",
+      message: event.success
+        ? `completed duration=${event.durationMs ?? 0}ms`
+        : `failed: ${event.error ?? "unknown"}`,
+    });
+
+    effects.push({
+      type: "emit_protocol",
+      action: "os_ephemeral_spawn",
+      message: event.success
+        ? `parent=${event.parentPid ?? "unknown"} model=${event.model ?? ""} duration=${event.durationMs ?? 0}ms`
+        : `parent=${event.parentPid ?? "unknown"} error=${event.error ?? "unknown"}`,
+    });
+
+    // Signal for waking parent
+    effects.push({
+      type: "emit_protocol",
+      action: "os_signal_emit",
+      message: `ephemeral:ready pid=kernel name=${event.name} parent=${event.parentPid ?? "unknown"} id=${event.id}${!event.success ? " error=true" : ""}`,
+    });
+  }
+
+  return [
+    { ...state, processes, blackboard },
     assignEffectSeqs(effects),
   ];
 }

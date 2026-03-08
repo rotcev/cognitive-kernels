@@ -6,7 +6,6 @@ import type {
   OsConfig,
   OsProcess,
   OsProcessDescriptor,
-  OsProcessCommand,
   OsMetacogTrigger,
   OsProcessEvent,
   MetacogContext,
@@ -317,93 +316,30 @@ export class OsKernel {
     const strategies = this.memoryStore.getSchedulingStrategies();
     this.activeStrategies = strategies;
 
-    // Spawn memory-consolidation daemon only if there's new episodic data to consolidate
-    if (this.memoryStore.hasNewEpisodicData()) {
-      const consolidatorObjective = this.buildConsolidatorObjective();
-      const daemonProc = this.supervisor.spawn({
-        type: "daemon",
-        name: "memory-consolidator",
-        objective: consolidatorObjective,
-        priority: 20,
-        model: this.config.kernel.processModel,
-        workingDir: this.workingDir,
-        restartPolicy: "never",
-      });
-      this.supervisor.activate(daemonProc.pid);
-    } else {
-      this.emitter?.emit({
-        action: "os_boot",
-        status: "completed",
-        message: "memory-consolidator skipped: no new episodic data",
-      });
-    }
+    // ── Delegate process creation to pure transition function ──
+    const hasNewEpisodicData = this.memoryStore.hasNewEpisodicData();
+    const consolidatorObjective = hasNewEpisodicData ? this.buildConsolidatorObjective() : undefined;
 
-    // Spawn the goal-orchestrator — this is the primary process that works on the goal.
-    // It decomposes the objective into subtasks and can spawn child processes.
-    const goalProc = this.supervisor.spawn({
-      type: "lifecycle",
-      name: "goal-orchestrator",
-      objective: goal,
-      priority: 90,
-      model: this.config.kernel.processModel,
+    const state = this.extractState();
+    const bootEvent: KernelEvent = {
+      type: "boot",
+      goal,
       workingDir: this.workingDir,
-      restartPolicy: "never",
-    });
+      hasNewEpisodicData,
+      consolidatorObjective,
+      awarenessEnabled: this.config.awareness.enabled,
+      awarenessModel: this.config.awareness.model,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    };
 
-    this.supervisor.activate(goalProc.pid);
+    const [newState, effects] = transition(state, bootEvent);
 
-    this.emitProtocol("os_process_spawn", "boot goal-orchestrator", {
-      agentId: goalProc.pid,
-      agentName: goalProc.name,
-    });
+    // Apply state changes: processes, blackboard
+    this.applyStateChanges(newState, { syncProcesses: true });
 
-    // Pre-seed design guidelines to blackboard — readable by all processes,
-    // persists beyond context compression, visible to orchestrator on tick 0.
-    this.ipcBus.bbWrite("system:design-guidelines", [
-      "This system solves problems by spawning cognitive sub-processes.",
-      "The topology (which processes exist, how they coordinate) IS the algorithm.",
-      "Design the shape of the computation, then let processes execute it.",
-      "Key primitives: spawn, kill, fork, join, checkpoint, restore.",
-      "Blackboard is shared memory — write results there for other processes to read.",
-      "Observation is mandatory: produce → observe → proceed. Never assume success.",
-    ].join("\n"), "kernel");
-
-    // Gap 5: Spawn metacog as a first-class daemon process.
-    // The process executor handles this daemon specially during tick():
-    // it reads from 'metacog:system-state', calls MetacogAgent.evaluate(),
-    // and pushes commands to 'metacog:commands'.
-    const metacogDaemonProc = this.supervisor.spawn({
-      type: "daemon",
-      name: "metacog-daemon",
-      priority: 50,
-      objective: "Periodically evaluate system state and issue metacognitive commands",
-      model: this.config.kernel.metacogModel,
-      workingDir: this.workingDir,
-      restartPolicy: "always",
-    });
-    // Must transition through "running" first (spawned → running → idle is the valid path)
-    this.supervisor.activate(metacogDaemonProc.pid);
-    this.supervisor.idle(metacogDaemonProc.pid, {});
-
-    // Spawn awareness-daemon — meta-metacognitive layer
-    if (this.config.awareness.enabled) {
-      const awarenessDaemonProc = this.supervisor.spawn({
-        type: "daemon",
-        name: "awareness-daemon",
-        objective: "Monitor metacog decision quality and inject corrective awareness notes",
-        priority: 30,
-        model: this.config.awareness.model,
-        workingDir: this.workingDir,
-        restartPolicy: "on-failure",
-      });
-      this.supervisor.activate(awarenessDaemonProc.pid);
-      this.supervisor.idle(awarenessDaemonProc.pid, {});
-
-      this.emitProtocol("os_process_spawn", `boot awareness-daemon`, {
-        agentId: awarenessDaemonProc.pid,
-        agentName: awarenessDaemonProc.name,
-      });
-    }
+    // Interpret effects (submit_llm, emit_protocol)
+    this.interpretTransitionEffects(effects);
 
     // Prune old checkpoints on every boot
     this.memoryStore.pruneCheckpoints();
@@ -2211,53 +2147,6 @@ export class OsKernel {
     void this.drainPendingEphemerals();
   }
 
-  /**
-   * Handle a single process turn result: update bookkeeping, enforce spawn
-   * invariants, and execute any returned commands.  Extracted from the
-   * executeProcesses() for-loop so it can also be called from the
-   * event-driven completion handler.
-   */
-  private summarizeTurnCommands(commands: import("./types.js").OsProcessCommand[]): string {
-    const parts: string[] = [];
-    for (const cmd of commands) {
-      switch (cmd.kind) {
-        case "bb_write":
-          parts.push(`write(${cmd.key})`);
-          break;
-        case "bb_read":
-          parts.push(`read(${cmd.keys.join(",")})`);
-          break;
-        case "spawn_child":
-          parts.push(`spawn(${cmd.descriptor?.name || "child"})`);
-          break;
-        case "spawn_graph": {
-          const nodes = (cmd as any).nodes || [];
-          const names = nodes.map((n: any) => n.name).join(", ");
-          parts.push(`graph(${nodes.length} nodes: ${names})`);
-          break;
-        }
-        case "spawn_ephemeral":
-          parts.push(`ephemeral(${cmd.name || "scout"})`);
-          break;
-        case "spawn_system":
-          parts.push(`shell(${(cmd as any).command || "cmd"})`);
-          break;
-        case "idle":
-          parts.push(`idle(wake=${((cmd as any).wakeOnSignals || []).join(",")})`);
-          break;
-        case "exit":
-          parts.push(`exit(code=${(cmd as any).code}, ${((cmd as any).reason || "").slice(0, 80)})`);
-          break;
-        case "signal_emit":
-          parts.push(`signal(${(cmd as any).signal})`);
-          break;
-        default:
-          parts.push(cmd.kind);
-      }
-    }
-    return parts.join(" | ");
-  }
-
   private async processOneResult(result: OsProcessTurnResult): Promise<void> {
     const proc = this.table.get(result.pid);
     if (!proc) return;
@@ -2414,23 +2303,9 @@ export class OsKernel {
           });
         }
 
-        const ephResult: import("./types.js").OsEphemeralResult = {
-          ephemeralId: desc.ephemeralId,
-          name: desc.name,
-          success: true,
-          response: ephTurnResult.finalResponse,
-          durationMs: ephDurationMs,
-          model: desc.model,
-          tokensEstimate: Math.ceil(ephTurnResult.finalResponse.length / 4),
-        };
-
-        // Wrap state mutations in mutex for proper wake + reschedule
+        // ── Delegate state mutations to pure transition function ──
         const release = await this.mutex.acquire();
         try {
-          this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
-          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
-          this.tickSignals.push("ephemeral:ready");
-
           this.logEvent({
             type: "ephemeral_completed",
             id: desc.ephemeralId,
@@ -2438,27 +2313,41 @@ export class OsKernel {
             success: true,
           });
 
-          // Kill the process table entry so it shows as dead in topology
-          this.supervisor.kill(desc.tablePid, false, "ephemeral completed");
-          this.emitter?.emit({
-            action: "os_process_exit",
-            status: "completed",
-            agentId: desc.tablePid,
-            agentName: desc.name,
-            message: `completed duration=${ephDurationMs}ms`,
-          });
+          const state = this.extractState();
+          const event: KernelEvent = {
+            type: "ephemeral_completed",
+            id: desc.ephemeralId,
+            name: desc.name,
+            success: true,
+            tablePid: desc.tablePid,
+            parentPid: desc.pid,
+            response: ephTurnResult.finalResponse,
+            durationMs: ephDurationMs,
+            model: desc.model,
+            timestamp: Date.now(),
+            seq: this.nextSeq(),
+          };
+
+          const [newState, effects] = transition(state, event);
+          this.applyStateChanges(newState, { syncProcesses: true });
+          this.interpretTransitionEffects(effects);
+
+          // Post-transition I/O
+          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
+          this.tickSignals.push("ephemeral:ready");
 
           if (this.config.kernel.telemetryEnabled) {
+            const ephResult: import("./types.js").OsEphemeralResult = {
+              ephemeralId: desc.ephemeralId,
+              name: desc.name,
+              success: true,
+              response: ephTurnResult.finalResponse,
+              durationMs: ephDurationMs,
+              model: desc.model,
+              tokensEstimate: Math.ceil(ephTurnResult.finalResponse.length / 4),
+            };
             this.telemetryCollector.onEphemeralComplete(ephResult);
           }
-
-          this.emitter?.emit({
-            action: "os_ephemeral_spawn",
-            status: "completed",
-            agentId: desc.ephemeralId,
-            agentName: desc.name,
-            message: `parent=${desc.pid} model=${desc.model} duration=${ephDurationMs}ms`,
-          });
 
           // Flush IPC + wake + reschedule
           const { wokenPids } = this.ipcBus.flush();
@@ -2484,24 +2373,9 @@ export class OsKernel {
           status: `Failed after ${Math.round(ephDurationMs / 1000)}s: ${errorMsg.slice(0, 200)}`,
         });
 
-        const ephResult: import("./types.js").OsEphemeralResult = {
-          ephemeralId: desc.ephemeralId,
-          name: desc.name,
-          success: false,
-          response: "",
-          error: errorMsg,
-          durationMs: ephDurationMs,
-          model: desc.model,
-          tokensEstimate: 0,
-        };
-
-        // Wrap state mutations in mutex for proper wake + reschedule
+        // ── Delegate state mutations to pure transition function ──
         const release = await this.mutex.acquire();
         try {
-          this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
-          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
-          this.tickSignals.push("ephemeral:ready");
-
           this.logEvent({
             type: "ephemeral_completed",
             id: desc.ephemeralId,
@@ -2509,27 +2383,42 @@ export class OsKernel {
             success: false,
           });
 
-          // Kill the process table entry so it shows as dead in topology
-          this.supervisor.kill(desc.tablePid, false, `ephemeral failed: ${errorMsg}`);
-          this.emitter?.emit({
-            action: "os_process_exit",
-            status: "failed",
-            agentId: desc.tablePid,
-            agentName: desc.name,
-            message: `failed: ${errorMsg}`,
-          });
+          const state = this.extractState();
+          const event: KernelEvent = {
+            type: "ephemeral_completed",
+            id: desc.ephemeralId,
+            name: desc.name,
+            success: false,
+            tablePid: desc.tablePid,
+            parentPid: desc.pid,
+            error: errorMsg,
+            durationMs: ephDurationMs,
+            model: desc.model,
+            timestamp: Date.now(),
+            seq: this.nextSeq(),
+          };
+
+          const [newState, effects] = transition(state, event);
+          this.applyStateChanges(newState, { syncProcesses: true });
+          this.interpretTransitionEffects(effects);
+
+          // Post-transition I/O
+          this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
+          this.tickSignals.push("ephemeral:ready");
 
           if (this.config.kernel.telemetryEnabled) {
+            const ephResult: import("./types.js").OsEphemeralResult = {
+              ephemeralId: desc.ephemeralId,
+              name: desc.name,
+              success: false,
+              response: "",
+              error: errorMsg,
+              durationMs: ephDurationMs,
+              model: desc.model,
+              tokensEstimate: 0,
+            };
             this.telemetryCollector.onEphemeralComplete(ephResult);
           }
-
-          this.emitter?.emit({
-            action: "os_ephemeral_spawn",
-            status: "failed",
-            agentId: desc.ephemeralId,
-            agentName: desc.name,
-            message: `parent=${desc.pid} error=${errorMsg}`,
-          });
 
           // Flush IPC + wake + reschedule
           const { wokenPids } = this.ipcBus.flush();
@@ -2545,639 +2434,6 @@ export class OsKernel {
           release();
         }
       }
-  }
-
-  /**
-   * Execute OS commands returned by a process turn.
-   */
-  private async executeProcessCommands(pid: string, commands: OsProcessCommand[]): Promise<void> {
-    const procName = this.table.get(pid)?.name ?? pid;
-    // Reorder: process exit LAST so bb_write/signals run before death
-    const reordered = [
-      ...commands.filter((c) => c.kind !== "exit"),
-      ...commands.filter((c) => c.kind === "exit"),
-    ];
-
-    for (const cmd of reordered) {
-      try {
-        switch (cmd.kind) {
-          case "sleep":
-            this.supervisor.sleep(pid, cmd.durationMs);
-            break;
-
-          case "idle":
-            this.supervisor.idle(pid, {
-              signals: cmd.wakeOnSignals,
-            });
-            break;
-
-          case "checkpoint": {
-            const summary = cmd.summary ?? `auto-checkpoint at tick ${this.scheduler.tickCount}`;
-            const objectives = cmd.pendingObjectives ?? [];
-            const cpArtifacts = cmd.artifacts ?? {};
-            const cp = this.supervisor.checkpoint(pid, summary, objectives, cpArtifacts);
-
-            // Enrich checkpoint with process metadata + executor state for cross-run persistence
-            const cpProc = this.table.get(pid);
-            if (cpProc) {
-              cp.runId = this.runId;
-              cp.tickCount = cpProc.tickCount;
-              cp.tokensUsed = cpProc.tokensUsed;
-              cp.processName = cpProc.name;
-              cp.processType = cpProc.type;
-              cp.processObjective = cpProc.objective;
-              cp.processPriority = cpProc.priority;
-              cp.processModel = cpProc.model;
-              cp.processWorkingDir = cpProc.workingDir;
-              cp.parentPid = cpProc.parentPid;
-              cp.backend = cpProc.backend;
-              cp.executorState = this.router.captureCheckpointState(cpProc) ?? undefined;
-            }
-
-            // Persist to disk
-            this.memoryStore.saveCheckpoint(cp);
-
-            this.emitter?.emit({
-              action: "os_checkpoint",
-              status: "completed",
-              agentId: pid,
-              agentName: procName,
-              message: `checkpoint saved: ${summary}`,
-            });
-            break;
-          }
-
-          case "spawn_child": {
-            const childTokenBudget = this.config.kernel.processTokenBudgetEnabled
-              ? (cmd.descriptor.tokenBudget ??
-                (this.blueprintDerivedTokenBudget > 0 ? this.blueprintDerivedTokenBudget : undefined))
-              : undefined;
-            // Auto-infer browser capabilities for observer-named processes
-            const inferredCapabilities = cmd.descriptor.capabilities
-              ?? (this.browserMcpConfig && /observer/i.test(cmd.descriptor.name)
-                ? { observationTools: ["browser"] }
-                : undefined);
-
-            const resolvedDescriptor = {
-              ...cmd.descriptor,
-              capabilities: inferredCapabilities,
-              tokenBudget: childTokenBudget,
-              parentPid: pid,
-              // Always use config default model — LLM may output wrong provider model names
-              model: this.config.kernel.processModel,
-              workingDir: cmd.descriptor.workingDir ?? this.workingDir,
-            };
-
-            // Conditional spawn: if condition is present, register as deferral
-            if (cmd.condition) {
-              // Dedup: reject if same parent already has a pending deferral with this spawn name
-              const dupDefer = [...this.deferrals.values()].find(
-                d => d.descriptor.name === cmd.descriptor.name && d.registeredByPid === pid
-              );
-              if (dupDefer) {
-                this.emitter?.emit({
-                  action: "os_command_rejected",
-                  status: "completed",
-                  agentId: pid,
-                  agentName: procName,
-                  message: `defer dedup: "${cmd.descriptor.name}" already has pending deferral id=${dupDefer.id} from same parent`,
-                });
-                break;
-              }
-              const ds: DeferEntry = {
-                id: randomUUID(),
-                descriptor: resolvedDescriptor,
-                condition: cmd.condition,
-                registeredAt: new Date().toISOString(),
-                registeredAtMs: Date.now(),
-                registeredByTick: this.scheduler.tickCount,
-                registeredByPid: pid,
-                reason: `conditional spawn_child from ${pid}: ${cmd.descriptor.name}`,
-                maxWaitTicks: cmd.maxWaitTicks,
-                maxWaitMs: cmd.maxWaitTicks ? cmd.maxWaitTicks * 30_000 : undefined, // ~30s per logical tick as wall-clock fallback
-              };
-              this.deferrals.set(ds.id, ds);
-              this.emitter?.emit({
-                action: "os_defer",
-                status: "started",
-                agentId: pid,
-                agentName: procName,
-                message: `deferred spawn of "${cmd.descriptor.name}" condition=${JSON.stringify(cmd.condition)}`,
-              });
-            } else {
-              // Immediate spawn (existing behavior)
-              const child = this.supervisor.spawn(resolvedDescriptor);
-              this.supervisor.activate(child.pid);
-              this.emitProtocol("os_process_spawn", `parent=${pid}`, {
-                agentId: child.pid,
-                agentName: child.name,
-              });
-            }
-            break;
-          }
-
-          case "spawn_graph": {
-            let immediateCount = 0;
-            let deferredCount = 0;
-            for (const node of cmd.nodes) {
-              const nodeTokenBudget = this.config.kernel.processTokenBudgetEnabled
-                ? (this.blueprintDerivedTokenBudget > 0 ? this.blueprintDerivedTokenBudget : undefined)
-                : undefined;
-              // Auto-infer browser capabilities for observer-named processes
-              // when browserMcpConfig is available but the LLM didn't emit capabilities
-              const inferredCapabilities = node.capabilities
-                ?? (this.browserMcpConfig && /observer/i.test(node.name)
-                  ? { observationTools: ["browser"] }
-                  : undefined);
-
-              const nodeDescriptor = {
-                type: node.type as "daemon" | "lifecycle" | "event",
-                name: node.name,
-                objective: node.objective,
-                priority: node.priority,
-                completionCriteria: node.completionCriteria,
-                capabilities: inferredCapabilities,
-                tokenBudget: nodeTokenBudget,
-                parentPid: pid,
-                model: this.config.kernel.processModel,
-                workingDir: this.workingDir,
-              };
-
-              if (!node.after || node.after.length === 0) {
-                // Immediate spawn — no dependencies
-                const child = this.supervisor.spawn(nodeDescriptor);
-                this.supervisor.activate(child.pid);
-                immediateCount++;
-                this.emitProtocol("os_process_spawn", `parent=${pid} (graph immediate: "${node.name}")`, {
-                  agentId: child.pid,
-                  agentName: child.name,
-                });
-              } else {
-                // Parse after strings into DeferCondition
-                const conditions: DeferCondition[] = node.after.map((dep) => {
-                  if (dep.includes(":")) {
-                    // Contains colon → blackboard key
-                    return { type: "blackboard_key_exists" as const, key: dep };
-                  }
-                  // No colon → process name
-                  return { type: "process_dead_by_name" as const, name: dep };
-                });
-
-                const condition: DeferCondition = conditions.length === 1
-                  ? conditions[0]!
-                  : { type: "all_of", conditions };
-
-                // Dedup: reject if same parent already has a pending deferral with this spawn name
-                const dupGraphDefer = [...this.deferrals.values()].find(
-                  d => d.descriptor.name === node.name && d.registeredByPid === pid
-                );
-                if (dupGraphDefer) {
-                  this.emitter?.emit({
-                    action: "os_command_rejected",
-                    status: "completed",
-                    agentId: pid,
-                    agentName: procName,
-                    message: `defer dedup: graph node "${node.name}" already has pending deferral id=${dupGraphDefer.id} from same parent`,
-                  });
-                  continue;
-                }
-                const ds: DeferEntry = {
-                  id: randomUUID(),
-                  descriptor: nodeDescriptor,
-                  condition,
-                  registeredAt: new Date().toISOString(),
-                  registeredAtMs: Date.now(),
-                  registeredByTick: this.scheduler.tickCount,
-                  registeredByPid: pid,
-                  reason: `graph node "${node.name}" after=[${node.after.join(", ")}]`,
-                };
-                this.deferrals.set(ds.id, ds);
-                deferredCount++;
-                this.emitter?.emit({
-                  action: "os_defer",
-                  status: "started",
-                  agentId: pid,
-                  agentName: procName,
-                  message: `graph deferred: "${node.name}" after=[${node.after.join(", ")}] id=${ds.id}`,
-                });
-              }
-            }
-            this.emitter?.emit({
-              action: "os_defer",
-              status: "started",
-              agentId: pid,
-              agentName: procName,
-              message: `spawn_graph: ${immediateCount} immediate, ${deferredCount} deferred (${cmd.nodes.length} total nodes)`,
-            });
-            break;
-          }
-
-          case "bb_write":
-            this.ipcBus.bbWrite(cmd.key, cmd.value, pid);
-            // Gap 6: track which blackboard keys each process has written so metacog
-            // can see data provenance (who produced what) in buildContextPrompt.
-            {
-              const writingProc = this.table.get(pid);
-              if (writingProc) {
-                if (!writingProc.blackboardKeysWritten) writingProc.blackboardKeysWritten = [];
-                if (!writingProc.blackboardKeysWritten.includes(cmd.key)) {
-                  writingProc.blackboardKeysWritten.push(cmd.key);
-                }
-              }
-
-              // Emit shell output as protocol events so they flow through the
-              // stream segmenter and appear in live terminal views.
-              // The bb_write value is the CUMULATIVE ring buffer, so we track
-              // last-emitted line count and only emit the delta.
-              if (writingProc?.backend?.kind === "system" && typeof cmd.value === "string") {
-                const isStdout = cmd.key.endsWith(":stdout");
-                const isStderr = cmd.key.endsWith(":stderr");
-                if (isStdout || isStderr) {
-                  const allLines = cmd.value.split("\n");
-                  const cursorKey = `${pid}:${isStderr ? "stderr" : "stdout"}`;
-                  const lastCount = this.shellOutputCursors.get(cursorKey) ?? 0;
-                  const newLines = allLines.slice(lastCount);
-                  this.shellOutputCursors.set(cursorKey, allLines.length);
-                  if (newLines.length > 0) {
-                    this.emitter?.emit({
-                      action: "os_shell_output",
-                      status: "completed",
-                      agentId: pid,
-                      agentName: writingProc.name,
-                      message: newLines.join("\n"),
-                      detail: {
-                        stream: isStderr ? "stderr" : "stdout",
-                        key: cmd.key,
-                        lineCount: newLines.length,
-                      },
-                    });
-                  }
-                }
-              }
-            }
-            break;
-
-          case "bb_read":
-            // Read is handled by injecting results into the next prompt turn.
-            // Store the read results on the blackboard under a process-scoped key
-            // so buildProcessPrompt can include them.
-            {
-              const readResults: Record<string, unknown> = {};
-              for (const key of cmd.keys) {
-                const entry = this.ipcBus.bbRead(key, pid);
-                if (entry) {
-                  readResults[key] = entry.value;
-                }
-              }
-              // Write the read results back so the process sees them on next turn
-              this.ipcBus.bbWrite(`_inbox:${pid}`, readResults, "kernel");
-            }
-            break;
-
-          case "signal_emit":
-            this.ipcBus.emitSignal(cmd.signal, pid, cmd.payload);
-            this.tickSignals.push(cmd.signal);
-            break;
-
-          case "request_kernel":
-            this.ipcBus.bbWrite(`kernel_request:${pid}`, cmd.question, pid);
-            this.addTrigger("novel_situation");
-            break;
-
-          case "spawn_ephemeral": {
-            const ephProc = this.table.get(pid);
-            if (!ephProc) break;
-            if (!this.config.ephemeral.enabled) break;
-
-            const spawnCount = ephProc.ephemeralSpawnCount ?? 0;
-            if (spawnCount >= this.config.ephemeral.maxPerProcess) {
-              const rejName = cmd.name ?? "unnamed";
-              this.ipcBus.bbWrite(`ephemeral:${rejName}:rejected`, {
-                success: false,
-                error: `Per-process ephemeral limit reached (${this.config.ephemeral.maxPerProcess})`,
-              }, "kernel");
-              break;
-            }
-
-            const ephemeralId = `eph-${randomUUID().slice(0, 12)}`;
-            const ephName = cmd.name ?? "ephemeral";
-            // Always use the config default model for ephemerals. The LLM may
-            // output a model name from the wrong provider (e.g. "claude-haiku-4-5"
-            // when running under Codex). The config default is already set to the
-            // correct provider-appropriate model by entry.ts.
-            const ephModel = this.config.ephemeral.defaultModel;
-
-            // Register in process table so ephemerals appear in topology/DAG
-            const ephTableProc = this.supervisor.spawn({
-              type: "event",
-              name: ephName,
-              objective: cmd.objective,
-              parentPid: pid,
-              model: ephModel,
-              workingDir: ephProc.workingDir,
-            });
-            this.supervisor.activate(ephTableProc.pid);
-            this.emitProtocol("os_process_spawn", `parent=${procName} type=ephemeral model=${ephModel}`, {
-              status: "started",
-              agentId: ephTableProc.pid,
-              agentName: ephName,
-            });
-
-            // Non-blocking: push descriptor, increment count, continue processing commands
-            ephProc.ephemeralSpawnCount = spawnCount + 1;
-            this.pendingEphemerals.push({
-              pid,
-              ephemeralId,
-              tablePid: ephTableProc.pid,
-              name: ephName,
-              model: ephModel,
-              prompt: [
-                "You are a single-turn helper process. You run once, return findings, then terminate.",
-                "IMPORTANT: You have NO blackboard access. Do NOT claim to write to any blackboard key (scout:*, ephemeral:*, etc.).",
-                "Your text response IS your output — the kernel captures it and delivers it to your parent automatically.",
-                "Your work directly unblocks your parent — accuracy and completeness matter.",
-                "",
-                "## Context",
-                `Parent process: ${ephProc.name} (working on: ${ephProc.objective ?? "unknown"})`,
-                `Working directory: ${ephProc.workingDir}`,
-                "",
-                "## Task",
-                cmd.objective,
-                "",
-                "## Tools",
-                "You have full access to: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch.",
-                "USE THEM. Do not guess file contents — read them. Do not guess command output — run them.",
-                "",
-                "## Output Format",
-                "Structure your response for machine consumption by your parent process:",
-                "- Lead with the direct answer or result",
-                "- Use headings/lists for multi-part findings",
-                "- Include exact file paths, line numbers, and code snippets when relevant",
-                "- Omit preamble, pleasantries, and meta-commentary",
-                "- If you found nothing or cannot complete the task, say so immediately with what blocked you",
-                "",
-                "## Constraints",
-                "- Single turn only — you cannot spawn processes or continue after this response",
-                "- Stay focused on the task above — do not explore tangents",
-              ].join("\n"),
-              workingDir: ephProc.workingDir,
-              startTime: Date.now(),
-            });
-            break;
-          }
-
-          case "spawn_system": {
-            // Feature gate
-            if (!this.config.systemProcess?.enabled) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "failed",
-                agentId: pid,
-                agentName: procName,
-                message: `spawn_system rejected: systemProcess.enabled is false`,
-              });
-              break;
-            }
-            // Check limit
-            const systemCount = this.table.getAll().filter(
-              p => p.backend?.kind === "system" && p.state !== "dead"
-            ).length;
-            if (systemCount >= this.config.systemProcess.maxSystemProcesses) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "failed",
-                agentId: pid,
-                agentName: procName,
-                message: `spawn_system rejected: max system processes (${this.config.systemProcess.maxSystemProcesses}) reached`,
-              });
-              break;
-            }
-            const sysChild = this.supervisor.spawn({
-              type: "lifecycle",
-              name: cmd.name,
-              objective: `System process: ${cmd.command} ${(cmd.args ?? []).join(" ")}`,
-              parentPid: pid,
-              model: this.config.kernel.processModel,
-              workingDir: this.workingDir,
-              backend: { kind: "system", command: cmd.command, args: cmd.args, env: cmd.env },
-            });
-            this.supervisor.activate(sysChild.pid);
-            // Start the shell process in the router
-            this.router.startProcess(sysChild).catch(() => {
-              this.supervisor.kill(sysChild.pid, false, "shell start failed");
-            });
-            this.emitter?.emit({
-              action: "os_system_spawn",
-              status: "completed",
-              agentId: sysChild.pid,
-              agentName: sysChild.name,
-              message: `command=${cmd.command} parent=${pid}`,
-              detail: {
-                trigger: "process",
-                command: cmd.command,
-                args: cmd.args,
-                parentPid: pid,
-                objective: sysChild.objective,
-              },
-            });
-            break;
-          }
-
-          case "spawn_kernel": {
-            // Feature gate
-            if (!this.config.childKernel?.enabled) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "failed",
-                agentId: pid,
-                agentName: procName,
-                message: `spawn_kernel rejected: childKernel.enabled is false`,
-              });
-              break;
-            }
-            // Depth guard: child kernels cannot spawn sub-kernels
-            if (this.config.kernel.parentKernelId) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "failed",
-                agentId: pid,
-                agentName: procName,
-                message: `spawn_kernel rejected: this kernel is already a child (depth limit)`,
-              });
-              break;
-            }
-            // Check limit
-            const kernelCount = this.table.getAll().filter(
-              p => p.backend?.kind === "kernel" && p.state !== "dead"
-            ).length;
-            if (kernelCount >= this.config.childKernel.maxChildKernels) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "failed",
-                agentId: pid,
-                agentName: procName,
-                message: `spawn_kernel rejected: max child kernels (${this.config.childKernel.maxChildKernels}) reached`,
-              });
-              break;
-            }
-            const kernelChild = this.supervisor.spawn({
-              type: "lifecycle",
-              name: cmd.name,
-              objective: `Sub-kernel: ${cmd.goal}`,
-              parentPid: pid,
-              model: this.config.kernel.processModel,
-              workingDir: this.workingDir,
-              backend: { kind: "kernel", goal: cmd.goal, maxTicks: cmd.maxTicks },
-            });
-            this.supervisor.activate(kernelChild.pid);
-            // Boot the child kernel in the router
-            this.router.startProcess(kernelChild).catch(() => {
-              this.supervisor.kill(kernelChild.pid, false, "subkernel boot failed");
-            });
-            this.emitter?.emit({
-              action: "os_subkernel_spawn",
-              status: "completed",
-              agentId: kernelChild.pid,
-              agentName: kernelChild.name,
-              message: `goal=${cmd.goal} parent=${pid}`,
-              detail: {
-                trigger: "process",
-                goal: cmd.goal,
-                parentPid: pid,
-                maxTicks: cmd.maxTicks,
-              },
-            });
-            break;
-          }
-
-          case "cancel_defer": {
-            // Cancel pending deferrals by spawn name, scoped to this process as registrant
-            const matches = [...this.deferrals.entries()].filter(
-              ([, d]) => d.descriptor.name === cmd.name && d.registeredByPid === pid
-            );
-            if (matches.length === 0) {
-              this.emitter?.emit({
-                action: "os_command_rejected",
-                status: "completed",
-                agentId: pid,
-                agentName: procName,
-                message: `cancel_defer: no pending deferral with name "${cmd.name}" from this process`,
-              });
-              break;
-            }
-            for (const [id] of matches) {
-              this.deferrals.delete(id);
-            }
-            this.emitter?.emit({
-              action: "os_defer",
-              status: "completed",
-              agentId: pid,
-              agentName: procName,
-              message: `cancel_defer: removed ${matches.length} deferral(s) for "${cmd.name}" reason="${cmd.reason}"`,
-            });
-            break;
-          }
-
-          case "exit": {
-            const exitingProc = this.table.get(pid);
-            const parentOfExiting = exitingProc?.parentPid;
-
-            // ── Executive Exit Prevention ──
-            // The orchestrator must not exit while the computation topology is active.
-            // This mirrors Unix init protection — the executive process IS coherence.
-            if (exitingProc && !exitingProc.parentPid && exitingProc.type === "lifecycle" && exitingProc.name === "goal-orchestrator") {
-              const livingChildren = this.table.getAll().filter(
-                p => p.parentPid === pid && p.state !== "dead"
-              );
-              const hasDeferrals = this.deferrals.size > 0;
-
-              if (livingChildren.length > 0 || hasDeferrals) {
-                // Reject exit. If deferrals remain but no living children exist,
-                // child:done alone is an impossible wake condition, so also wake
-                // on the next tick to force a deferral re-scan / executive re-eval.
-                const wakeSignals = livingChildren.length > 0
-                  ? ["child:done"]
-                  : ["tick:1", "child:done"];
-                this.supervisor.idle(pid, { signals: wakeSignals });
-                this.emitter?.emit({
-                  action: "os_command_rejected",
-                  status: "completed",
-                  agentId: pid,
-                  agentName: exitingProc.name,
-                  message: `executive exit prevented: ${livingChildren.length} living children, ${this.deferrals.size} pending deferrals — forced idle with wakeOnSignals: ${JSON.stringify(wakeSignals)}`,
-                });
-                this.addTrigger("goal_drift");
-                break; // Skip the kill
-              }
-            }
-
-            // GAP 1: Record per-process strategy outcome based on exit code
-            if (exitingProc?.activeStrategyId) {
-              this.memoryStore.recordStrategyOutcome(
-                exitingProc.activeStrategyId,
-                cmd.code === 0,
-                exitingProc.tokensUsed,
-              );
-            }
-            // Trigger observation_failed when an observer exits with non-zero code
-            if (
-              cmd.code !== 0 &&
-              exitingProc?.capabilities?.observationTools?.length
-            ) {
-              this.addTrigger("observation_failed");
-            }
-            this.supervisor.kill(pid, false, cmd.reason);
-            this.executor.disposeThread(pid);
-            this.router.disposeThread(pid);
-            this.emitProtocol("os_process_kill", `exit: ${cmd.reason}`, {
-              agentId: pid,
-              agentName: exitingProc?.name ?? procName,
-            });
-            // Auto-signal parent when a child exits (structural, not LLM-dependent)
-            if (parentOfExiting && exitingProc) {
-              this.emitChildDoneSignal(pid, exitingProc.name, parentOfExiting, cmd.code, cmd.reason);
-            }
-            break;
-          }
-
-          case "self_report": {
-            const reportingProc = this.table.get(pid);
-            if (reportingProc) {
-              if (!reportingProc.selfReports) reportingProc.selfReports = [];
-              const report: SelfReport = {
-                tick: reportingProc.tickCount,
-                efficiency: cmd.efficiency,
-                blockers: cmd.blockers,
-                resourcePressure: cmd.resourcePressure,
-                suggestedAction: cmd.suggestedAction,
-                reason: cmd.reason,
-                timestamp: new Date().toISOString(),
-              };
-              reportingProc.selfReports.push(report);
-              this.emitter?.emit({
-                action: "os_process_event",
-                status: "completed",
-                agentId: pid,
-                agentName: reportingProc.name,
-                message: `self_report efficiency=${cmd.efficiency} pressure=${cmd.resourcePressure} action=${cmd.suggestedAction}${cmd.blockers.length > 0 ? ' blockers=' + cmd.blockers.join(',') : ''}`,
-                detail: {
-                  kind: "self_report",
-                  efficiency: cmd.efficiency,
-                  resourcePressure: cmd.resourcePressure,
-                  suggestedAction: cmd.suggestedAction,
-                  blockers: cmd.blockers,
-                  reason: cmd.reason,
-                  tick: reportingProc.tickCount,
-                },
-              });
-            }
-            break;
-          }
-        }
-      } catch {
-        // Command execution failed — continue with remaining commands
-      }
-    }
   }
 
   /**

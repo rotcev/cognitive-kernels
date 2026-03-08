@@ -56,6 +56,12 @@ describe("OsKernel executive exit prevention", () => {
     const orchestrator = kernel.snapshot().processes.find((process) => process.name === "goal-orchestrator");
     expect(orchestrator).toBeDefined();
 
+    // Simulate the orchestrator having already completed tick 1 (with spawns)
+    // so we bypass the hard-spawn enforcement that rejects exit on first tick
+    const orchProc = (kernel as any).table.get(orchestrator!.pid);
+    orchProc.tickCount = 1;
+
+    // Register a deferral via metacog command
     await (kernel as any).executeMetacogCommand({
       kind: "defer",
       descriptor: {
@@ -70,9 +76,14 @@ describe("OsKernel executive exit prevention", () => {
 
     expect((kernel as any).deferrals.size).toBe(1);
 
-    await (kernel as any).executeProcessCommands(orchestrator!.pid, [
-      { kind: "exit", code: 0, reason: "done" },
-    ]);
+    // Route through processOneResult (which delegates to transition function)
+    await (kernel as any).processOneResult({
+      pid: orchestrator!.pid,
+      success: true,
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+      tokensUsed: 100,
+      response: "Exiting.",
+    });
 
     const orchAfter = kernel.snapshot().processes.find((process) => process.pid === orchestrator!.pid);
     expect(orchAfter?.state).toBe("idle");

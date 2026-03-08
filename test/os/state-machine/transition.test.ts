@@ -49,16 +49,16 @@ describe("transition — boot", () => {
     expect(metacog!.priority).toBe(50);
   });
 
-  test("boot produces emit_protocol and submit_llm effects", () => {
+  test("boot produces emit_protocol effects (no submit_llm — tick loop handles submission)", () => {
     const state = makeState();
     const [, effects] = transition(state, bootEvent());
 
     const spawnEffects = effects.filter(e => e.type === "emit_protocol");
     expect(spawnEffects.length).toBeGreaterThanOrEqual(1);
 
+    // Boot does NOT emit submit_llm — process scheduling happens in the tick loop
     const submitEffects = effects.filter(e => e.type === "submit_llm");
-    expect(submitEffects).toHaveLength(1);
-    expect((submitEffects[0] as any).name).toBe("goal-orchestrator");
+    expect(submitEffects).toHaveLength(0);
   });
 
   test("boot sets startTime", () => {
@@ -391,7 +391,7 @@ describe("transition — integration roundtrip", () => {
     const [s1, e1] = transition(state, { type: "boot", goal: "test", timestamp: Date.now(), seq: seq++ });
     expect(s1.goal).toBe("test");
     expect(s1.processes.size).toBe(2);
-    expect(e1.some(e => e.type === "submit_llm")).toBe(true);
+    expect(e1.some(e => e.type === "emit_protocol")).toBe(true);
 
     // 2. Orchestrator completes first turn with spawn (50 tokens used)
     const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
@@ -874,5 +874,146 @@ describe("transition — process_completed spawn_system / spawn_kernel", () => {
     expect(effects.some(e =>
       e.type === "emit_protocol" && (e as any).message.includes("spawn_kernel rejected")
     )).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ephemeral_completed
+// ---------------------------------------------------------------------------
+
+describe("transition — ephemeral_completed", () => {
+  function setupWithEphemeral() {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Manually add an ephemeral process to the state
+    const ephPid = "eph-proc-1";
+    const processes = new Map(s1.processes);
+    processes.set(ephPid, {
+      pid: ephPid,
+      type: "event" as const,
+      state: "running" as const,
+      name: "scout-1",
+      parentPid: orch.pid,
+      objective: "find something",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+    return { state: { ...s1, processes }, orchPid: orch.pid, ephPid };
+  }
+
+  test("successful ephemeral writes result to blackboard and kills process", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const [newState, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-abc",
+      name: "scout-1",
+      success: true,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      response: "Found the answer: 42",
+      durationMs: 1500,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    // Process killed
+    const ephProc = newState.processes.get(ephPid);
+    expect(ephProc?.state).toBe("dead");
+    expect(ephProc?.exitReason).toBe("ephemeral completed");
+
+    // Blackboard written
+    const bbEntry = newState.blackboard.get("ephemeral:scout-1:eph-abc");
+    expect(bbEntry).toBeDefined();
+    expect((bbEntry!.value as any).success).toBe(true);
+    expect((bbEntry!.value as any).response).toBe("Found the answer: 42");
+
+    // Protocol effects
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_exit")).toBe(true);
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_ephemeral_spawn")).toBe(true);
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_signal_emit")).toBe(true);
+  });
+
+  test("failed ephemeral writes error result and kills process", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const [newState, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-fail",
+      name: "scout-1",
+      success: false,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      error: "LLM timeout",
+      durationMs: 30000,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    const ephProc = newState.processes.get(ephPid);
+    expect(ephProc?.state).toBe("dead");
+    expect(ephProc?.exitReason).toContain("ephemeral failed");
+
+    const bbEntry = newState.blackboard.get("ephemeral:scout-1:eph-fail");
+    expect(bbEntry).toBeDefined();
+    expect((bbEntry!.value as any).success).toBe(false);
+    expect((bbEntry!.value as any).error).toBe("LLM timeout");
+
+    // Signal includes error flag
+    const signalEffect = effects.find(e =>
+      e.type === "emit_protocol" && (e as any).action === "os_signal_emit"
+    );
+    expect((signalEffect as any).message).toContain("error=true");
+  });
+
+  test("ephemeral_completed without tablePid is a no-op", () => {
+    const { state } = setupWithEphemeral();
+    const [newState, effects] = transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-x",
+      name: "scout-1",
+      success: true,
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    // No state changes, no effects
+    expect(newState.processes.size).toBe(state.processes.size);
+    expect(effects).toHaveLength(0);
+  });
+
+  test("ephemeral_completed does not mutate input state", () => {
+    const { state, orchPid, ephPid } = setupWithEphemeral();
+    const beforeSize = state.processes.size;
+    const beforeBbSize = state.blackboard.size;
+
+    transition(state, {
+      type: "ephemeral_completed",
+      id: "eph-imm",
+      name: "scout-1",
+      success: true,
+      tablePid: ephPid,
+      parentPid: orchPid,
+      response: "result",
+      durationMs: 100,
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 0,
+    });
+
+    expect(state.processes.size).toBe(beforeSize);
+    expect(state.blackboard.size).toBe(beforeBbSize);
+    // Original process still running
+    expect(state.processes.get(ephPid)?.state).toBe("running");
   });
 });

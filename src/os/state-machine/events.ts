@@ -24,6 +24,16 @@ type BaseEvent = {
 export type BootEvent = BaseEvent & {
   type: "boot";
   goal: string;
+  /** Working directory for spawned processes. */
+  workingDir?: string;
+  /** Whether memory-consolidator daemon should be spawned. */
+  hasNewEpisodicData?: boolean;
+  /** Objective for the memory-consolidator (provided when hasNewEpisodicData is true). */
+  consolidatorObjective?: string;
+  /** Whether awareness-daemon should be spawned. */
+  awarenessEnabled?: boolean;
+  /** Model for awareness-daemon. */
+  awarenessModel?: string;
 };
 
 /** An LLM process completed a turn. */
@@ -54,6 +64,18 @@ export type EphemeralCompletedEvent = BaseEvent & {
   id: string;
   name: string;
   success: boolean;
+  /** Process table PID for the ephemeral (for killing the process entry). */
+  tablePid?: string;
+  /** Parent process PID that spawned this ephemeral. */
+  parentPid?: string;
+  /** LLM response text (for blackboard write). */
+  response?: string;
+  /** Duration in milliseconds. */
+  durationMs?: number;
+  /** Model used. */
+  model?: string;
+  /** Error message (on failure). */
+  error?: string;
 };
 
 /** A wall-clock timer fired. */

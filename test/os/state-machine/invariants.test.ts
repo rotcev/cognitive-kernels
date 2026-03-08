@@ -211,7 +211,7 @@ describe("Transition invariants (property-based)", () => {
     );
   });
 
-  test("INVARIANT: boot always produces processes and submit_llm effect", () => {
+  test("INVARIANT: boot always produces processes and sets goal", () => {
     fc.assert(
       fc.property(
         arbState,
@@ -221,11 +221,11 @@ describe("Transition invariants (property-based)", () => {
             type: "boot", goal, timestamp: Date.now(), seq: 0,
           });
 
-          // Boot always creates at least 2 processes
+          // Boot always creates at least 2 processes (orchestrator + metacog)
           expect(newState.processes.size).toBeGreaterThanOrEqual(2);
 
-          // Boot always produces a submit_llm effect
-          expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+          // Boot produces emit_protocol effects (no submit_llm — tick loop handles that)
+          expect(effects.some(e => e.type === "emit_protocol")).toBe(true);
 
           // Goal is always set
           expect(newState.goal).toBe(goal);
