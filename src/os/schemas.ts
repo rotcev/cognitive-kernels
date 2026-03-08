@@ -130,154 +130,48 @@ export const METACOG_OUTPUT_SCHEMA = {
       type: "string",
       description: "Overall assessment of system state and progress toward the goal",
     },
-    commands: {
+    topology: {
+      description: "Desired work graph using topology primitives (task, seq, par, gate). Set to null if no changes needed.",
+    },
+    memory: {
       type: "array",
-      description: "Metacognitive commands to reshape the process topology",
+      description: "Learning commands (learn, define_blueprint, evolve_blueprint, record_strategy)",
       items: {
         type: "object",
         properties: {
           kind: {
             type: "string",
-            enum: [
-              "spawn", "defer", "cancel_defer", "kill", "reprioritize", "rewrite_dag", "learn",
-              "define_blueprint", "fork", "evolve_blueprint", "record_strategy",
-              "halt", "noop", "delegate_evaluation",
-              "spawn_system", "spawn_kernel",
-            ],
+            enum: ["learn", "define_blueprint", "evolve_blueprint", "record_strategy"],
           },
-          // spawn
-          descriptor: {
-            type: "object",
-            properties: {
-              type: { type: "string", enum: ["daemon", "lifecycle", "event"] },
-              name: { type: "string" },
-              objective: { type: "string" },
-              priority: { type: "number" },
-              completionCriteria: { type: "array", items: { type: "string" } },
-              capabilities: {
-                type: "object",
-                properties: {
-                  observationTools: { type: "array", items: { type: "string" } },
-                },
-              },
-            },
-            required: ["type", "name", "objective"],
-          },
-          // kill
-          pid: { type: "string" },
-          cascade: { type: "boolean" },
-          reason: { type: "string" },
-          // reprioritize
-          priority: { type: "number" },
-          // rewrite_dag
-          patch: {
-            type: "object",
-            properties: {
-              addNodes: { type: "array" },
-              removeNodes: { type: "array", items: { type: "string" } },
-              addEdges: { type: "array" },
-              removeEdges: { type: "array" },
-              updateNodes: { type: "array" },
-            },
-          },
-          // learn
           heuristic: { type: "string" },
           confidence: { type: "number" },
           context: { type: "string" },
           scope: { type: "string", enum: ["global", "local"] },
-          // define_blueprint
-          blueprint: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              description: { type: "string" },
-              source: { type: "string", enum: ["metacog", "orchestrator"] },
-              applicability: {
-                type: "object",
-                properties: {
-                  goalPatterns: { type: "array", items: { type: "string" } },
-                  minSubtasks: { type: "number" },
-                  maxSubtasks: { type: "number" },
-                  requiresSequencing: { type: "boolean" },
-                },
-              },
-              roles: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string" },
-                    type: { type: "string", enum: ["daemon", "lifecycle", "event"] },
-                    cardinality: { type: "string", enum: ["one", "per-subtask"] },
-                    priorityOffset: { type: "number" },
-                    objectiveTemplate: { type: "string" },
-                    spawnTiming: { type: "string", enum: ["immediate", "after-dependencies"] },
-                  },
-                  required: ["name", "type", "cardinality", "objectiveTemplate"],
-                },
-              },
-              gatingStrategy: { type: "string" },
-              priorityStrategy: { type: "string" },
-            },
-            required: ["name", "description", "roles"],
-          },
-          // halt
-          status: { type: "string", enum: ["achieved", "unachievable", "stalled"] },
-          summary: { type: "string" },
-          // noop
-          reasoning: { type: "string" },
-          // fork — clone a running process for speculative parallel execution
-          // pid (required) is already declared above (reused from kill)
-          newObjective: { type: "string" },
-          newPriority: { type: "number" },
-          // evolve_blueprint — derive a new topology blueprint from an existing one
+          blueprint: { type: "object" },
           sourceBlueprintId: { type: "string" },
-          mutations: {
-            type: "object",
-            properties: {
-              namePrefix: { type: "string" },
-              roleChanges: { type: "string" },
-              gatingChange: { type: "string" },
-            },
-          },
+          mutations: { type: "object" },
           description: { type: "string" },
-          // record_strategy — encode an observed scheduling pattern as a learnable rule
-          // context (optional) is already declared above (reused from learn)
-          strategyName: { type: "string" },
-          outcome: { type: "string", enum: ["success", "failure"] },
-          // delegate_evaluation
-          evaluationScope: { type: "string" },
-          // defer
-          condition: {
-            type: "object",
-            properties: {
-              type: { type: "string", enum: ["blackboard_key_exists", "blackboard_key_match", "blackboard_value_contains", "process_dead", "process_dead_by_name", "all_of", "any_of"] },
-              key: { type: "string" },
-              value: {},
-              substring: { type: "string" },
-              conditions: { type: "array" },
-            },
-            required: ["type"],
-          },
-          maxWaitTicks: { type: "number" },
-          // spawn_system
-          command: { type: "string" },
-          args: { type: "array", items: { type: "string" } },
-          env: { type: "object" },
-          // spawn_kernel
-          goal: { type: "string" },
-          maxTicks: { type: "number" },
+          strategy: { type: "object" },
         },
         required: ["kind"],
       },
     },
+    halt: {
+      type: ["object", "null"],
+      description: "Stop the system. Null if not halting.",
+      properties: {
+        status: { type: "string", enum: ["achieved", "unachievable", "stalled"] },
+        summary: { type: "string" },
+      },
+      required: ["status", "summary"],
+    },
     citedHeuristicIds: {
       type: "array",
-      description: "IDs of heuristics from the Relevant Heuristics section that influenced your decisions this evaluation. Only cite heuristics you actually used in your reasoning — this drives the learning signal.",
+      description: "IDs of heuristics that influenced your decisions",
       items: { type: "string" },
     },
   },
-  required: ["assessment", "commands", "citedHeuristicIds"],
+  required: ["assessment", "topology", "memory", "halt", "citedHeuristicIds"],
 } as const;
 
 export const AWARENESS_OUTPUT_SCHEMA = {
