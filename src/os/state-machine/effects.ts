@@ -103,6 +103,52 @@ export type WakeProcessEffect = BaseEffect & {
   pid: string;
 };
 
+/** Activate a process (idle/sleeping → running in scheduler). */
+export type ActivateProcessEffect = BaseEffect & {
+  type: "activate_process";
+  pid: string;
+};
+
+/** Set a process to idle state. */
+export type IdleProcessEffect = BaseEffect & {
+  type: "idle_process";
+  pid: string;
+  wakeOnSignals?: string[];
+};
+
+/** Emit an IPC signal. */
+export type SignalEmitEffect = BaseEffect & {
+  type: "signal_emit";
+  signal: string;
+  sender: string;
+  payload?: Record<string, unknown>;
+};
+
+/** Emit a child:done signal to parent. */
+export type ChildDoneSignalEffect = BaseEffect & {
+  type: "child_done_signal";
+  childPid: string;
+  childName: string;
+  parentPid: string;
+  exitCode?: number;
+  exitReason?: string;
+};
+
+/** Flush the IPC bus and activate woken processes. */
+export type FlushIPCEffect = BaseEffect & {
+  type: "flush_ipc";
+};
+
+/** Rebuild DAG topology from current process table. */
+export type RebuildDAGEffect = BaseEffect & {
+  type: "rebuild_dag";
+};
+
+/** Trigger a scheduling pass to select and submit runnable processes. */
+export type SchedulePassEffect = BaseEffect & {
+  type: "schedule_pass";
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -118,6 +164,13 @@ export type KernelEffect =
   | EmitProtocolEffect
   | HaltEffect
   | WakeProcessEffect
+  | ActivateProcessEffect
+  | IdleProcessEffect
+  | SignalEmitEffect
+  | ChildDoneSignalEffect
+  | FlushIPCEffect
+  | RebuildDAGEffect
+  | SchedulePassEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */
