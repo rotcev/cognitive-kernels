@@ -122,6 +122,19 @@ describe("reconcile", () => {
     expect(effects).toHaveLength(0);
   });
 
+  test("gate wrapping seq: gated nodes not spawned when condition unmet", () => {
+    const topology: TopologyExpr = { type: "gate",
+      condition: { type: "blackboard_key_exists", key: "schema" },
+      child: { type: "seq", children: [
+        { type: "task", name: "A", objective: "do A" },
+        { type: "task", name: "B", objective: "do B" },
+      ]},
+    };
+    const effects = reconcile(new Map(), topology, new Map(), new Set());
+    const spawns = effects.filter(e => e.type === "spawn_process");
+    expect(spawns).toHaveLength(0);
+  });
+
   test("dead processes not killed again", () => {
     const topology: TopologyExpr = { type: "task", name: "B", objective: "do B" };
     const processes = new Map([

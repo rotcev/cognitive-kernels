@@ -94,6 +94,32 @@ describe("flatten", () => {
     expect(result.exitNodes).toEqual(["D"]);
   });
 
+  test("gate wrapping seq: gate(cond, seq(A, B)) → condition on entry node A", () => {
+    const expr: TopologyExpr = { type: "gate",
+      condition: { type: "blackboard_key_exists", key: "ready" },
+      child: { type: "seq", children: [
+        { type: "task", name: "A", objective: "do A" },
+        { type: "task", name: "B", objective: "do B" },
+      ]},
+    };
+    const result = flatten(expr);
+    expect(result.nodes.get("A")?.gateCondition).toEqual({ type: "blackboard_key_exists", key: "ready" });
+    expect(result.nodes.get("B")?.gateCondition).toBeUndefined();
+  });
+
+  test("gate wrapping par: gate(cond, par(A, B)) → condition on all entry nodes", () => {
+    const expr: TopologyExpr = { type: "gate",
+      condition: { type: "blackboard_key_exists", key: "ready" },
+      child: { type: "par", children: [
+        { type: "task", name: "A", objective: "do A" },
+        { type: "task", name: "B", objective: "do B" },
+      ]},
+    };
+    const result = flatten(expr);
+    expect(result.nodes.get("A")?.gateCondition).toEqual({ type: "blackboard_key_exists", key: "ready" });
+    expect(result.nodes.get("B")?.gateCondition).toEqual({ type: "blackboard_key_exists", key: "ready" });
+  });
+
   test("preserves task config (model, priority, backend)", () => {
     const expr: TopologyExpr = { type: "task", name: "A", objective: "do A",
       model: "claude-sonnet", priority: 80,

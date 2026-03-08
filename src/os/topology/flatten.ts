@@ -29,7 +29,19 @@ function flattenExpr(expr: TopologyExpr, gateCondition: GateCondition | undefine
 
     case "par": {
       const parts = expr.children.map(c => flattenExpr(c, undefined));
-      return mergeParts(parts);
+      const merged = mergeParts(parts);
+
+      // Apply gate condition to entry nodes
+      if (gateCondition) {
+        for (const entryName of merged.entryNodes) {
+          const node = merged.nodes.get(entryName);
+          if (node) {
+            node.gateCondition = gateCondition;
+          }
+        }
+      }
+
+      return merged;
     }
 
     case "seq": {
@@ -48,6 +60,17 @@ function flattenExpr(expr: TopologyExpr, gateCondition: GateCondition | undefine
       // Entry nodes = first part's entry, exit nodes = last part's exit
       merged.entryNodes = parts[0].entryNodes;
       merged.exitNodes = parts[parts.length - 1].exitNodes;
+
+      // Apply gate condition to entry nodes
+      if (gateCondition) {
+        for (const entryName of merged.entryNodes) {
+          const node = merged.nodes.get(entryName);
+          if (node) {
+            node.gateCondition = gateCondition;
+          }
+        }
+      }
+
       return merged;
     }
 
