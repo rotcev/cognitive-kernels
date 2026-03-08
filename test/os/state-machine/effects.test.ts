@@ -3,6 +3,32 @@ import path from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { KernelEffect } from "../../../src/os/state-machine/effects.js";
+import { OsKernel } from "../../../src/os/kernel.js";
+import { parseOsConfig } from "../../../src/os/config.js";
+import type { Brain, BrainThread, TurnResult } from "../../../src/types.js";
+
+class MockThread implements BrainThread {
+  readonly id = "mock-thread";
+  abort(): void {}
+  async run(): Promise<TurnResult> {
+    return { finalResponse: "Acknowledged." };
+  }
+}
+
+class MockBrain implements Brain {
+  startThread(): BrainThread { return new MockThread(); }
+}
+
+let tmpDir: string;
+
+beforeEach(() => {
+  tmpDir = path.join(os.tmpdir(), `ck-eff-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(tmpDir, { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(tmpDir, { recursive: true, force: true });
+});
 
 describe("KernelEffect types", () => {
   test("all effect types are constructable", () => {
@@ -33,5 +59,15 @@ describe("KernelEffect types", () => {
       expect(effect.pid).toBe("p1");
       expect(effect.model).toBe("gpt-4");
     }
+  });
+});
+
+describe("Kernel effect log", () => {
+  test("kernel exposes getEffectLog()", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+    const log = kernel.getEffectLog();
+    expect(Array.isArray(log)).toBe(true);
   });
 });

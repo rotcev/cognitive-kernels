@@ -62,6 +62,8 @@ import { AwarenessDaemon } from "./awareness-daemon.js";
 import { AsyncMutex } from "./async-mutex.js";
 import type { KernelEvent, KernelEventInput } from "./state-machine/events.js";
 import { createEventSequencer } from "./state-machine/events.js";
+import type { KernelEffect, KernelEffectInput } from "./state-machine/effects.js";
+import { createEffectSequencer } from "./state-machine/effects.js";
 
 
 export class OsKernel {
@@ -192,6 +194,10 @@ export class OsKernel {
   /** Typed event log — the input side of the state machine. */
   private readonly eventLog: KernelEvent[] = [];
   private readonly nextSeq = createEventSequencer();
+
+  /** Typed effect log — the output side of the state machine. */
+  private readonly effectLog: KernelEffect[] = [];
+  private readonly nextEffectSeq = createEffectSequencer();
 
   constructor(
     config: OsConfig,
@@ -4173,6 +4179,19 @@ export class OsKernel {
   /** Get the event log (for testing and Lens). */
   getEventLog(): readonly KernelEvent[] {
     return this.eventLog;
+  }
+
+  /** Record a kernel effect. */
+  private collectEffect(effect: KernelEffectInput): void {
+    this.effectLog.push({
+      ...effect,
+      seq: this.nextEffectSeq(),
+    } as KernelEffect);
+  }
+
+  /** Get the effect log (for testing and Lens). */
+  getEffectLog(): readonly KernelEffect[] {
+    return this.effectLog;
   }
 
   /**
