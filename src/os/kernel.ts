@@ -65,6 +65,7 @@ import type { KernelEffect, KernelEffectInput } from "./state-machine/effects.js
 import { createEffectSequencer } from "./state-machine/effects.js";
 import { transition } from "./state-machine/transition.js";
 import type { KernelState } from "./state-machine/state.js";
+import type { TopologyExpr, MetacogMemoryCommand } from "./topology/types.js";
 
 
 export class OsKernel {
@@ -191,6 +192,9 @@ export class OsKernel {
   /** Active ephemeral threads keyed by tablePid — abort these on kill to stop wasting tokens. */
   private ephemeralThreads: Map<string, import("../types.js").BrainThread> = new Map();
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
+
+  /** PIDs being drained — let current turn finish, then kill. */
+  private drainingPids: Set<string> = new Set();
 
   /** Transition-approved metacog evaluation — consumed by doMetacogCheck. */
   private transitionApprovedMetacog = false;
@@ -1806,6 +1810,15 @@ export class OsKernel {
       // the timescale of real scheduling cycles, not 500ms timer fires.
       this.scheduler.tick();
 
+      // Drain check — if this process was marked for draining (topology removed
+      // it while it was in-flight), kill it now that its turn has completed.
+      if (this.drainingPids.has(result.pid)) {
+        this.supervisor.kill(result.pid, false, "drained from topology");
+        this.executor.disposeThread(result.pid);
+        this.router.disposeThread(result.pid);
+        this.drainingPids.delete(result.pid);
+      }
+
       // NOTE: Deferral processing fully migrated to transition's processPureDeferrals() (Wave 5).
       // Transition evaluates all conditions purely and emits submit_llm effects.
 
@@ -2389,7 +2402,7 @@ export class OsKernel {
    * Gracefully handles non-JSON responses (backward compatible with existing tests).
    */
   private parseMetacogResponse(response: string): number | undefined {
-    let parsed: MetacogResponse;
+    let parsed: any;
     try {
       parsed = JSON.parse(response);
     } catch {
@@ -2397,10 +2410,123 @@ export class OsKernel {
       return undefined;
     }
 
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.commands)) {
+    if (!parsed || typeof parsed !== "object") {
       return undefined;
     }
 
+    // ── Detect format: new topology-based vs legacy commands-based ──
+    const isTopologyFormat = "topology" in parsed || "memory" in parsed;
+
+    if (!isTopologyFormat) {
+      // Legacy commands-based format: { assessment, commands, citedHeuristicIds }
+      if (!Array.isArray(parsed.commands)) return undefined;
+      return this.parseMetacogResponseLegacy(parsed as MetacogResponse);
+    }
+
+    // ── New topology format: { assessment, topology, memory, halt, citedHeuristicIds } ──
+    const topology: TopologyExpr | null = parsed.topology ?? null;
+    const memory: MetacogMemoryCommand[] = Array.isArray(parsed.memory) ? parsed.memory : [];
+    const halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null = parsed.halt ?? null;
+    const assessment: string = parsed.assessment ?? "";
+    const citedHeuristicIds: string[] | undefined = parsed.citedHeuristicIds;
+
+    // Emit protocol event for observability
+    this.emitter?.emit({
+      action: "os_metacog",
+      status: "completed",
+      message: `assessment=${assessment.slice(0, 100)} topology=${topology !== null ? "declared" : "null"} memory=${memory.length} halt=${halt?.status ?? "none"}`,
+      detail: {
+        assessment,
+        topology: topology !== null,
+        memoryCommands: memory.map(m => m.kind),
+        halt: halt?.status ?? null,
+        citedHeuristicIds,
+      },
+    });
+
+    // Record metacog decision in history for awareness daemon analysis
+    // Synthesize a minimal commands array for backward compat with MetacogHistoryEntry
+    const syntheticCommands: MetacogCommand[] = [];
+    if (topology !== null) {
+      syntheticCommands.push({ kind: "noop", reason: "topology declared" } as any);
+    }
+    for (const m of memory) {
+      syntheticCommands.push(m as any);
+    }
+    if (halt) {
+      syntheticCommands.push({ kind: "halt", status: halt.status, summary: halt.summary, reason: halt.summary } as any);
+    }
+    const historyEntry: MetacogHistoryEntry = {
+      tick: this.scheduler.tickCount,
+      assessment,
+      commands: syntheticCommands,
+      trigger: this.pendingTriggers.length > 0 ? this.pendingTriggers[0] : undefined,
+    };
+    this.metacogHistory.push(historyEntry);
+    if (this.metacogHistory.length > this.config.awareness.historyWindow) {
+      this.metacogHistory = this.metacogHistory.slice(-this.config.awareness.historyWindow);
+    }
+
+    // Retroactively fill outcome for entry from ~5 ticks ago
+    const retroTick = this.scheduler.tickCount - 5;
+    const retroEntry = this.metacogHistory.find(e => e.tick === retroTick && !e.outcome);
+    if (retroEntry) {
+      const allProcsNow = this.table.getAll();
+      const stalledNow = allProcsNow.filter(p => p.state === "sleeping" || p.state === "idle").length;
+      const totalNow = allProcsNow.filter(p => p.state !== "dead").length;
+      const stalledRatio = totalNow > 0 ? stalledNow / totalNow : 0;
+      retroEntry.outcome = stalledRatio < 0.3 ? "improved" : stalledRatio > 0.6 ? "degraded" : "neutral";
+    }
+
+    // Execute memory commands directly (learn, define_blueprint, evolve_blueprint, record_strategy)
+    for (const cmd of memory) {
+      try {
+        this.executeMemoryCommand(cmd);
+      } catch {
+        // Individual memory command failure shouldn't stop others
+      }
+    }
+
+    // Create topology_declared event and feed through transition
+    const topoEvent: KernelEvent = {
+      type: "topology_declared",
+      topology,
+      memory,
+      halt,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    };
+    this.logEvent(topoEvent);
+    const state = this.extractState();
+    const [newState, effects] = transition(state, topoEvent);
+    this.applyStateChanges(newState);
+    this.interpretTransitionEffects(effects);
+
+    // Track which heuristics influenced this evaluation for retrospective validation
+    const citedIds = Array.isArray(citedHeuristicIds) && citedHeuristicIds.length > 0
+      ? citedHeuristicIds.filter((id: string) => this.memoryStore.get(id) !== undefined)
+      : this.memoryStore.query(this.goal).slice(0, 5).map(h => h.id);
+    for (const hId of citedIds) {
+      this.heuristicApplicationLog.push({
+        heuristicId: hId,
+        appliedAtTick: this.scheduler.tickCount,
+        metacogCommandKind: topology !== null ? "topology" : (memory[0]?.kind ?? "unknown"),
+      });
+    }
+    // Cap log at 200 entries
+    if (this.heuristicApplicationLog.length > 200) {
+      this.heuristicApplicationLog = this.heuristicApplicationLog.slice(-200);
+    }
+
+    // Topology format does not use self-scheduled wake
+    return undefined;
+  }
+
+  /**
+   * Legacy parseMetacogResponse path for commands-based format.
+   * Used when metacog output contains { assessment, commands, citedHeuristicIds }.
+   */
+  private parseMetacogResponseLegacy(parsed: MetacogResponse): number | undefined {
     this.emitter?.emit({
       action: "os_metacog",
       status: "completed",
@@ -2436,11 +2562,9 @@ export class OsKernel {
     const retroEntry = this.metacogHistory.find(e => e.tick === retroTick && !e.outcome);
     if (retroEntry) {
       const allProcsNow = this.table.getAll();
-      const activeNow = allProcsNow.filter(p => p.state === "running").length;
       const stalledNow = allProcsNow.filter(p => p.state === "sleeping" || p.state === "idle").length;
       const totalNow = allProcsNow.filter(p => p.state !== "dead").length;
       const stalledRatio = totalNow > 0 ? stalledNow / totalNow : 0;
-      // Simple heuristic: improved if stalled ratio is low, degraded if high
       retroEntry.outcome = stalledRatio < 0.3 ? "improved" : stalledRatio > 0.6 ? "degraded" : "neutral";
     }
 
@@ -2465,9 +2589,6 @@ export class OsKernel {
       : undefined;
 
     // Track which heuristics influenced this evaluation for retrospective validation.
-    // Uses metacog's explicit citations (citedHeuristicIds) when available — these are
-    // heuristics the metacog actually read and acted on, not just textually similar ones.
-    // Falls back to Jaccard top-5 only when the metacog doesn't cite (backward compat).
     const citedIds = Array.isArray(parsed.citedHeuristicIds) && parsed.citedHeuristicIds.length > 0
       ? parsed.citedHeuristicIds.filter((id: string) => this.memoryStore.get(id) !== undefined)
       : this.memoryStore.query(this.goal).slice(0, 5).map(h => h.id);
@@ -2488,6 +2609,136 @@ export class OsKernel {
     return typeof parsed.nextWakeMs === "number" && parsed.nextWakeMs > 0
       ? parsed.nextWakeMs
       : undefined;
+  }
+
+  /**
+   * Execute a single memory command from the topology-based metacog format.
+   * Handles: learn, define_blueprint, evolve_blueprint, record_strategy.
+   */
+  private executeMemoryCommand(cmd: MetacogMemoryCommand): void {
+    switch (cmd.kind) {
+      case "learn":
+        this.memoryStore.learn(
+          cmd.heuristic,
+          cmd.confidence,
+          cmd.context,
+          this.runId,
+          undefined,
+          cmd.scope as "global" | "local" | undefined,
+        );
+        this.emitter?.emit({
+          action: "os_heuristic_learned",
+          status: "completed",
+          message: `heuristic learned: "${cmd.heuristic.slice(0, 80)}" confidence=${cmd.confidence} scope=${cmd.scope ?? "local"}`,
+          detail: {
+            heuristic: cmd.heuristic,
+            confidence: cmd.confidence,
+            context: cmd.context,
+            scope: cmd.scope ?? "local",
+          },
+        });
+        break;
+
+      case "define_blueprint": {
+        const bp = {
+          id: randomUUID(),
+          ...cmd.blueprint,
+          stats: { uses: 0, successes: 0, failures: 0, avgTokenEfficiency: 0, avgWallTimeMs: 0, lastUsedAt: "", alpha: 1, beta: 1, tagStats: {} },
+          learnedAt: new Date().toISOString(),
+        } as TopologyBlueprint;
+        this.memoryStore.addBlueprint(bp);
+        this.emitter?.emit({
+          action: "os_metacog",
+          status: "completed",
+          message: `define_blueprint name=${bp.name} id=${bp.id}`,
+        });
+        break;
+      }
+
+      case "evolve_blueprint": {
+        const source = this.memoryStore.getBlueprint(cmd.sourceBlueprintId);
+        if (!source) throw new Error(`Blueprint not found: ${cmd.sourceBlueprintId}`);
+
+        const newBlueprintId = `${cmd.sourceBlueprintId}-evolved-${Date.now()}`;
+        const evolved: TopologyBlueprint = JSON.parse(JSON.stringify(source));
+        evolved.id = newBlueprintId;
+        evolved.evolvedFrom = cmd.sourceBlueprintId;
+        evolved.learnedAt = new Date().toISOString();
+        evolved.source = "metacog";
+
+        // Apply mutations (cmd.mutations is Record<string, unknown>)
+        const mutations = cmd.mutations as Record<string, any>;
+        if (mutations.namePrefix) {
+          evolved.name = `${mutations.namePrefix}${evolved.name}`;
+        }
+        if (mutations.gatingChange) {
+          evolved.gatingStrategy = mutations.gatingChange as BlueprintGatingStrategy;
+        }
+        if (mutations.roleChanges) {
+          for (const change of mutations.roleChanges) {
+            if (change.action === "remove") {
+              evolved.roles = evolved.roles.filter((r: any) => r.name !== change.roleName);
+            } else if (change.action === "add") {
+              evolved.roles.push({
+                name: change.roleName,
+                type: (change.type as OsProcessType) ?? "lifecycle",
+                cardinality: "one",
+                priorityOffset: change.priority ?? 0,
+                objectiveTemplate: change.template ?? change.roleName,
+                spawnTiming: "immediate",
+              });
+            } else if (change.action === "modify") {
+              const role = evolved.roles.find((r: any) => r.name === change.roleName);
+              if (role) {
+                if (change.template) role.objectiveTemplate = change.template;
+                if (change.type) role.type = change.type as OsProcessType;
+                if (change.priority !== undefined) role.priorityOffset = change.priority;
+              }
+            }
+          }
+        }
+
+        // Inherit Bayesian priors from parent, decayed toward uniform Beta(1,1)
+        const parentAlpha = source.stats.alpha ?? 1;
+        const parentBeta = source.stats.beta ?? 1;
+        evolved.stats = {
+          uses: 0, successes: 0, failures: 0,
+          avgTokenEfficiency: 0, avgWallTimeMs: 0, lastUsedAt: "",
+          alpha: 1.0 + (parentAlpha - 1.0) * 0.5,
+          beta: 1.0 + (parentBeta - 1.0) * 0.5,
+          tagStats: {},
+        };
+
+        this.memoryStore.addBlueprint(evolved);
+        this.emitter?.emit({
+          action: "os_metacog",
+          status: "completed",
+          message: `evolve_blueprint source=${cmd.sourceBlueprintId} new=${newBlueprintId}`,
+        });
+        break;
+      }
+
+      case "record_strategy": {
+        const stratObj = cmd.strategy as Record<string, any>;
+        const strategyToSave: SchedulingStrategy = {
+          id: `strategy-${Date.now()}`,
+          description: JSON.stringify(stratObj),
+          conditions: [],
+          adjustments: {},
+          outcomes: { successes: 0, failures: 0 },
+          createdAt: Date.now(),
+          lastUsed: Date.now(),
+          ...stratObj,
+        };
+        this.memoryStore.saveSchedulingStrategy(strategyToSave);
+        this.emitter?.emit({
+          action: "os_metacog",
+          status: "completed",
+          message: `record_strategy id=${strategyToSave.id}`,
+        });
+        break;
+      }
+    }
   }
 
   /**
@@ -3602,6 +3853,74 @@ export class OsKernel {
           // Transition decided awareness should run after metacog.
           // The actual LLM call happens in doMetacogCheck's awareness section.
           this.transitionApprovedAwareness = true;
+          break;
+        }
+
+        case "spawn_topology_process": {
+          // Spawn a new process from topology reconciliation
+          const backend = effect.backend;
+          const descriptor: OsProcessDescriptor = {
+            type: "lifecycle",
+            name: effect.name,
+            objective: effect.objective,
+            priority: effect.priority ?? this.config.processes.defaultPriority,
+            model: effect.model ?? this.config.kernel.processModel,
+            workingDir: this.workingDir,
+            ...(backend && backend.kind !== "llm" ? { backend } : {}),
+          };
+          const proc = this.supervisor.spawn(descriptor);
+          this.supervisor.activate(proc.pid);
+          this.emitProtocol("os_process_spawn", `topology_spawn`, {
+            agentId: proc.pid,
+            agentName: proc.name,
+            detail: {
+              trigger: "topology",
+              objective: effect.objective,
+              type: "lifecycle",
+              priority: descriptor.priority,
+              model: descriptor.model,
+              backend: backend?.kind ?? "llm",
+            },
+          });
+          // Start execution based on backend kind
+          if (!backend || backend.kind === "llm") {
+            this.submitProcess(proc);
+          } else {
+            this.router.startProcess(proc).catch(() => {
+              this.supervisor.kill(proc.pid, false, `${backend.kind} start failed`);
+            });
+          }
+          break;
+        }
+
+        case "kill_process": {
+          // Kill a process removed from topology
+          this.supervisor.kill(effect.pid, false, "removed from topology");
+          this.executor.disposeThread(effect.pid);
+          this.router.disposeThread(effect.pid);
+          // Cancel inflight LLM call if still running
+          const killCb = this.turnKillCallbacks.get(effect.pid);
+          if (killCb) killCb();
+          this.emitter?.emit({
+            action: "os_process_kill",
+            status: "completed",
+            agentId: effect.pid,
+            agentName: effect.name,
+            message: `topology_kill: removed from topology`,
+          });
+          break;
+        }
+
+        case "drain_process": {
+          // Mark PID for drain — let current turn finish, then kill
+          this.drainingPids.add(effect.pid);
+          this.emitter?.emit({
+            action: "os_process_drain",
+            status: "started",
+            agentId: effect.pid,
+            agentName: effect.name,
+            message: `topology_drain: will kill after current turn completes`,
+          });
           break;
         }
 
