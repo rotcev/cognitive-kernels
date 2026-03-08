@@ -53,8 +53,9 @@ describe("KernelEffect types", () => {
       { type: "flush_ipc", seq: 17 },
       { type: "rebuild_dag", seq: 18 },
       { type: "schedule_pass", seq: 19 },
+      { type: "apply_strategies", strategyIds: ["s1", "s2"], seq: 20 },
     ];
-    expect(effects).toHaveLength(20);
+    expect(effects).toHaveLength(21);
     // Verify seq is monotonically increasing
     for (let i = 1; i < effects.length; i++) {
       expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);

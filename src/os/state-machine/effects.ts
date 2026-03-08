@@ -149,6 +149,12 @@ export type SchedulePassEffect = BaseEffect & {
   type: "schedule_pass";
 };
 
+/** Apply matched scheduling strategies to scheduler and executor router. */
+export type ApplyStrategiesEffect = BaseEffect & {
+  type: "apply_strategies";
+  strategyIds: string[];
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -171,6 +177,7 @@ export type KernelEffect =
   | FlushIPCEffect
   | RebuildDAGEffect
   | SchedulePassEffect
+  | ApplyStrategiesEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */

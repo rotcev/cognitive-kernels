@@ -51,6 +51,8 @@ export type KernelState = {
   // --- Strategy ---
   /** Active scheduling strategy ID (for outcome attribution). */
   activeStrategyId: string | null;
+  /** Boot-time LLM-matched strategy IDs (cached for the run). */
+  matchedStrategyIds: Set<string>;
 
   // --- Halt logic ---
   halted: boolean;
@@ -92,6 +94,7 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     pendingTriggers: [],
 
     activeStrategyId: null,
+    matchedStrategyIds: new Set(),
 
     halted: false,
     haltReason: null,

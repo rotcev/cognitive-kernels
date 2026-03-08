@@ -1472,8 +1472,131 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     }
   }
 
-  // 6. Process deferrals — conditions may be met after sleeper/checkpoint/stall changes
+  // 6. Zombie reaping — reparent orphaned children of dead processes to root
+  const rootPid = [...processes.values()].find(p => !p.parentPid && p.type === "lifecycle")?.pid;
+  for (const [pid, proc] of processes) {
+    if (proc.state === "dead" && proc.children.length > 0) {
+      const updatedChildren: string[] = [];
+      for (const childPid of proc.children) {
+        const child = processes.get(childPid);
+        if (!child || child.state === "dead") {
+          // Keep dead children in the list (no reparenting needed)
+          updatedChildren.push(childPid);
+          continue;
+        }
+        // Reparent living orphan to root (or null if no root)
+        const newParent = rootPid && rootPid !== pid ? rootPid : null;
+        const updatedChild = { ...child, parentPid: newParent };
+        processes.set(childPid, updatedChild);
+        // Add to root's children if we have a root
+        if (newParent) {
+          const root = processes.get(newParent);
+          if (root && !root.children.includes(childPid)) {
+            const updatedRoot = { ...root, children: [...root.children, childPid] };
+            processes.set(newParent, updatedRoot);
+          }
+        }
+        // Don't keep this child in the dead parent's children list
+      }
+      // Update the dead parent: remove reparented children
+      const remainingChildren = proc.children.filter(cid => {
+        const c = processes.get(cid);
+        return !c || c.state === "dead" || c.parentPid === pid;
+      });
+      if (remainingChildren.length !== proc.children.length) {
+        const reparentedCount = proc.children.length - remainingChildren.length;
+        processes.set(pid, { ...proc, children: remainingChildren });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_event",
+          message: `zombie_reap: reparented ${reparentedCount} orphans from dead pid=${pid}`,
+        });
+      }
+    }
+  }
+
+  // 7. Daemon restart — dead daemons with restartPolicy get respawned
+  for (const [pid, proc] of [...processes.entries()]) {
+    if (proc.state !== "dead") continue;
+    const shouldRestart =
+      proc.restartPolicy === "always" ||
+      (proc.restartPolicy === "on-failure" && proc.exitCode !== 0);
+    if (!shouldRestart) continue;
+
+    // Mark the dead process so it won't trigger another restart next tick
+    processes.set(pid, { ...proc, restartPolicy: "never" });
+
+    const newPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const now = new Date().toISOString();
+    const newProc: OsProcess = {
+      pid: newPid,
+      type: proc.type,
+      state: "running",
+      name: proc.name,
+      parentPid: proc.parentPid,
+      objective: proc.objective,
+      priority: proc.priority,
+      spawnedAt: now,
+      lastActiveAt: now,
+      tickCount: 0,
+      tokensUsed: 0,
+      model: proc.model,
+      workingDir: proc.workingDir,
+      children: [],
+      onParentDeath: proc.onParentDeath,
+      restartPolicy: proc.type === "daemon" ? "on-failure" : "never",
+      tokenBudget: proc.tokenBudget,
+    };
+
+    // Copy checkpoint from dead process if it had one
+    if (proc.checkpoint) {
+      newProc.checkpoint = JSON.parse(JSON.stringify(proc.checkpoint));
+    }
+
+    processes.set(newPid, newProc);
+
+    // Register as child of parent
+    if (newProc.parentPid) {
+      const parent = processes.get(newProc.parentPid);
+      if (parent && !parent.children.includes(newPid)) {
+        processes.set(newProc.parentPid, { ...parent, children: [...parent.children, newPid] });
+      }
+    }
+
+    effects.push({
+      type: "activate_process",
+      pid: newPid,
+    });
+    effects.push({
+      type: "submit_llm",
+      pid: newPid,
+      name: newProc.name,
+      model: newProc.model,
+    });
+    effects.push({
+      type: "emit_protocol",
+      action: "os_process_event",
+      message: `daemon_restart: restarted ${proc.name} as ${newPid} (policy=${proc.restartPolicy}, original=${pid})`,
+    });
+  }
+
+  // 8. Strategy application — set activeStrategyId from boot-matched strategies
+  let activeStrategyId = state.activeStrategyId;
+  if (state.matchedStrategyIds.size > 0) {
+    // Pick the first matched strategy as active (consistent with prior behavior)
+    const firstId = [...state.matchedStrategyIds][0]!;
+    activeStrategyId = firstId;
+    effects.push({
+      type: "apply_strategies",
+      strategyIds: [...state.matchedStrategyIds],
+    });
+  }
+
+  // 9. Process deferrals — conditions may be met after sleeper/checkpoint/stall changes
   processPureDeferrals(state, processes, deferrals, effects);
+
+  // 10. Rebuild DAG after all process changes
+  effects.push({ type: "rebuild_dag" });
 
   return [
     {
@@ -1483,6 +1606,7 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       deferrals,
       housekeepCount,
       consecutiveIdleTicks,
+      activeStrategyId,
     },
     assignEffectSeqs(effects),
   ];

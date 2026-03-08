@@ -2528,3 +2528,305 @@ describe("transition — Wave 2: executive exit prevention emits idle_process", 
     expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.wakeOnSignals).toContain("child:done");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave 3: Housekeep I/O migration — zombie reaping, daemon restart, strategy
+// ---------------------------------------------------------------------------
+
+describe("transition — housekeep zombie reaping", () => {
+  test("dead parent's living children are reparented to root", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+
+    // Create a dead parent with a living child
+    processes.set("dead-parent", {
+      pid: "dead-parent", type: "lifecycle" as const, state: "dead" as const,
+      name: "dead-parent", parentPid: orch.pid, objective: "old work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: ["orphan-child"], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      exitCode: 0, exitReason: "completed",
+    });
+    processes.set("orphan-child", {
+      pid: "orphan-child", type: "lifecycle" as const, state: "running" as const,
+      name: "orphan-child", parentPid: "dead-parent", objective: "active work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 50, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+    });
+
+    // Add dead-parent as child of orchestrator
+    processes.set(orch.pid, { ...orch, children: [...orch.children, "dead-parent"] });
+
+    const stateWithZombie = { ...s1, processes };
+    const [newState, effects] = transition(stateWithZombie, timerEvent("housekeep"));
+
+    // Orphan child should be reparented to root (orchestrator)
+    const orphan = newState.processes.get("orphan-child");
+    expect(orphan).toBeDefined();
+    expect(orphan!.parentPid).toBe(orch.pid);
+
+    // Orchestrator should now have the orphan as a child
+    const rootProc = newState.processes.get(orch.pid);
+    expect(rootProc!.children).toContain("orphan-child");
+
+    // Dead parent should have orphan removed from children
+    const deadParent = newState.processes.get("dead-parent");
+    expect(deadParent!.children).not.toContain("orphan-child");
+
+    // Should emit a protocol event about zombie reaping
+    const reapEffects = effects.filter(
+      e => e.type === "emit_protocol" && "message" in e && (e.message as string).includes("zombie_reap")
+    );
+    expect(reapEffects.length).toBeGreaterThan(0);
+  });
+
+  test("dead parent with only dead children does not trigger reparenting", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+
+    processes.set("dead-parent", {
+      pid: "dead-parent", type: "lifecycle" as const, state: "dead" as const,
+      name: "dead-parent", parentPid: orch.pid, objective: "old work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: ["dead-child"], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      exitCode: 0, exitReason: "completed",
+    });
+    processes.set("dead-child", {
+      pid: "dead-child", type: "lifecycle" as const, state: "dead" as const,
+      name: "dead-child", parentPid: "dead-parent", objective: "old child work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 2, tokensUsed: 80, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      exitCode: 0, exitReason: "completed",
+    });
+
+    const stateWithDeadFamily = { ...s1, processes };
+    const [newState, effects] = transition(stateWithDeadFamily, timerEvent("housekeep"));
+
+    // Dead child should NOT be reparented (it's dead too)
+    const deadChild = newState.processes.get("dead-child");
+    expect(deadChild!.parentPid).toBe("dead-parent");
+
+    // No zombie_reap protocol effect
+    const reapEffects = effects.filter(
+      e => e.type === "emit_protocol" && "message" in e && (e.message as string).includes("zombie_reap")
+    );
+    expect(reapEffects).toHaveLength(0);
+  });
+});
+
+describe("transition — housekeep daemon restart", () => {
+  test("dead daemon with restartPolicy='always' gets respawned", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const processes = new Map(s1.processes);
+
+    processes.set("dead-daemon", {
+      pid: "dead-daemon", type: "daemon" as const, state: "dead" as const,
+      name: "my-daemon", parentPid: null, objective: "daemon work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 5, tokensUsed: 200, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
+      exitCode: 0, exitReason: "completed",
+    });
+
+    const stateWithDeadDaemon = { ...s1, processes };
+    const [newState, effects] = transition(stateWithDeadDaemon, timerEvent("housekeep"));
+
+    // Original dead daemon should have restartPolicy changed to "never"
+    const deadDaemon = newState.processes.get("dead-daemon");
+    expect(deadDaemon!.restartPolicy).toBe("never");
+
+    // A new process should have been created with the same name
+    const newDaemons = [...newState.processes.values()].filter(
+      p => p.name === "my-daemon" && p.pid !== "dead-daemon"
+    );
+    expect(newDaemons).toHaveLength(1);
+    const newDaemon = newDaemons[0]!;
+    expect(newDaemon.state).toBe("running");
+    expect(newDaemon.type).toBe("daemon");
+    expect(newDaemon.restartPolicy).toBe("on-failure");
+    expect(newDaemon.tickCount).toBe(0);
+    expect(newDaemon.tokensUsed).toBe(0);
+
+    // Should emit submit_llm for the new process
+    const submitEffects = effects.filter(
+      e => e.type === "submit_llm" && e.pid === newDaemon.pid
+    );
+    expect(submitEffects).toHaveLength(1);
+
+    // Should emit activate_process
+    const activateEffects = effects.filter(
+      e => e.type === "activate_process" && e.pid === newDaemon.pid
+    );
+    expect(activateEffects).toHaveLength(1);
+
+    // Should emit protocol event
+    const restartEffects = effects.filter(
+      e => e.type === "emit_protocol" && "message" in e && (e.message as string).includes("daemon_restart")
+    );
+    expect(restartEffects).toHaveLength(1);
+  });
+
+  test("dead daemon with restartPolicy='on-failure' only restarts on non-zero exit", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const processes = new Map(s1.processes);
+
+    // Dead daemon with exitCode=0 and on-failure policy — should NOT restart
+    processes.set("success-daemon", {
+      pid: "success-daemon", type: "daemon" as const, state: "dead" as const,
+      name: "success-daemon", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "on-failure" as const,
+      exitCode: 0, exitReason: "completed",
+    });
+
+    const stateSuccessDaemon = { ...s1, processes };
+    const [newState1] = transition(stateSuccessDaemon, timerEvent("housekeep"));
+
+    // No new process should be created (exitCode=0, on-failure)
+    const newDaemons1 = [...newState1.processes.values()].filter(
+      p => p.name === "success-daemon" && p.pid !== "success-daemon"
+    );
+    expect(newDaemons1).toHaveLength(0);
+
+    // Dead daemon with exitCode=1 and on-failure policy — SHOULD restart
+    const processes2 = new Map(s1.processes);
+    processes2.set("failure-daemon", {
+      pid: "failure-daemon", type: "daemon" as const, state: "dead" as const,
+      name: "failure-daemon", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "on-failure" as const,
+      exitCode: 1, exitReason: "error",
+    });
+
+    const stateFailDaemon = { ...s1, processes: processes2 };
+    const [newState2] = transition(stateFailDaemon, timerEvent("housekeep"));
+
+    const newDaemons2 = [...newState2.processes.values()].filter(
+      p => p.name === "failure-daemon" && p.pid !== "failure-daemon"
+    );
+    expect(newDaemons2).toHaveLength(1);
+  });
+
+  test("dead daemon with restartPolicy='never' does not restart", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const processes = new Map(s1.processes);
+
+    processes.set("no-restart", {
+      pid: "no-restart", type: "daemon" as const, state: "dead" as const,
+      name: "no-restart-daemon", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
+      exitCode: 1, exitReason: "error",
+    });
+
+    const stateNoRestart = { ...s1, processes };
+    const [newState] = transition(stateNoRestart, timerEvent("housekeep"));
+
+    const newDaemons = [...newState.processes.values()].filter(
+      p => p.name === "no-restart-daemon" && p.pid !== "no-restart"
+    );
+    expect(newDaemons).toHaveLength(0);
+  });
+
+  test("restarted daemon preserves checkpoint from dead process", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const processes = new Map(s1.processes);
+
+    const checkpoint = {
+      pid: "cp-daemon",
+      capturedAt: new Date().toISOString(),
+      conversationSummary: "was doing important work",
+      pendingObjectives: ["finish the thing"],
+      artifacts: { "key": "value" },
+    };
+
+    processes.set("cp-daemon", {
+      pid: "cp-daemon", type: "daemon" as const, state: "dead" as const,
+      name: "checkpointed-daemon", parentPid: null, objective: "work", priority: 50,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 5, tokensUsed: 300, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
+      exitCode: 0, exitReason: "completed",
+      checkpoint,
+    });
+
+    const stateWithCheckpoint = { ...s1, processes };
+    const [newState] = transition(stateWithCheckpoint, timerEvent("housekeep"));
+
+    const newDaemons = [...newState.processes.values()].filter(
+      p => p.name === "checkpointed-daemon" && p.pid !== "cp-daemon"
+    );
+    expect(newDaemons).toHaveLength(1);
+    expect(newDaemons[0]!.checkpoint).toBeDefined();
+    expect(newDaemons[0]!.checkpoint!.conversationSummary).toBe("was doing important work");
+  });
+});
+
+describe("transition — housekeep strategy application", () => {
+  test("matched strategy IDs produce apply_strategies effect and set activeStrategyId", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const stateWithStrategies = {
+      ...s1,
+      matchedStrategyIds: new Set(["strategy-1", "strategy-2"]),
+    };
+
+    const [newState, effects] = transition(stateWithStrategies, timerEvent("housekeep"));
+
+    // activeStrategyId should be set to the first matched strategy
+    expect(newState.activeStrategyId).toBe("strategy-1");
+
+    // Should emit apply_strategies effect
+    const strategyEffects = effects.filter(e => e.type === "apply_strategies");
+    expect(strategyEffects).toHaveLength(1);
+    expect(strategyEffects[0]!.type === "apply_strategies" && strategyEffects[0]!.strategyIds).toEqual(
+      expect.arrayContaining(["strategy-1", "strategy-2"])
+    );
+  });
+
+  test("empty matchedStrategyIds does not produce apply_strategies effect", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    // matchedStrategyIds is empty by default
+    const [newState, effects] = transition(s1, timerEvent("housekeep"));
+
+    expect(newState.activeStrategyId).toBeNull();
+
+    const strategyEffects = effects.filter(e => e.type === "apply_strategies");
+    expect(strategyEffects).toHaveLength(0);
+  });
+});
+
+describe("transition — housekeep rebuild_dag effect", () => {
+  test("housekeep emits rebuild_dag effect", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent("test"));
+
+    const [, effects] = transition(s1, timerEvent("housekeep"));
+
+    const dagEffects = effects.filter(e => e.type === "rebuild_dag");
+    expect(dagEffects).toHaveLength(1);
+  });
+});

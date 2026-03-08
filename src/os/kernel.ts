@@ -1668,55 +1668,25 @@ export class OsKernel {
 
   /**
    * I/O-heavy housekeep operations that the transition function cannot handle.
-   * Called after transition has already applied pure state decisions
-   * (housekeepCount, cadence signals, stall/deadlock detection, sleeper/checkpoint waking).
+   * Called after transition has already applied pure state decisions.
+   *
+   * Wave 3 migration: cadence signals, zombie reaping, daemon restarts, DAG rebuild,
+   * and strategy application are now handled by transition effects (signal_emit, flush_ipc,
+   * activate_process, submit_llm, rebuild_dag, apply_strategies).
+   *
+   * Remaining here: deferral processing (Wave 5), telemetry (observability, not decisions).
    */
   private housekeepIO(): void {
     // 0. Reset per-tick state
     this.tickSignals = [];
 
-    // 1. Emit IPC signals for cadences (transition computed which, but IPC bus is I/O)
-    const cadences = this.config.kernel.tickSignalCadences ?? [1, 5, 10];
-    for (const cadence of cadences) {
-      if (this.housekeepCount % cadence === 0) {
-        const signalName = `tick:${cadence}`;
-        this.ipcBus.emitSignal(signalName, "kernel", { tick: this.housekeepCount, cadence });
-        this.tickSignals.push(signalName);
-      }
-    }
-
-    // 2. Check deferral conditions (runtime: evaluates bb state, spawns processes)
+    // 1. Check deferral conditions (runtime: evaluates bb state, spawns processes)
+    // TODO(Wave 5): Complete deferral migration — transition already handles pure deferrals
+    // via processPureDeferrals(), but the kernel's processDeferrals() uses runtime I/O
+    // (supervisor.spawn, supervisor.activate). Remove when fully migrated.
     this.processDeferrals();
 
-    // 3. Flush IPC bus — get woken PIDs, wake idle processes
-    // TODO(Wave 3): Move housekeep I/O flush to transition effects; these activate calls
-    // handle I/O-side signals emitted by housekeepIO itself (cadence signals, deferrals).
-    const { wokenPids } = this.ipcBus.flush();
-    for (const pid of wokenPids) {
-      const proc = this.table.get(pid);
-      if (proc && proc.state === "idle") {
-        this.supervisor.activate(pid);
-      }
-    }
-
-    // 4. Reap zombies
-    this.supervisor.reapZombies();
-
-    // 5. Handle daemon restarts
-    this.supervisor.handleRestarts();
-
-    // 6. Rebuild DAG
-    this.dagEngine.buildFromProcesses(this.table.getAll());
-
-    // 6b. Apply strategies
-    const applicable = this.getApplicableStrategies();
-    if (applicable.length > 0) {
-      this.scheduler.applyStrategies(applicable);
-      this.activeStrategyId = applicable[0]!.id;
-    }
-    this.router.setStrategiesSnapshot(applicable);
-
-    // Telemetry collection + perf analysis (if enabled)
+    // 2. Telemetry collection + perf analysis (observability, not decision-making — OK to keep)
     if (this.config.kernel.telemetryEnabled) {
       this.telemetryCollector.onTick(this.snapshot());
       const telemetrySnap = this.telemetryCollector.getSnapshot();
@@ -3364,6 +3334,7 @@ export class OsKernel {
       deferrals: new Map(this.deferrals),
       pendingTriggers: [...this.pendingTriggers],
       activeStrategyId: this.activeStrategyId ?? null,
+      matchedStrategyIds: this.bootMatchedStrategyIds ?? new Set(),
       halted: this.halted,
       haltReason: this.haltReason,
       goalWorkDoneAt: this.goalWorkDoneAt,
@@ -3614,6 +3585,18 @@ export class OsKernel {
         }
         case "schedule_pass": {
           this.doSchedulingPass();
+          break;
+        }
+
+        case "apply_strategies": {
+          // Resolve strategy IDs to full strategy objects from memory store
+          const allStrategies = this.memoryStore.getSchedulingStrategies();
+          const strategyIdSet = new Set(effect.strategyIds);
+          const applicable = allStrategies.filter(s => strategyIdSet.has(s.id));
+          if (applicable.length > 0) {
+            this.scheduler.applyStrategies(applicable);
+          }
+          this.router.setStrategiesSnapshot(applicable);
           break;
         }
 
