@@ -16,6 +16,17 @@ export class AsyncMutex {
     });
   }
 
+  /**
+   * Try to acquire the mutex without waiting.
+   * Returns a release function if acquired, null if already locked.
+   * Use this for low-priority periodic work that should yield to higher-priority callers.
+   */
+  tryAcquire(): (() => void) | null {
+    if (this.locked) return null;
+    this.locked = true;
+    return () => this.release();
+  }
+
   private release(): void {
     const next = this.queue.shift();
     if (next) {

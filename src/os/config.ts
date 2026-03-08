@@ -20,6 +20,7 @@ const osKernelSchema = z.object({
   housekeepIntervalMs: z.number().int().positive().default(500),
   metacogIntervalMs: z.number().int().positive().default(300000),
   snapshotIntervalMs: z.number().int().positive().default(10000),
+  goalCompleteGracePeriodMs: z.number().int().nonnegative().default(30000),
 }).strict();
 
 const osSchedulerSchema = z.object({

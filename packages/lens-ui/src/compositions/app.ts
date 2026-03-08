@@ -100,8 +100,10 @@ export class LensApp extends LensElement {
     css`
       :host {
         display: block;
+        width: 100vw;
         height: 100vh;
         overflow: hidden;
+        box-sizing: border-box;
       }
     `,
   ];

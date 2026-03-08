@@ -40,11 +40,13 @@ export class LensDashboard extends LensElement {
       :host {
         display: grid;
         grid-template-rows: var(--lens-topbar-h) var(--lens-narrative-h) 1fr var(--lens-bottombar-h);
-        grid-template-columns: var(--lens-sidebar-w) 1fr var(--lens-rightpanel-w);
-        height: 100vh;
+        grid-template-columns: var(--lens-sidebar-w) minmax(0, 1fr) var(--lens-rightpanel-w);
+        width: 100%;
+        height: 100%;
         overflow: hidden;
         background: var(--lens-bg-root);
         position: relative;
+        box-sizing: border-box;
       }
 
       /* CRT scanline overlay */
@@ -86,6 +88,7 @@ export class LensDashboard extends LensElement {
         flex-direction: column;
         overflow: hidden;
         padding: 0 12px;
+        min-width: 0;
       }
 
       .right-area {
@@ -96,6 +99,7 @@ export class LensDashboard extends LensElement {
         flex-direction: column;
         overflow: hidden;
         padding: 0 8px;
+        min-width: 0;
       }
 
       .bottombar-area {

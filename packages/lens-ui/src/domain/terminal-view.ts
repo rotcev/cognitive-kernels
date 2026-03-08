@@ -31,9 +31,7 @@ function shouldHide(line: LensTerminalLine): boolean {
 }
 
 function isNoise(line: LensTerminalLine): boolean {
-  return line.level === "info" && (
-    line.text.startsWith("usage:") || line.text.startsWith("status:")
-  );
+  return line.level === "info" && line.text.startsWith("usage:");
 }
 
 // ── Agent colors ─────────────────────────────────────────────────
@@ -89,19 +87,93 @@ function renderMd(text: string): string {
   return s;
 }
 
+// ── Tool I/O cards ──────────────────────────────────────────────
+
+interface ToolCard {
+  kind: "tool-card";
+  seq: number;
+  pid: string;
+  processName: string;
+  timestamp: string;
+  level: "tool";
+  toolName: string;
+  command: string;
+  output: string;
+  status: "running" | "done" | "failed";
+}
+
+/**
+ * Collapse consecutive tool_started → thinking (output) → tool_completed
+ * from the same PID into a single ToolCard pseudo-line.
+ */
+function collapseToolCards(lines: LensTerminalLine[]): Array<LensTerminalLine | ToolCard> {
+  const out: Array<LensTerminalLine | ToolCard> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.level === "tool") {
+      const t = parseTool(line.text);
+      if (t && t.action === "tool_started" && /^bash$/i.test(t.name)) {
+        let output = "";
+        let j = i + 1;
+        let status: "running" | "done" | "failed" = "running";
+        while (j < lines.length && lines[j].pid === line.pid) {
+          const next = lines[j];
+          if (next.level === "thinking") {
+            output += next.text;
+            j++;
+          } else if (next.level === "tool") {
+            const nt = parseTool(next.text);
+            if (nt && (nt.action === "tool_completed" || nt.action === "tool_failed") && /^bash$/i.test(nt.name)) {
+              status = nt.action === "tool_failed" ? "failed" : "done";
+              j++;
+            }
+            break;
+          } else {
+            break;
+          }
+        }
+        out.push({
+          kind: "tool-card",
+          seq: line.seq,
+          pid: line.pid,
+          processName: line.processName,
+          timestamp: line.timestamp,
+          level: "tool",
+          toolName: t.name,
+          command: t.detail,
+          output: output.trim(),
+          status,
+        });
+        i = j;
+        continue;
+      }
+    }
+    out.push(line);
+    i++;
+  }
+  return out;
+}
+
+function isToolCard(item: LensTerminalLine | ToolCard): item is ToolCard {
+  return "kind" in item && item.kind === "tool-card";
+}
+
 // ── Grouping ─────────────────────────────────────────────────────
+
+type TurnItem = LensTerminalLine | ToolCard;
 
 interface Turn {
   pid: string;
   processName: string;
   startTime: string;
-  lines: LensTerminalLine[];
+  lines: TurnItem[];
 }
 
-function groupIntoTurns(lines: LensTerminalLine[]): Turn[] {
+function groupIntoTurns(lines: TurnItem[]): Turn[] {
   const turns: Turn[] = [];
   for (const line of lines) {
-    if (shouldHide(line)) continue;
+    if (!isToolCard(line) && shouldHide(line)) continue;
     const last = turns[turns.length - 1];
     if (last && last.pid === line.pid) {
       last.lines.push(line);
@@ -160,7 +232,7 @@ export class LensTerminalView extends LensElement {
 
       /* ── Column legend (subtle) ────────────────── */
       .col-legend {
-        display: grid; grid-template-columns: 56px 140px 1fr;
+        display: grid; grid-template-columns: 56px 140px minmax(0, 1fr);
         padding: 4px 12px 6px; gap: 0;
         font-size: 9px; color: var(--lens-text-dim);
         opacity: 0.5; text-transform: uppercase; letter-spacing: 0.5px;
@@ -170,7 +242,7 @@ export class LensTerminalView extends LensElement {
       /* ── Log row ───────────────────────────────── */
       .row {
         display: grid;
-        grid-template-columns: 56px 140px 1fr;
+        grid-template-columns: 56px 140px minmax(0, 1fr);
         padding: 1px 12px;
         min-height: 20px;
         align-items: start;
@@ -360,6 +432,57 @@ export class LensTerminalView extends LensElement {
       /* ── Info fallback ─────────────────────────── */
       .info-text { color: var(--lens-text-dim); font-size: 10px; }
 
+      /* ── Tool I/O card ─────────────────────────── */
+      .io-card {
+        border-radius: 4px; overflow: hidden;
+        background: rgba(0,0,0,0.25);
+        border: 1px solid rgba(255,255,255,0.06);
+        margin: 2px 0;
+      }
+      .io-card.done { border-color: rgba(0,255,136,0.12); }
+      .io-card.failed { border-color: rgba(255,68,68,0.2); }
+      .io-card-header {
+        display: flex; align-items: center; gap: 0;
+        cursor: pointer; transition: background 0.1s;
+      }
+      .io-card-header:hover { background: rgba(255,255,255,0.02); }
+      .io-card-icon {
+        width: 22px; display: flex; align-items: center;
+        justify-content: center; font-size: 9px; flex-shrink: 0;
+        align-self: stretch;
+      }
+      .io-card.done .io-card-icon { background: rgba(0,255,136,0.08); color: var(--lens-green); }
+      .io-card.failed .io-card-icon { background: rgba(255,68,68,0.1); color: var(--lens-red); }
+      .io-card.running .io-card-icon { background: rgba(255,255,255,0.03); color: var(--lens-amber); }
+      .io-card-tool {
+        padding: 3px 7px; font-size: 10px; font-weight: 600;
+        letter-spacing: 0.02em;
+        border-right: 1px solid rgba(255,255,255,0.06);
+        flex-shrink: 0;
+      }
+      .io-card-cmd {
+        padding: 3px 8px; font-size: 10px;
+        color: var(--lens-text);
+        flex: 1; min-width: 0;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .io-card-cmd::before { content: "$ "; color: var(--lens-text-dim); font-size: 9px; }
+      .io-card-toggle {
+        font-size: 9px; font-family: var(--lens-font-mono);
+        padding: 2px 8px; margin-right: 4px;
+        color: var(--lens-text-dim); flex-shrink: 0;
+        border: none; background: transparent; cursor: pointer;
+      }
+      .io-card-output {
+        border-top: 1px solid rgba(255,255,255,0.04);
+        padding: 6px 8px;
+        font-size: 10px; line-height: 1.5;
+        color: var(--lens-text-secondary);
+        white-space: pre-wrap; word-break: break-word;
+        max-height: 300px; overflow-y: auto;
+        background: rgba(0,0,0,0.15);
+      }
+
       /* ── Empty / cursor ────────────────────────── */
       .cursor-row {
         padding: 2px 12px 2px calc(56px + 140px + 12px);
@@ -398,6 +521,7 @@ export class LensTerminalView extends LensElement {
   @property({ type: Boolean, reflect: true }) compact = false;
   @query(".scroll") private _scrollEl!: HTMLElement;
   @state() private _expandedThinking = new Set<number>();
+  @state() private _expandedCards = new Set<number>();
   @state() private _collapsedTurns = new Set<number>();
 
   /** Non-reactive flag — suppresses autoscroll during toggle without triggering re-render. */
@@ -409,8 +533,8 @@ export class LensTerminalView extends LensElement {
     }
   }
 
-  /** Merge consecutive thinking lines from same PID. */
-  private get _merged(): LensTerminalLine[] {
+  /** Merge consecutive thinking lines from same PID, then collapse tool I/O cards. */
+  private get _merged(): TurnItem[] {
     const source = this.processFilter
       ? this.lines.filter(l => l.pid === this.processFilter)
       : this.lines;
@@ -424,7 +548,7 @@ export class LensTerminalView extends LensElement {
       } else { out.push(cur); cur = { ...l }; }
     }
     out.push(cur);
-    return out;
+    return collapseToolCards(out);
   }
 
   /**
@@ -448,6 +572,14 @@ export class LensTerminalView extends LensElement {
         scrollEl.scrollTop += newTop - viewportY;
       }
       this._suppressAutoscroll = false;
+    });
+  }
+
+  private _toggleCard(seq: number, e?: Event) {
+    this._stableToggle(e?.currentTarget ?? null, () => {
+      const n = new Set(this._expandedCards);
+      if (n.has(seq)) n.delete(seq); else n.add(seq);
+      this._expandedCards = n;
     });
   }
 
@@ -481,6 +613,37 @@ export class LensTerminalView extends LensElement {
   }
 
   // ── Render content (for the content column) ──────────────────
+
+  private _renderItem(item: TurnItem) {
+    if (isToolCard(item)) return this._renderToolCard(item);
+    return this._renderContent(item);
+  }
+
+  private _renderToolCard(card: ToolCard) {
+    const expanded = this._expandedCards.has(card.seq);
+    const icon = card.status === "failed" ? "\u2717" : card.status === "done" ? "\u2713" : "\u25B6";
+    const tc = toolColor(card.toolName);
+    const hasOutput = card.output.length > 0;
+    const outputPreview = card.output.length > 120
+      ? card.output.slice(0, 120) + "…"
+      : card.output;
+
+    return html`
+      <div class="io-card ${card.status}">
+        <div class="io-card-header" @click=${(e: Event) => hasOutput ? this._toggleCard(card.seq, e) : null}>
+          <span class="io-card-icon">${icon}</span>
+          <span class="io-card-tool" style="color:${tc}">${card.toolName}</span>
+          <span class="io-card-cmd">${card.command}</span>
+          ${hasOutput ? html`<span class="io-card-toggle">${expanded ? "▾" : "▸"}</span>` : nothing}
+        </div>
+        ${expanded && hasOutput
+          ? html`<div class="io-card-output">${card.output}</div>`
+          : !expanded && hasOutput
+            ? html`<div class="io-card-output" style="max-height:20px;overflow:hidden;opacity:0.5;padding:2px 8px;font-size:9px">${outputPreview}</div>`
+            : nothing}
+      </div>
+    `;
+  }
 
   private _renderContent(line: LensTerminalLine) {
     if (shouldHide(line)) return nothing;
@@ -606,10 +769,11 @@ export class LensTerminalView extends LensElement {
     const color = agentColor(turn.processName);
     const key = turn.lines[0]?.seq ?? 0;
     const collapsed = this._collapsedTurns.has(key);
-    const visibleLines = turn.lines.filter(l => !shouldHide(l));
+    const visibleLines = turn.lines.filter(l => isToolCard(l) || !shouldHide(l));
     const lineCount = visibleLines.length;
 
     if (collapsed) {
+      const first = visibleLines[0] ?? turn.lines[0];
       return html`
         <div class="row group-start">
           <span class="col-time">${formatTime(turn.startTime)}</span>
@@ -618,13 +782,13 @@ export class LensTerminalView extends LensElement {
             <span class="name">${turn.processName}</span>
             ${lineCount > 1 ? html`<span class="more-badge">+${lineCount - 1}</span>` : nothing}
           </span>
-          <div class="col-content">${this._renderContent(visibleLines[0] ?? turn.lines[0])}</div>
+          <div class="col-content">${this._renderItem(first)}</div>
         </div>
       `;
     }
 
     return html`${turn.lines.map((line, i) => {
-      if (shouldHide(line)) return nothing;
+      if (!isToolCard(line) && shouldHide(line)) return nothing;
       const isFirst = i === 0;
       return html`
         <div class="row ${isFirst ? "group-start" : ""}">
@@ -635,7 +799,7 @@ export class LensTerminalView extends LensElement {
               ? html`<span class="dot" style="background:${color}"></span><span class="name">${turn.processName}</span>`
               : nothing}
           </span>
-          <div class="col-content">${this._renderContent(line)}</div>
+          <div class="col-content">${this._renderItem(line)}</div>
         </div>
       `;
     })}`;

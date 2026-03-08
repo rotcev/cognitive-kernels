@@ -183,7 +183,7 @@ export class StreamSegmenter {
         const inner = JSON.parse(event.message ?? "{}");
         if (inner.type === "text_delta") return "thinking";
         if (inner.type === "tool_started" || inner.type === "tool_completed" || inner.type === "tool_progress") return "tool";
-        if (inner.type === "status") return "info";
+        if (inner.type === "status") return "system";
         if (inner.type === "task_started" || inner.type === "task_completed") return "info";
         if (inner.type === "usage") return "info";
       } catch {
@@ -234,7 +234,7 @@ export class StreamSegmenter {
         }
         if (inner.type === "tool_failed") return `tool_failed: ${inner.toolName} — ${inner.error ?? "unknown"}`;
         if (inner.type === "usage") return `usage: ${inner.usage?.inputTokens ?? 0}in/${inner.usage?.outputTokens ?? 0}out`;
-        if (inner.type === "status") return `status: ${inner.status}`;
+        if (inner.type === "status") return inner.status ?? "";
         if (inner.type === "task_started") return `task_started: ${inner.description}`;
         if (inner.type === "task_completed") return `task_completed: ${inner.summary}`;
         return event.message;

@@ -1,132 +1,78 @@
 # Codebase Scout Report: scout:codebase
 
-## Directory Structure
+Standalone TypeScript/Node runtime for a “cognitive kernel” (process table + scheduler + IPC + metacog + executors), plus observability (“Lens”), an HTTP API, and an MCP control-plane.
+
+## Repo Layout (as of 2026-03-07)
 
 **Top-Level:**
-- `.git/` — version control
-- `src/` — TypeScript source (59 files total)
-- `test/` — vitest test suite (20 test files)
-- `dist/` — compiled output
-- `docs/` — UI/docs (including `ui/run-inspector.html`)
-- `node_modules/` — dependencies
-- `packages/` — monorepo workspaces (lens-ui visible)
+- `src/` — TypeScript source (`61` `.ts` files)
+- `test/` — vitest suite (`23` `.test.ts` files)
+- `dist/` — compiled JS + `.d.ts` output (publishable artifact)
+- `packages/` — workspaces: `cognitive-lens` + `cognitive-lens-ui`
+- `docs/` — design docs + UI prototypes (not runtime code)
+- `scripts/` — local utilities (golden-run capture, lens output, Neon tests)
+- `.cognitive-kernels/` — local runtime artifacts (blackboard markdown, results, etc.)
 
-**Src Subdirectories (Functional Domains):**
-- `src/os/` — 28 files, kernel core (28 files: kernel.ts, llm-executor.ts, awareness-daemon.ts, etc.)
-- `src/brain/` — 6 files, LLM provider abstractions (claude-brain.ts, codex-brain.ts, create-brain.ts, tool-event-utils.ts)
-- `src/lens/` — 15 files, observability layer (view-models.ts, role-classifier.ts, stream-segmenter.ts, narrative.ts, server.ts, client.ts, types.ts)
-- `src/db/` — 7 files, database/storage (pg-store.ts, schema.ts, storage-backend.ts, protocol-emitter-pg.ts, connection.ts)
-- `src/api/` — 6 files, HTTP API (app.ts, server.ts, schemas.ts, types.ts)
-- `src/runs/` — 4 files, run management (run-manager.ts, monitoring.ts)
-- `src/mcp/` — 3 files, MCP control plane
-- Root level: `index.ts`, `cli.ts`, `mcp-cli.ts`, `types.ts`
+**Workspaces:**
+- `packages/lens/` (`cognitive-lens`) — framework-agnostic client library, published from `dist/`
+- `packages/lens-ui/` (`cognitive-lens-ui`) — Lit + Vite UI components + Storybook
 
-**Test Directory Mirrors Src:**
-- `test/os/`, `test/brain/`, `test/lens/`, `test/db/`, `test/api/`, `test/runs/`, `test/mcp/`
-- Total: 20 test files
-- Test framework: **vitest 3.0.8** (npm test, vitest run --passWithNoTests)
+## Entry Points / Public Surface
 
-## Build & Configuration
+**Published package (`cognitive-kernels`):**
+- `src/index.ts` — public exports (Brain providers, `runOsMode`, kernel/config/types, runs API + MCP control-plane)
+- `package.json` `bin`:
+  - `cognitive-kernels` → `dist/cli.js` (`src/cli.ts`)
+  - `cognitive-kernels-mcp` → `dist/mcp-cli.js` (`src/mcp-cli.ts`)
 
-**TypeScript Config:**
-- Target: `ES2022`
-- Module: `NodeNext` (with `moduleResolution: NodeNext`)
-- Strict mode: enabled
-- Output dir: `dist/`
-- Entry sources: `src/**/*.ts`
+**CLI commands:**
+- `cognitive-kernels os ...` → boots OS-mode kernel via `runOsMode()` (`src/os/entry.ts`)
+- `cognitive-kernels serve ...` → starts Runs HTTP API, optional Neon-backed storage, optional Lens WS server (`src/cli.ts`)
+- `cognitive-kernels-mcp ...` → starts MCP server for controlling runs (`src/mcp/control-plane.ts`)
 
-**Package.json:**
-- Type: ES module ("type": "module")
-- Build: `tsc -p tsconfig.json`
-- Test: `vitest run --passWithNoTests`
-- Exports: Main export (`.`) and named export (`./lens`)
-- Bin commands: `cognitive-kernels`, `cognitive-kernels-mcp`
+## Core Modules (src/)
 
-**Key Dependencies:**
-- `@anthropic-ai/claude-agent-sdk`: 0.2.50
-- `@openai/codex-sdk`: 0.104.0
-- `drizzle-orm`: ^0.45.1
-- `hono`: ^4.12.5
-- `@neondatabase/serverless`: ^1.0.2
-- `zod`: ^4.0.0
-- `ws`: ^8.19.0
+**`src/os/` (kernel runtime)**
+- Orchestrates process execution: `OsKernel` (`kernel.ts`)
+- Scheduling + topology: `scheduler.ts`, `dag-engine.ts`, `seed-blueprints.ts`
+- IPC primitives: blackboard + signals in `ipc-bus.ts`
+- Executors + routing: `process-executor.ts`, `executor-router.ts`, `llm-executor.ts`, `shell-executor.ts`, `subkernel-executor.ts`
+- Metacognition + optimization: `metacog-agent.ts`, `self-optimizer.ts`, `perf-analyzer.ts`, `counterfactual-simulator.ts`, `awareness-daemon.ts`
+- Protocol/telemetry: `protocol-emitter.ts`, `telemetry.ts`
 
-## Utility Function Patterns Found
+**`src/brain/` (provider abstraction)**
+- `create-brain.ts` + provider implementations (`claude-brain.ts`, `codex-brain.ts`)
 
-### Existing Utility Examples:
+**`src/runs/` (run management + monitoring views)**
+- `run-manager.ts` — run lifecycle management + optional persistence
+- `monitoring.ts` — builds topology/timeline/dashboard views from snapshots
 
-1. **`src/brain/tool-event-utils.ts`** — Good pattern for reference:
-   - Exports utility functions: `summarizeToolValue()`, `summarizeToolError()`, `isLikelyToolFailure()`
-   - Constants at top (MAX_DEPTH, MAX_ARRAY_ITEMS, MAX_STRING_LENGTH, etc.)
-   - Helper functions for specific concerns (summarizeString(), summarizeObject(), extractErrorMessage())
-   - Full type safety (returns `StreamEventValue | undefined`)
-   - 146 lines
+**`src/lens/` (observability)**
+- WebSocket server/client + session management (`server.ts`, `client.ts`, `session.ts`)
+- Snapshot diffing + UI view models (`snapshot-differ.ts`, `view-models.ts`, `stream-segmenter.ts`, `narrative.ts`)
 
-### Testing Pattern (vitest):
+**`src/api/` (HTTP API)**
+- Hono app/server + request schemas/types (`app.ts`, `server.ts`, `schemas.ts`, `types.ts`)
 
-From `test/os/kernel.test.ts` and `test/brain/create-brain.test.ts`:
-- Imports: `{ describe, expect, test, beforeEach, afterEach } from "vitest"`
-- Test structure:
-  ```ts
-  describe("feature-name", () => {
-    beforeEach(() => { /* setup */ });
-    afterEach(() => { /* cleanup */ });
-    test("should do X", () => { /* assertions */ });
-  });
-  ```
-- Uses vitest mocking: `vi.mock()`, `vi.fn()`, `vi.hoisted()`
-- Standard chai assertions: `expect(...).toBe()`, `toHaveBeenCalled()`, etc.
+**`src/db/` (persistence)**
+- Neon/Postgres-backed storage + schema (`storage-backend.ts`, `connection.ts`, `schema.ts`, `pg-store.ts`, `protocol-emitter-pg.ts`)
 
-### Directory Convention for New Utilities:
+**`src/mcp/`**
+- MCP control-plane server (`control-plane.ts`)
 
-**NO dedicated `utils/` or `helpers/` folder exists.** Functions are organized by domain:
-- Utility functions live in the module they serve (e.g., `tool-event-utils.ts` in `src/brain/`)
-- OR co-located with their primary consumer
+**`src/utils/`**
+- Small utilities (currently includes `fibonacci.ts`)
 
-## Recommendation for Fibonacci Utility
+## Architecture Docs / Patterns
 
-**Place at:** `src/utils/fibonacci.ts` (new directory needed, OR place in `src/` root)
+**Plans/Design:**
+- `docs/plans/2026-03-07-event-driven-kernel.md` — refactor plan: tick-loop → event-driven, serialized mutations via `AsyncMutex` (`src/os/async-mutex.ts`)
+- `docs/plans/2026-03-06-fully-db-backed-runs.md` — “runs” persistence direction
+- `docs/plans/2026-03-06-lens-design-system*.md` — Lens UI design system notes
 
-**Options:**
-1. Create `src/utils/` directory (follows common pattern)
-2. Place at `src/fibonacci.ts` (simpler, minimal setup)
-3. Place at `src/math/fibonacci.ts` (domain-grouped)
-
-**Test location:** Corresponding path under `test/` matching src structure
-
-**Structure:**
-```ts
-// src/utils/fibonacci.ts
-const DEFAULT_CACHE_SIZE = 100;
-
-function fibonacci(n: number, memo: Map<number, bigint> = new Map()): bigint {
-  // implementation
-}
-
-export { fibonacci };
-```
-
-```ts
-// test/utils/fibonacci.test.ts
-import { describe, expect, test } from "vitest";
-import { fibonacci } from "../../src/utils/fibonacci.js";
-
-describe("fibonacci", () => {
-  test("should compute fibonacci(5) = 5", () => {
-    expect(fibonacci(5n)).toBe(5n);
-  });
-  // more tests
-});
-```
-
-## Summary
-
-- **59 TypeScript source files** organized into 8 functional domains
-- **Vitest** for testing (no external test infrastructure)
-- **Module Resolution:** NodeNext ES imports (requires `.js` extensions in imports)
-- **No existing utils directory** — utilities co-locate with modules or live in domain folders
-- **Strict TypeScript** enabled, declaration files generated
-- Monorepo structure with workspaces (packages/lens-ui exists)
+**UI Prototype:**
+- `docs/ui/run-inspector.html` — single-file run inspector prototype (topology + blackboard views)
+- `docs/prompts/run-inspector-ui.md` — product/UX spec for the inspector
 
 ---
-*Generated by scout process on 2026-03-07*
+*Updated by codebase-scout on 2026-03-07.*

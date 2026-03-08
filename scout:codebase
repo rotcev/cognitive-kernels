@@ -1,65 +1,81 @@
-## Codebase Inventory
+## Codebase Map (scout:codebase)
 
-**Timestamp:** 2026-03-07
-**Working Directory:** /Users/shawndavies/dev/cognitive-kernels
+**Timestamp:** 2026-03-07  
+**Repo Root:** `/Users/shawndavies/dev/cognitive-kernels`
 
-### Summary
-- **Total Files:** 15,206
-- **TypeScript Files (.ts, .tsx):** 3,869
-- **TypeScript File Percentage:** 25.47%
-- **Other Files:** 11,337
+### What This Repo Is
+- A standalone **cognitive kernel runtime** (“OS mode”) that schedules agentic sub-processes, routes IPC (signals + blackboard), and runs metacognition/awareness layers.
+- A first-party **observability stack (“Lens”)** that turns protocol events + snapshots into WebSocket-delivered, UI-friendly deltas.
+- A **run manager** that starts kernel runs (child-process model) and supports DB-backed storage (Neon/Postgres) for cross-machine observability.
+- Optional **control planes**: HTTP API (Hono) and MCP server (Model Context Protocol).
 
-### Key Directories
-- `src/` — TypeScript source (46 files)
-  - `os/` — 30 kernel files (.ts)
-  - `lens/` — 13 observability layer files (.ts)
-  - `db/` — 5 database files (.ts)
-  - `api/` — 4 API server files (.ts)
-  - `brain/` — 4 LLM brain files (.ts)
-  - `runs/` — 2 run manager files (.ts)
-  - `mcp/` — 1 MCP control plane file (.ts)
+### Entry Points
+- Library barrel: `src/index.ts`
+- OS boot: `src/os/entry.ts` (`runOsMode`)
+- CLI: `src/cli.ts` (`cognitive-kernels` → `os`, `serve`)
+- MCP CLI: `src/mcp-cli.ts` (`cognitive-kernels-mcp`)
+- Workspace packages:
+  - `packages/lens/` (`cognitive-lens`) — framework-agnostic Lens WebSocket client + cognitive event typing
+  - `packages/lens-ui/` (`cognitive-lens-ui`) — Lit web components + Storybook
 
-- `test/` — Test suite (33 test files)
-  - `os/` — 3 kernel tests
-  - `lens/` — 6 lens pipeline tests
-  - `db/` — 6 database tests
-  - `brain/` — 3 brain tests
-  - `api/` — 1 API test
-  - `mcp/` — 1 MCP test
-  - `runs/` — 1 run manager test
+### Root Layout (high-signal)
+- `src/` — TypeScript kernel runtime + APIs + lens
+- `packages/` — npm workspaces (`lens`, `lens-ui`)
+- `docs/` — plans/specs + UI prototype
+- `scripts/` — utilities for golden runs, Lens dumps, Neon/DB testing
+- `drizzle.config.ts` + `src/db/schema.ts` — Drizzle schema/migration planning for Postgres
+- `server.js` — small standalone HTTP “Hello World” server (not part of kernel runtime)
 
-- `packages/` — Workspace packages
-  - `lens/` — 4 TypeScript files
-  - `lens-ui/` — 58 TypeScript files (components, stories, tokens)
+### Runtime Architecture (current patterns)
+- **ESM + strict TS** (`type: module`, `moduleResolution: NodeNext`, `strict: true`) with build output in `dist/`.
+- **Provider abstraction** via `Brain` + per-provider adapters (`src/brain/*`), with `runOsMode` selecting provider and filling defaults (Codex model defaults when provider=`codex`).
+- **Structured “syscalls”** from LLM processes: processes return a `commands[]` array (e.g. `bb_write`, `spawn_child`, `spawn_graph`, `spawn_ephemeral`, `signal_emit`, `idle`, `sleep`, `checkpoint`, `spawn_system`, `spawn_kernel`, `exit`), validated via JSON Schema in `src/os/schemas.ts` and typed in `src/os/types.ts`.
+- **Multi-backend execution** via a router that can run:
+  - LLM turns (`src/os/llm-executor.ts`)
+  - system/shell processes (`src/os/shell-executor.ts`)
+  - sub-kernels (`src/os/subkernel-executor.ts`)
+- **Event-driven kernel loop** (timers + mutex-serialized state mutation) inside `src/os/kernel.ts`.
+- **Observability-first**: protocol emitter writes NDJSON events + live/final snapshots to filesystem and/or Neon; Lens consumes snapshots/events and diffs into deltas for clients.
 
-- `scripts/` — Build scripts (4 TypeScript files)
+### Source Layout (by subsystem)
+- `src/os/` — kernel runtime
+  - Orchestrator: `src/os/kernel.ts`
+  - Scheduling: `src/os/scheduler.ts`
+  - Process lifecycle: `src/os/process-table.ts`, `src/os/process-supervisor.ts`
+  - DAG/topology: `src/os/dag-engine.ts`
+  - IPC (blackboard + signals): `src/os/ipc-bus.ts`
+  - Execution plumbing: `src/os/process-executor.ts`, `src/os/executor-router.ts`, `src/os/executor-backend.ts`
+  - Persistence/telemetry: `src/os/protocol-emitter.ts`, `src/os/telemetry.ts`, `src/os/perf-analyzer.ts`
+  - Meta layers: `src/os/metacog-agent.ts`, `src/os/awareness-daemon.ts`, `src/os/self-optimizer.ts`, `src/os/counterfactual-simulator.ts`
+  - Types/contracts: `src/os/types.ts`, `src/os/schemas.ts`
+- `src/brain/` — provider abstraction + adapters
+  - Factory: `src/brain/create-brain.ts`
+  - Providers: `src/brain/claude-brain.ts`, `src/brain/codex-brain.ts`
+- `src/lens/` — observability stack
+  - Orchestrator: `src/lens/session.ts`
+  - WS server: `src/lens/server.ts`
+  - Bus + transforms: `src/lens/event-bus.ts`, `src/lens/view-models.ts`, `src/lens/snapshot-differ.ts`, `src/lens/stream-segmenter.ts`
+- `src/runs/` — multi-run orchestration
+  - Child-process orchestration + logs/state: `src/runs/run-manager.ts`
+  - Text renderers: `src/runs/monitoring.ts`
+- `src/db/` — storage layer
+  - Backend abstraction + Neon implementation: `src/db/storage-backend.ts`
+  - Schema: `src/db/schema.ts`
+- `src/api/` — HTTP API
+  - Router/app: `src/api/app.ts`
+  - Server adapter: `src/api/server.ts`
+- `src/mcp/` — MCP control plane
+  - MCP server tools/resources around runs: `src/mcp/control-plane.ts`
 
-- `node_modules/` — 11,276 files (production dependencies)
+### Docs / Specs (where “why” lives)
+- `README.md` — conceptual overview + `runOsMode` usage
+- `docs/plans/2026-03-07-event-driven-kernel.md`
+- `docs/plans/2026-03-06-fully-db-backed-runs.md`
+- `docs/plans/lens-implementation-plan.md`
+- `docs/plans/2026-03-06-lens-design-system*.md`
+- `docs/ui/run-inspector.html` + `docs/prompts/run-inspector-ui.md`
 
-- `dist/` — Compiled output (JavaScript bundles)
-
-- `docs/` — Documentation and UI prototypes
-
-### TypeScript Files by Category
-- Source files: ~55 .ts files
-- Test files: ~33 .ts files
-- UI/Story components: ~58 .ts files
-- Build scripts: 4 .ts files
-- Configuration files: ~10 .ts/.tsx files
-- Type definition files: Multiple .d.ts files
-- Remaining: ~3,700+ files in node_modules and distribution
-
-### Project Structure
-- ESM TypeScript monorepo (Node >=18)
-- Cognitive kernel OS runtime + Lens observability
-- Test suite: Vitest with 56+ tests passing
-- Package manager: npm (Node >=18)
-- Configuration: tsconfig.json, package.json, drizzle.config.ts
-
-### Full File List (Complete Inventory)
-[All 15,206 files counted and sorted. List too large for single output. Categories above represent comprehensive breakdown. Includes:
-- All source (.ts, .tsx, .js, .cjs, .mjs, .d.ts files)
-- All node_modules packages
-- Build artifacts and distribution
-- Documentation and configuration
-- Test fixtures and test files]
+### Quick Stats (as of 2026-03-07)
+- `src/**/*.ts`: 61 files
+- `test/**/*.ts`: 24 files
+- Workspaces: 2 (`packages/lens`, `packages/lens-ui`)

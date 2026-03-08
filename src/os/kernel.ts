@@ -97,6 +97,11 @@ export class OsKernel {
   private readonly counterfactualSim = new CounterfactualSimulator(20);
   /** Consecutive ticks where zero processes were scheduled — stall detection. */
   private consecutiveIdleTicks = 0;
+  private housekeepCount = 0;
+  private lastProcessCompletionTime = 0;
+  private lastForceWakeTime = 0;
+  /** Timestamp when we first noticed only daemons remain (0 = not in grace period). */
+  private goalWorkDoneAt = 0;
   /** Tick number of the last orchestrator force-wake — prevents runaway deadlock loops. */
   private lastOrchestratorForceWakeTick = -1;
   /** Blackboard key count at the last orchestrator force-wake — detects meaningful progress. */
@@ -434,7 +439,7 @@ export class OsKernel {
 
       // Start background timers
       this.housekeepTimer = setInterval(() => {
-        void this.safeHousekeep();
+        this.safeHousekeep();
       }, this.config.kernel.housekeepIntervalMs ?? 500);
       (this.housekeepTimer as NodeJS.Timeout).unref?.();
 
@@ -465,10 +470,14 @@ export class OsKernel {
 
   /**
    * Safe wrapper for housekeep timer — never let an error crash the loop.
+   * Uses tryAcquire so housekeep never blocks metacog or process completion.
+   * If the mutex is held, this cycle is skipped — the holder already does
+   * equivalent work (flush IPC, rebuild DAG, reschedule).
    */
-  private async safeHousekeep(): Promise<void> {
+  private safeHousekeep(): void {
     if (this.halted) return;
-    const release = await this.mutex.acquire();
+    const release = this.mutex.tryAcquire();
+    if (!release) return; // mutex busy — skip this cycle
     try {
       this.housekeep();
       this.emitter?.writeLiveState(this.snapshot());
@@ -719,8 +728,11 @@ export class OsKernel {
             }
           }
         }
+        // Remove evaluated interventions immediately — outcome was already
+        // emitted and learned. Keeping them caused 190-event spam per run
+        // because each housekeep re-evaluated and re-emitted the same outcome.
         this.pendingInterventions = this.pendingInterventions.filter(
-          iv => iv.outcome === undefined || evalTick - (iv.tick + iv.ticksToEvaluate) < 20
+          iv => iv.outcome === undefined
         );
       }
     } finally {
@@ -984,7 +996,11 @@ export class OsKernel {
     }
   }
 
-  /** @deprecated Use event-driven loop instead. Kept for test compatibility. */
+  /**
+   * XXX TODO: Legacy tick loop — used ONLY by SubKernelExecutor to drive child kernels.
+   * Should be removed once sub-kernels are converted to use eventLoop() / run().
+   * The top-level kernel uses eventLoop() instead. Do not call this from run().
+   */
   async tick(): Promise<void> {
     const tickNum = this.scheduler.tickCount + 1;
     const processCount = this.table.getAll().length;
@@ -1573,7 +1589,7 @@ export class OsKernel {
         }
       }
       this.pendingInterventions = this.pendingInterventions.filter(
-        iv => iv.outcome === undefined || evalTick - (iv.tick + iv.ticksToEvaluate) < 20
+        iv => iv.outcome === undefined
       );
     }
 
@@ -1602,16 +1618,17 @@ export class OsKernel {
     // 0. Reset per-tick state
     this.tickSignals = [];
 
-    // 1. Scheduler tick (increments pass counter)
-    this.scheduler.tick();
+    // 1. Housekeep counter (wall-clock cadence for periodic signals).
+    // NOTE: scheduler.tick() is NOT called here — it's called in onProcessComplete()
+    // so tickCount reflects actual scheduling cycles, not 500ms timer fires.
+    this.housekeepCount += 1;
 
-    // 1b. Emit periodic tick cadence signals
-    const tickNum = this.scheduler.tickCount;
+    // 1b. Emit periodic cadence signals based on housekeepCount
     const cadences = this.config.kernel.tickSignalCadences ?? [1, 5, 10];
     for (const cadence of cadences) {
-      if (tickNum % cadence === 0) {
+      if (this.housekeepCount % cadence === 0) {
         const signalName = `tick:${cadence}`;
-        this.ipcBus.emitSignal(signalName, "kernel", { tick: tickNum, cadence });
+        this.ipcBus.emitSignal(signalName, "kernel", { tick: this.housekeepCount, cadence });
         this.tickSignals.push(signalName);
       }
     }
@@ -1653,15 +1670,19 @@ export class OsKernel {
     }
     this.router.setStrategiesSnapshot(applicable);
 
-    // Stall detection — in event-driven model, "selected.length === 0" becomes "inflight.size === 0"
-    // Also skip if ephemerals are running — but only count ephemerals whose process table
-    // entries are still alive (not killed by metacog while their LLM call is still inflight)
+    // Stall detection — use both tick count AND wall clock for robustness.
+    // In the event-driven model, ticks only increment on real process completions,
+    // so wall clock is the primary signal during quiet periods.
     const liveEphemeralCount = this.table.getAll().filter(
       p => p.type === "event" && p.state !== "dead"
     ).length;
+    const now = Date.now();
     if (this.inflight.size === 0 && liveEphemeralCount === 0) {
       this.consecutiveIdleTicks += 1;
-      if (this.consecutiveIdleTicks >= 3) {
+      // Wall-clock stall: 5s with no inflight work and idle processes present
+      const wallStall = this.lastProcessCompletionTime > 0 &&
+        (now - this.lastProcessCompletionTime) > 5_000;
+      if (this.consecutiveIdleTicks >= 3 || wallStall) {
         const idleProcs = this.table.getByState("idle");
         if (idleProcs.length > 0) {
           for (const proc of idleProcs) {
@@ -1670,7 +1691,7 @@ export class OsKernel {
           this.emitter?.emit({
             action: "os_process_event",
             status: "completed",
-            message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${this.consecutiveIdleTicks} empty housekeep cycles`,
+            message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${this.consecutiveIdleTicks} housekeep cycles (${this.lastProcessCompletionTime ? Math.round((now - this.lastProcessCompletionTime) / 1000) + 's' : '?'} since last completion)`,
           });
           this.consecutiveIdleTicks = 0;
         }
@@ -1682,32 +1703,29 @@ export class OsKernel {
     // Phase-transition deadlock detection
     const orchestrator = this.table.getAll().find(p => !p.parentPid && p.type === "lifecycle");
     if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
-      // Check ALL living non-daemon, non-orchestrator processes — not just direct children.
-      // Metacog can spawn processes that aren't parented to the orchestrator.
       const allLivingWork = this.table.getAll().filter(
         p => p.pid !== orchestrator.pid && p.state !== "dead" && p.type !== "daemon"
       );
-      // Count only ephemerals that are still alive in the process table — killed ephemerals
-      // may have LLM calls still inflight (activeEphemeralCount) but shouldn't block recovery
       const pendingEphemerals = this.pendingEphemerals.length + liveEphemeralCount;
       if (allLivingWork.length === 0 && pendingEphemerals === 0) {
         const pendingDeferrals = this.deferrals.size;
         const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
         const bbChanged = currentBbKeys !== this.bbKeysAtLastForceWake;
-        const ticksSinceLastForceWake = this.scheduler.tickCount - this.lastOrchestratorForceWakeTick;
-        const cooldownExpired = ticksSinceLastForceWake >= 5;
+        // Wall-clock cooldown: 10s between force-wakes (not tick-based)
+        const wallCooldownExpired = (now - this.lastForceWakeTime) > 10_000;
 
-        // Always force-wake when nothing is left (no deferrals, no work) — skip cooldown
+        // Always force-wake when nothing is left (no deferrals, no work)
         const nothingLeft = pendingDeferrals === 0 && allLivingWork.length === 0;
 
-        if (nothingLeft || bbChanged || cooldownExpired) {
+        if (nothingLeft || bbChanged || wallCooldownExpired) {
           this.supervisor.activate(orchestrator.pid);
           this.lastOrchestratorForceWakeTick = this.scheduler.tickCount;
+          this.lastForceWakeTime = now;
           this.bbKeysAtLastForceWake = currentBbKeys;
           this.emitter?.emit({
             action: "os_process_event",
             status: "completed",
-            message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, cooldown=${cooldownExpired})`,
+            message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, wallCooldown=${wallCooldownExpired})`,
           });
         }
       }
@@ -1840,6 +1858,16 @@ export class OsKernel {
     const release = await this.mutex.acquire();
     try {
       await this.processOneResult(result);
+      this.lastProcessCompletionTime = Date.now();
+
+      // Meaningful tick: actual work just completed. This is the only place
+      // tickCount is incremented in the event-driven model, so tick-based
+      // mechanisms (deferrals, interventions, metacog cadence) operate at
+      // the timescale of real scheduling cycles, not 500ms timer fires.
+      this.scheduler.tick();
+
+      // Process deferrals — conditions may now be met after this result
+      this.processDeferrals();
 
       // Fire-and-forget ephemerals spawned by this process's commands
       void this.drainPendingEphemerals();
@@ -2290,8 +2318,8 @@ export class OsKernel {
     if (this.emitter && result.commands.length > 0) {
       const summary = this.summarizeTurnCommands(result.commands);
       this.emitter.emitStreamEvent(proc.pid, proc.name, {
-        type: "text_delta",
-        text: `Turn ${proc.tickCount} complete → ${summary}\n`,
+        type: "status",
+        status: `Turn ${proc.tickCount} complete → ${summary}`,
       });
     }
 
@@ -2359,8 +2387,8 @@ export class OsKernel {
 
         // Emit a synthetic "started" event so the UI shows immediate feedback
         this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
-          type: "text_delta",
-          text: `Starting inference (model=${desc.model})...\n`,
+          type: "status",
+          status: `Starting inference (model=${desc.model})...`,
         });
 
         // Heartbeat: emit periodic progress while waiting for LLM response
@@ -2369,8 +2397,8 @@ export class OsKernel {
           if (heartbeatStopped) return;
           const elapsed = Math.round((Date.now() - desc.startTime) / 1000);
           this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
-            type: "text_delta",
-            text: `⏳ Waiting for response... (${elapsed}s elapsed)\n`,
+            type: "status",
+            status: `Waiting for response... (${elapsed}s elapsed)`,
           });
         }, 15_000);
 
@@ -2395,9 +2423,16 @@ export class OsKernel {
         // Emit completion summary with response preview
         const responsePreview = ephTurnResult.finalResponse.slice(0, 200).replace(/\n/g, " ");
         this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
-          type: "text_delta",
-          text: `✓ Completed in ${Math.round(ephDurationMs / 1000)}s (${Math.ceil(ephTurnResult.finalResponse.length / 4)} tokens)\n${responsePreview}${ephTurnResult.finalResponse.length > 200 ? "..." : ""}\n`,
+          type: "status",
+          status: `Completed in ${Math.round(ephDurationMs / 1000)}s (${Math.ceil(ephTurnResult.finalResponse.length / 4)} tokens)`,
         });
+        // Emit response preview as thinking so it's expandable
+        if (responsePreview) {
+          this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
+            type: "text_delta",
+            text: responsePreview + (ephTurnResult.finalResponse.length > 200 ? "..." : ""),
+          });
+        }
 
         const ephResult: import("./types.js").OsEphemeralResult = {
           ephemeralId: desc.ephemeralId,
@@ -2458,8 +2493,8 @@ export class OsKernel {
 
         // Emit failure summary
         this.emitter?.emitStreamEvent(desc.tablePid, desc.name, {
-          type: "text_delta",
-          text: `✗ Failed after ${Math.round(ephDurationMs / 1000)}s: ${errorMsg.slice(0, 200)}\n`,
+          type: "status",
+          status: `Failed after ${Math.round(ephDurationMs / 1000)}s: ${errorMsg.slice(0, 200)}`,
         });
 
         const ephResult: import("./types.js").OsEphemeralResult = {
@@ -2594,7 +2629,8 @@ export class OsKernel {
               capabilities: inferredCapabilities,
               tokenBudget: childTokenBudget,
               parentPid: pid,
-              model: cmd.descriptor.model ?? this.config.kernel.processModel,
+              // Always use config default model — LLM may output wrong provider model names
+              model: this.config.kernel.processModel,
               workingDir: cmd.descriptor.workingDir ?? this.workingDir,
             };
 
@@ -2619,10 +2655,12 @@ export class OsKernel {
                 descriptor: resolvedDescriptor,
                 condition: cmd.condition,
                 registeredAt: new Date().toISOString(),
+                registeredAtMs: Date.now(),
                 registeredByTick: this.scheduler.tickCount,
                 registeredByPid: pid,
                 reason: `conditional spawn_child from ${pid}: ${cmd.descriptor.name}`,
                 maxWaitTicks: cmd.maxWaitTicks,
+                maxWaitMs: cmd.maxWaitTicks ? cmd.maxWaitTicks * 30_000 : undefined, // ~30s per logical tick as wall-clock fallback
               };
               this.deferrals.set(ds.id, ds);
               this.emitter?.emit({
@@ -2720,6 +2758,7 @@ export class OsKernel {
                   descriptor: nodeDescriptor,
                   condition,
                   registeredAt: new Date().toISOString(),
+                  registeredAtMs: Date.now(),
                   registeredByTick: this.scheduler.tickCount,
                   registeredByPid: pid,
                   reason: `graph node "${node.name}" after=[${node.after.join(", ")}]`,
@@ -2834,7 +2873,11 @@ export class OsKernel {
 
             const ephemeralId = `eph-${randomUUID().slice(0, 12)}`;
             const ephName = cmd.name ?? "ephemeral";
-            const ephModel = cmd.model ?? this.config.ephemeral.defaultModel;
+            // Always use the config default model for ephemerals. The LLM may
+            // output a model name from the wrong provider (e.g. "claude-haiku-4-5"
+            // when running under Codex). The config default is already set to the
+            // correct provider-appropriate model by entry.ts.
+            const ephModel = this.config.ephemeral.defaultModel;
 
             // Register in process table so ephemerals appear in topology/DAG
             const ephTableProc = this.supervisor.spawn({
@@ -3323,7 +3366,8 @@ export class OsKernel {
         }
         const proc = this.supervisor.spawn({
           ...cmd.descriptor,
-          model: cmd.descriptor.model ?? this.config.kernel.processModel,
+          // Always use config default model — LLM may output wrong provider model names
+          model: this.config.kernel.processModel,
           workingDir: cmd.descriptor.workingDir ?? this.workingDir,
         });
         this.supervisor.activate(proc.pid);
@@ -3338,7 +3382,7 @@ export class OsKernel {
             objective: cmd.descriptor.objective,
             type: cmd.descriptor.type,
             priority: cmd.descriptor.priority,
-            model: cmd.descriptor.model,
+            model: this.config.kernel.processModel,
           },
         });
         break;
@@ -3361,14 +3405,17 @@ export class OsKernel {
           id: randomUUID(),
           descriptor: {
             ...cmd.descriptor,
-            model: cmd.descriptor.model ?? this.config.kernel.processModel,
+            // Always use config default model — LLM may output wrong provider model names
+            model: this.config.kernel.processModel,
             workingDir: cmd.descriptor.workingDir ?? this.workingDir,
           },
           condition: cmd.condition,
           registeredAt: new Date().toISOString(),
+          registeredAtMs: Date.now(),
           registeredByTick: this.scheduler.tickCount,
           reason: cmd.reason,
           maxWaitTicks: cmd.maxWaitTicks,
+          maxWaitMs: cmd.maxWaitTicks ? cmd.maxWaitTicks * 30_000 : undefined,
         };
         this.deferrals.set(ds.id, ds);
         this.emitter?.emit({
@@ -3758,9 +3805,38 @@ export class OsKernel {
         break;
       }
 
-      case "halt":
+      case "halt": {
+        // Guard: metacog cannot halt with "achieved" while goal processes are still active.
+        // Metacog is an observer — it has no tools and cannot produce deliverables itself.
+        // It can only declare achievement when all goal work has naturally completed.
+        const goalProcs = this.table
+          .getAll()
+          .filter(
+            (p) =>
+              p.state !== "dead" &&
+              (p.type === "lifecycle" || p.type === "event"),
+          );
+        if (cmd.status === "achieved" && goalProcs.length > 0) {
+          const names = goalProcs.map((p) => p.name).join(", ");
+          this.emitter?.emit({
+            action: "os_metacog",
+            status: "completed",
+            message: `halt_rejected: ${goalProcs.length} goal process(es) still active [${names}] — cannot declare achieved`,
+          });
+          break;
+        }
+        // Also reject "achieved" if deferrals are pending — more work is expected
+        if (cmd.status === "achieved" && this.deferrals.size > 0) {
+          this.emitter?.emit({
+            action: "os_metacog",
+            status: "completed",
+            message: `halt_rejected: ${this.deferrals.size} deferral(s) still pending — cannot declare achieved`,
+          });
+          break;
+        }
         this.halt(`metacog_${cmd.status}: ${cmd.summary}`);
         break;
+      }
 
       case "noop":
         // Intentional no-op — metacog decided no action needed
@@ -4356,6 +4432,12 @@ Example: ["strategy-123", "strategy-456"]`;
       return true;
     }
 
+    // Never halt while LLM calls or ephemerals are still in-flight —
+    // their results may spawn new processes or write goal-critical data.
+    if (this.inflight.size > 0 || this.activeEphemeralCount > 0) {
+      return false;
+    }
+
     // All processes are dead and no restart policies apply
     const livingProcesses = allProcesses.filter((p) => p.state !== "dead");
     if (livingProcesses.length === 0 && allProcesses.length > 0) {
@@ -4377,17 +4459,43 @@ Example: ["strategy-123", "strategy-456"]`;
       return false;
     }
 
-    // All goal work is done: no lifecycle/event processes alive, only daemons remain
+    // All goal work is done: no lifecycle/event processes alive, only daemons remain.
+    // Use a grace period to allow metacog/awareness to detect premature orchestrator
+    // exit and potentially respawn workers before we commit to halting.
     if (livingProcesses.length > 0) {
       const goalProcesses = livingProcesses.filter(
         (p) => p.type === "lifecycle" || p.type === "event",
       );
       if (goalProcesses.length === 0) {
-        // Only daemons remain — halt regardless of daemon state.
-        // In the event-driven model daemons may be transiently "running"
-        // (metacog/awareness evaluations) but that's not goal work.
+        const gracePeriodMs = this.config.kernel.goalCompleteGracePeriodMs ?? 30_000;
+
+        if (this.goalWorkDoneAt === 0) {
+          // First time noticing only daemons remain — start grace period
+          this.goalWorkDoneAt = Date.now();
+          this.emitter?.emit({
+            action: "os_halt_grace_period",
+            status: "completed",
+            message: `only daemons remain — grace period started (${gracePeriodMs}ms). Metacog can respawn workers to continue goal work.`,
+          });
+          return false;
+        }
+
+        if (Date.now() - this.goalWorkDoneAt < gracePeriodMs) {
+          return false; // still in grace period
+        }
+
         this.haltReason = "goal_work_complete";
         return true;
+      } else {
+        // Lifecycle/event processes exist again (metacog respawned something) — reset grace period
+        if (this.goalWorkDoneAt > 0) {
+          this.goalWorkDoneAt = 0;
+          this.emitter?.emit({
+            action: "os_halt_grace_period",
+            status: "completed",
+            message: `grace period canceled — lifecycle processes respawned, goal work continuing`,
+          });
+        }
       }
     }
 
@@ -4455,13 +4563,27 @@ Example: ["strategy-123", "strategy-456"]`;
     const triggered: string[] = [];
 
     for (const [id, ds] of this.deferrals) {
-      // Check TTL expiry
-      if (ds.maxWaitTicks && (tickNum - ds.registeredByTick) > ds.maxWaitTicks) {
+      // Check TTL expiry — spawn anyway instead of silently dropping work.
+      // The metacog can kill the process if it's no longer needed.
+      const waited = tickNum - ds.registeredByTick;
+      const wallWaitMs = ds.registeredAtMs ? Date.now() - ds.registeredAtMs : 0;
+      const tickExpired = ds.maxWaitTicks && waited > ds.maxWaitTicks;
+      const wallExpired = ds.maxWaitMs && wallWaitMs > ds.maxWaitMs;
+      if (tickExpired || wallExpired) {
+        const proc = this.supervisor.spawn({
+          ...ds.descriptor,
+          // Always use config default model — LLM may output wrong provider model names
+          model: this.config.kernel.processModel,
+          workingDir: ds.descriptor.workingDir ?? this.workingDir,
+        });
+        this.supervisor.activate(proc.pid);
         triggered.push(id);
         this.emitter?.emit({
           action: "os_defer",
           status: "completed",
-          message: `expired id=${id} name=${ds.descriptor.name} waited=${tickNum - ds.registeredByTick} ticks`,
+          agentId: proc.pid,
+          agentName: proc.name,
+          message: `expired_but_spawned id=${id} name=${ds.descriptor.name} — condition not met after ${waited} ticks (${Math.round(wallWaitMs / 1000)}s wall), spawning anyway`,
         });
         continue;
       }
@@ -4469,7 +4591,8 @@ Example: ["strategy-123", "strategy-456"]`;
       if (this.evaluateDeferCondition(ds.condition)) {
         const proc = this.supervisor.spawn({
           ...ds.descriptor,
-          model: ds.descriptor.model ?? this.config.kernel.processModel,
+          // Always use config default model — LLM may output wrong provider model names
+          model: this.config.kernel.processModel,
           workingDir: ds.descriptor.workingDir ?? this.workingDir,
         });
         this.supervisor.activate(proc.pid);

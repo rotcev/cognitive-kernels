@@ -1,0 +1,36 @@
+calc-builder-r2 evidence (re-validated)
+
+1) calc.py exists at repo root:
+- /Users/shawndavies/dev/cognitive-kernels/calc.py
+
+2) Required implementation confirmed in file:
+- Functions: add, subtract, multiply, divide, power
+- parse_expression with validation (string, non-empty, 3 tokens, numeric operands, supported operators)
+- evaluate_expression dispatches operators + - * / ^ **
+- divide() raises ZeroDivisionError on b == 0
+- repl() supports quit and exit
+
+3) Command evidence:
+A) Function + parser/evaluator checks:
+add 5
+subtract 3
+multiply 15
+divide 4.0
+power 16
+parse (5.0, '+', 6.0)
+eval 7.0
+ZeroDivisionError Division by zero is not allowed
+parse_error '' ValueError Expression cannot be empty
+parse_error '2 +' ValueError Expression must be in format: <number> <operator> <number>
+parse_error '2 ? 3' ValueError Unsupported operator: ?
+parse_error None ValueError Expression must be a string
+
+B) REPL quit/exit checks:
+Calculator REPL. Enter expressions like: 2 + 3
+Type 'quit' or 'exit' to leave.
+> 4
+> Goodbye
+Calculator REPL. Enter expressions like: 2 + 3
+Type 'quit' or 'exit' to leave.
+> 9
+> Goodbye

@@ -506,13 +506,17 @@ describe("Event-driven kernel: mutex serialization", () => {
 });
 
 describe("Event-driven kernel: housekeep integration", () => {
-  test("housekeep increments tick counter", () => {
+  test("housekeep increments housekeepCount (not tickCount)", () => {
     const kernel = bootKernel();
     const scheduler = priv(kernel).scheduler;
 
     const tickBefore = scheduler.tickCount;
+    const hkBefore = priv(kernel).housekeepCount;
     priv(kernel).housekeep();
-    expect(scheduler.tickCount).toBe(tickBefore + 1);
+    // tickCount is now only incremented in onProcessComplete (meaningful ticks)
+    expect(scheduler.tickCount).toBe(tickBefore);
+    // housekeepCount tracks wall-clock housekeep cycles
+    expect(priv(kernel).housekeepCount).toBe(hkBefore + 1);
 
     kernel.halt("test_complete");
   });

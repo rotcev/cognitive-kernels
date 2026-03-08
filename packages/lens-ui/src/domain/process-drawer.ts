@@ -27,10 +27,10 @@ export class LensProcessDrawer extends LensElement {
       :host {
         display: block;
         position: fixed;
-        top: 40px;
+        top: calc(var(--lens-topbar-h, 40px) + var(--lens-narrative-h, 36px));
         right: 0;
         width: 420px;
-        bottom: 32px;
+        bottom: var(--lens-bottombar-h, 32px);
         background: var(--lens-bg-panel);
         border-left: 1px solid var(--lens-border);
         z-index: 200;

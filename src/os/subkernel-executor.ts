@@ -22,9 +22,13 @@ export type SubkernelExecutorDeps = {
 /**
  * Sub-kernel executor backend — manages child Forge kernels.
  *
- * Child kernels run in-process as new OsKernel instances sharing the parent's LLM client.
- * On each executeOne() call, runs N child ticks (configurable, default 5).
- * Publishes child kernel snapshot to parent's blackboard.
+ * XXX TODO: This still drives child kernels via the old tick() loop (N ticks per parent turn).
+ * Sub-kernels should use kernel.run() and the event-driven eventLoop() like the top-level
+ * kernel does. The current tick-based approach artificially limits child kernel throughput
+ * and doesn't benefit from the event-driven scheduling improvements (non-blocking housekeep,
+ * meaningful tick semantics, immediate process completion rescheduling).
+ * Converting requires changing executeOne() to call kernel.run(goal) and awaiting completion
+ * rather than stepping N ticks, and removing the ticksPerParentTurn / maxTicks config.
  *
  * Safety: child kernels have systemProcess.enabled = false and childKernel.enabled = false,
  * preventing recursive sub-kernel spawning. Depth limit is enforced by the parent kernel.

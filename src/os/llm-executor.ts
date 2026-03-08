@@ -142,7 +142,7 @@ export class LlmExecutorBackend implements ExecutorBackend, ExecutorContextInjec
 
       // Emit a synthetic "started" event so the UI shows the process is active
       if (onStreamEvent) {
-        onStreamEvent({ type: "text_delta", text: `Starting turn ${entry.turnCount + 1}...\n` });
+        onStreamEvent({ type: "status", status: `Starting turn ${entry.turnCount + 1}...` });
       }
 
       // Run the agent turn. Use structured output to ensure reliable command parsing.

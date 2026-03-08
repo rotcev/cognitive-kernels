@@ -235,6 +235,10 @@ export class KernelRunManager {
 
     record.child = child;
 
+    // Always capture stderr for crash diagnostics (even in DB-only mode)
+    const stderrChunks: Buffer[] = [];
+    child.stderr?.on("data", (chunk: Buffer) => { stderrChunks.push(chunk); });
+
     if (artifacts) {
       const stdoutStream = createWriteStream(artifacts.stdoutPath, { flags: "a" });
       const stderrStream = createWriteStream(artifacts.stderrPath, { flags: "a" });
@@ -274,11 +278,17 @@ export class KernelRunManager {
           ? "completed"
           : "failed";
 
+      // Capture last stderr for failed runs
+      const stderrTail = code !== 0 && stderrChunks.length > 0
+        ? Buffer.concat(stderrChunks).toString("utf8").slice(-4000)
+        : undefined;
+
       void this.transitionRun(id, {
         status: nextStatus,
         endedAt: this.timestamp(),
         exitCode: code,
         signal,
+        error: stderrTail,
       });
 
       current.child = null;

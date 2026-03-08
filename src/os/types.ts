@@ -753,10 +753,14 @@ export interface DeferEntry {
   descriptor: OsProcessDescriptor;
   condition: DeferCondition;
   registeredAt: string;
+  /** Epoch ms for wall-clock expiry calculation. */
+  registeredAtMs?: number;
   registeredByTick: number;
   registeredByPid?: string;
   reason: string;
   maxWaitTicks?: number;
+  /** Wall-clock expiry in ms. Whichever of maxWaitTicks/maxWaitMs fires first wins. */
+  maxWaitMs?: number;
 }
 
 export type MetacogResponse = {
@@ -794,6 +798,9 @@ export type OsKernelConfig = {
   metacogIntervalMs?: number;
   /** Snapshot write timer interval (default: 10000ms). */
   snapshotIntervalMs?: number;
+  /** Grace period before halting when only daemons remain (default: 30000ms).
+   *  Gives metacog time to detect premature orchestrator exit and respawn workers. */
+  goalCompleteGracePeriodMs?: number;
 };
 
 export type OsSchedulerConfig = {

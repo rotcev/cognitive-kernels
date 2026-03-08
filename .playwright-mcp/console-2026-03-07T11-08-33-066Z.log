@@ -8,3 +8,53 @@
 [ 1294087ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
 [ 1296087ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
 [ 1718090ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4697602ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4698112ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4698605ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4699602ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3200/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@fs/Users/shawndavies/dev/cognitive-kernels/packages/lens/dist/client.js:45
+[ 4699608ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4700112ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4700611ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4701619ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4702110ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4702615ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3200/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@fs/Users/shawndavies/dev/cognitive-kernels/packages/lens/dist/client.js:45
+[ 4702637ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4703673ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4704109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4704749ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4705841ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4706110ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4707040ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4707494ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3200/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@fs/Users/shawndavies/dev/cognitive-kernels/packages/lens/dist/client.js:45
+[ 4708109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4708382ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4710109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4710433ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4712109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4714110ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4715900ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4716110ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4717045ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3200/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@fs/Users/shawndavies/dev/cognitive-kernels/packages/lens/dist/client.js:45
+[ 4718111ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4720111ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4720492ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4725116ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4729966ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4731049ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4732155ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4733461ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4734639ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4736109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4736211ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4737253ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3200/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@fs/Users/shawndavies/dev/cognitive-kernels/packages/lens/dist/client.js:45
+[ 4738108ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3100/runs:0
+[ 4738441ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4740490ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4743061ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4744132ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4745265ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4746423ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4747499ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4748671ms] [ERROR] WebSocket connection to 'ws://localhost:5199/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:5199/@vite/client:1034
+[ 4749886ms] [WARNING] Lit is in dev mode. Not recommended for production! See https://lit.dev/msg/dev-mode for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=d5709320:93
+[ 4749892ms] [WARNING] Element lens-app scheduled an update (generally because a property was set) after an update completed, causing a new update to be scheduled. This is inefficient and should be avoided unless the next update can only be scheduled as a side effect of the previous update. See https://lit.dev/msg/change-in-update for more information. @ http://localhost:5199/node_modules/.vite/deps/chunk-O5TE7N4R.js?v=d5709320:93

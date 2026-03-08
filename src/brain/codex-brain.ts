@@ -324,17 +324,32 @@ export class CodexBrainThread implements BrainThread {
             case "reasoning":
               onStream({ type: "text_delta", text: item.text });
               break;
-            case "command_execution":
+            case "command_execution": {
+              const cmdId = `cmd-${Date.now()}`;
               if (event.type === "item.started") {
-                onStream({ type: "text_delta", text: `$ ${item.command}\n` });
+                toolState.set(cmdId, { toolName: "Bash", argumentsSummary: item.command });
+                onStream({
+                  type: "tool_started",
+                  provider: "codex",
+                  toolName: "Bash",
+                  toolUseId: cmdId,
+                  argumentsSummary: item.command,
+                } as any);
               }
               if (item.aggregated_output) {
                 onStream({ type: "text_delta", text: item.aggregated_output });
               }
               break;
+            }
             case "file_change":
               for (const change of item.changes) {
-                onStream({ type: "text_delta", text: `[${change.kind}] ${change.path}\n` });
+                onStream({
+                  type: "tool_started",
+                  provider: "codex",
+                  toolName: change.kind === "add" ? "Write" : "Edit",
+                  toolUseId: `fc-${Date.now()}`,
+                  argumentsSummary: change.path,
+                } as any);
               }
               break;
             case "mcp_tool_call":
@@ -353,7 +368,13 @@ export class CodexBrainThread implements BrainThread {
               }
               break;
             case "web_search":
-              onStream({ type: "text_delta", text: `[search] ${item.query}\n` });
+              onStream({
+                type: "tool_started",
+                provider: "codex",
+                toolName: "WebSearch",
+                toolUseId: `ws-${Date.now()}`,
+                argumentsSummary: item.query,
+              } as any);
               break;
             case "todo_list":
               for (const todo of item.items) {
@@ -361,7 +382,10 @@ export class CodexBrainThread implements BrainThread {
               }
               break;
             case "error":
-              onStream({ type: "text_delta", text: `[error] ${item.message}\n` });
+              onStream({
+                type: "status",
+                status: `[error] ${item.message}`,
+              });
               break;
           }
           break;
@@ -373,17 +397,33 @@ export class CodexBrainThread implements BrainThread {
             case "agent_message":
               finalResponse = item.text;
               break;
-            case "command_execution":
-              if (item.aggregated_output) {
-                onStream({ type: "text_delta", text: item.aggregated_output });
-              }
-              if (item.exit_code !== undefined && item.exit_code !== 0) {
-                onStream({ type: "text_delta", text: `[exit ${item.exit_code}]\n` });
-              }
+            case "command_execution": {
+              const outputPreview = item.aggregated_output
+                ? item.aggregated_output.slice(0, 200)
+                : "";
+              const exitInfo = item.exit_code !== undefined && item.exit_code !== 0
+                ? ` [exit ${item.exit_code}]`
+                : "";
+              onStream({
+                type: "tool_completed",
+                provider: "codex",
+                toolName: "Bash",
+                toolUseId: `cmd-done-${Date.now()}`,
+                argumentsSummary: item.command,
+                resultSummary: `${outputPreview}${exitInfo}`,
+              });
               break;
+            }
             case "file_change":
               for (const change of item.changes) {
-                onStream({ type: "text_delta", text: `[${change.kind}] ${change.path}\n` });
+                onStream({
+                  type: "tool_completed",
+                  provider: "codex",
+                  toolName: change.kind === "add" ? "Write" : "Edit",
+                  toolUseId: `fc-done-${Date.now()}`,
+                  argumentsSummary: change.path,
+                  resultSummary: change.kind,
+                });
               }
               break;
             case "mcp_tool_call": {

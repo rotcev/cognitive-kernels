@@ -121,5 +121,34 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
 
   const kernel = new OsKernel(osConfig, client, input.cwd, emitter, browserMcpConfig);
 
-  return kernel.run(input.goal);
+  // Crash handlers — ensure unhandled errors are captured in the protocol before the process dies
+  const emitCrash = (label: string, err: unknown) => {
+    const msg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+    console.error(`[kernel:${label}] ${msg}`);
+    emitter?.emit({
+      action: "os_error",
+      status: "failed",
+      message: `${label}: ${msg}`,
+    });
+  };
+
+  process.on("uncaughtException", (err) => {
+    // EPIPE is benign — the parent closed stdout/stderr before we finished writing.
+    // Don't crash the kernel for this.
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === "EPIPE") return;
+    emitCrash("uncaughtException", err);
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    emitCrash("unhandledRejection", reason);
+    process.exit(1);
+  });
+
+  try {
+    return await kernel.run(input.goal);
+  } catch (err) {
+    emitCrash("kernel.run", err);
+    throw err;
+  }
 }

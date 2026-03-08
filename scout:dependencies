@@ -1,32 +1,82 @@
-Direct result: This repo already has TypeScript unit testing set up via Vitest and can run `*.test.ts` files under `test/` with `npm test` (or `npx vitest`).
+Direct result: `cognitive-kernels` is a Node.js (ESM) + TypeScript monorepo that integrates LLM providers (Claude + OpenAI/Codex), an MCP control-plane server, a runs API server (Hono), and an optional Neon Postgres backend (Drizzle ORM + neon-http), plus a WebSocket “Lens” observability server.
 
-## Test Runner / Commands
-- Vitest is installed (devDependency): `/Users/shawndavies/dev/cognitive-kernels/package.json:41`
-- NPM test script: `/Users/shawndavies/dev/cognitive-kernels/package.json:19-22`
-  - `"test": "vitest run --passWithNoTests"`
-- Common commands:
-  - Run full suite: `npm test`
-  - Run a single file: `npx vitest run test/os/entry.test.ts`
-  - Run with npm script + file filter: `npm test -- test/os/entry.test.ts`
-  - Watch mode: `npx vitest`
+**Timestamp:** 2026-03-07  
+**Repo Root:** `/Users/shawndavies/dev/cognitive-kernels`
 
-## TypeScript / Module System
-- TypeScript compiler is installed: `/Users/shawndavies/dev/cognitive-kernels/package.json:40` (`typescript@5.8.2`)
-- Package is ESM: `/Users/shawndavies/dev/cognitive-kernels/package.json:5` (`"type": "module"`)
-- TS config uses NodeNext modules: `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json:4-5`
+## Toolchain / Build / Test
+- Node engine: `package.json:30` (`>=18`)
+- ESM packages: `package.json:5` (`"type": "module"`)
+- Package manager / lockfiles: npm (`package-lock.json` at repo root; `packages/lens-ui/package-lock.json` also present for the UI workspace)
+- TypeScript build: `package.json:24` (`tsc -p tsconfig.json`), config in `tsconfig.json:2`
+- Test runner: Vitest `package.json:25` (`vitest run --passWithNoTests`)
 
-## Node Version
-- Declared engine: `/Users/shawndavies/dev/cognitive-kernels/package.json:23-25` (`node >=18`)
-- Verified locally (in this workspace):
-  - `node -v` => `v22.14.0`
-  - `npx vitest --version` => `vitest/3.0.8 darwin-arm64 node-v22.14.0`
+## Workspace layout (npm workspaces)
+- Root workspaces: `package.json:27-29` (`packages/*`)
+- `packages/lens` (TS library, no extra deps): `packages/lens/package.json:1`
+- `packages/lens-ui` (Vite + Lit UI lib + Storybook): `packages/lens-ui/package.json:1`
 
-## Existing Test Layout / Conventions
-- Tests live under `/Users/shawndavies/dev/cognitive-kernels/test/` and use `*.test.ts` names (Vitest default discovery).
-- Tests currently import from Vitest, e.g. `/Users/shawndavies/dev/cognitive-kernels/test/os/entry.test.ts:1`
-  - `import { beforeEach, describe, expect, test, vi } from "vitest";`
+## Build outputs / entrypoints
+- Root package publishes compiled JS/typings from `dist/` only: `package.json:20-22`
+- CLI binaries point at compiled outputs:
+  - `cognitive-kernels` → `dist/cli.js`: `package.json:6-8`
+  - `cognitive-kernels-mcp` → `dist/mcp-cli.js`: `package.json:6-9`
+- Library exports are also `dist/*`:
+  - Main entry `dist/index.js` + `dist/index.d.ts`: `package.json:10-14`
+  - Subpath `./lens` `dist/lens/index.js` + `.d.ts`: `package.json:15-18`
 
-## Notes / Gotchas
-- No `vitest.config.*` found at repo root; Vitest runs with defaults.
-- `/Users/shawndavies/dev/cognitive-kernels/tsconfig.json` includes only `src/**/*.ts` (line 16), so `npm run build` (`tsc -p tsconfig.json`) does not compile/typecheck `test/**` files; tests are still executed by Vitest’s transpilation pipeline.
+## Workspace build flow details
+- Root `npm run build` only compiles `src/**` (tests excluded): `tsconfig.json:16-18`
+- `packages/lens` build is plain TS compile: `packages/lens/package.json:16-18` and `packages/lens/tsconfig.json:2-16`
+- `packages/lens-ui` build is Vite lib-mode + separate TS d.ts emit:
+  - Scripts: `packages/lens-ui/package.json:18-23`
+  - Vite config builds `src/index.ts` as an ES lib and marks `lit*` and `cognitive-kernels*` as externals: `packages/lens-ui/vite.config.ts:4-14` (note: UI depends on `cognitive-lens`, so `external: /^cognitive-kernels/` may be an intended alias or a small mismatch)
+  - TS config uses `moduleResolution: "bundler"` and maps `cognitive-lens` types from the sibling workspace build output: `packages/lens-ui/tsconfig.json:4-13`
+  - Storybook dev uses port `6006`: `packages/lens-ui/package.json:21-22`
 
+## Key runtime dependencies (and what they touch)
+- LLM providers:
+  - Claude agent runtime: `@anthropic-ai/claude-agent-sdk` (`package.json:34`) used by `src/brain/claude-brain.ts:4`
+  - OpenAI/Codex runtime: `@openai/codex-sdk` (`package.json:37`) used by `src/brain/codex-brain.ts:14`
+- MCP server:
+  - `@modelcontextprotocol/sdk` (`package.json:35`) used by `src/mcp/control-plane.ts:1-3` (stdio transport)
+- Storage / DB (optional):
+  - Neon serverless Postgres HTTP driver: `@neondatabase/serverless` (`package.json:36`) used by `src/db/connection.ts:1`
+  - ORM + schema/migrations: `drizzle-orm` (`package.json:39`), `drizzle-kit` dev tool (`package.json:48`), config in `drizzle.config.ts:1`
+  - DB is enabled when `DATABASE_URL` is set: `src/db/connection.ts:20-23`, `src/cli.ts:96-102`, `src/mcp/control-plane.ts:568-575`
+- API server:
+  - Hono (routing + fetch-style app): `hono` (`package.json:40`) used by `src/api/app.ts:1`
+  - Input validation: `zod` (`package.json:43`) used by `src/api/app.ts:2` / `src/api/schemas.ts:1`
+- WebSocket transport:
+  - `ws` (`package.json:42`) used by `src/lens/server.ts:22`
+- Config parsing:
+  - `dotenv` loads env: `package.json:38`; used at runtime in `src/cli.ts:12`, `src/mcp-cli.ts:5`, `src/os/entry.ts:14`
+  - `smol-toml` parses OS config: `package.json:41`; used by `src/os/entry.ts:4`
+
+## Infra touchpoints (network, processes, files)
+- External network calls:
+  - Anthropic HTTP API for Lens “narrator”: `src/lens/narrative.ts:211-237` (requires `ANTHROPIC_API_KEY`: `src/lens/narrative.ts:203-206`)
+  - OpenAI HTTP API for Lens “narrator”: `src/lens/narrative.ts:256-280` (requires `OPENAI_API_KEY`: `src/lens/narrative.ts:247-250`)
+- Local processes / execution:
+  - Runs spawn child `node` processes: `src/runs/run-manager.ts:2-3` and `src/runs/run-manager.ts:230-234`
+  - Default runs/artifacts directory: `src/runs/run-manager.ts:80` (`~/.cognitive-kernels/runs`)
+- Servers / ports:
+  - Runs API server (HTTP): `src/cli.ts:89-152` (default port `3100`: `src/cli.ts:93-94`)
+  - Lens server (WebSocket): `src/cli.ts:106-119` (default port `3200`: `src/cli.ts:106-107`)
+  - MCP server (stdio): `src/mcp/control-plane.ts:635-641` (no TCP port; stdio transport)
+  - Example HTTP server (standalone): `server.js:1` (port `3000`: `server.js:3`)
+- DB schema footprint (Postgres):
+  - Tables defined in `src/db/schema.ts:9-46` (runs, events, snapshots, heuristics)
+
+## Notable config files
+- `drizzle.config.ts:3-10` uses `DATABASE_URL` env var and points schema at `src/db/schema.ts`
+- Drizzle migrations output directory is configured as `./drizzle` but may be absent until `drizzle-kit` is run: `drizzle.config.ts:6`
+- `.gitignore:1-4` ignores `.env` (local secrets) and build outputs (`dist`)
+- Claude/Codex local agent permissions: `.claude/settings.local.json:2-6` allows `mcp__cognitive_kernels__start_run`
+- CI / formatting: no `.github/` workflows, and no ESLint/Prettier/Biome config detected (none of `eslint.config.*`, `.eslintrc*`, `.prettierrc*`, `biome.json` found at repo root)
+
+## Optional infra / integration scripts
+- DB wiring quick checks (require `DATABASE_URL`):
+  - `scripts/test-neon.ts:6-13` (expects env var, no dotenv load)
+  - `scripts/test-db-backed-run.ts:1-13` (loads `.env` via `dotenv`)
+- Golden-run capture for Lens fixtures (requires `ANTHROPIC_API_KEY`): `scripts/capture-golden-run.ts:7-18`
+- Lens fixture inspection/diff output: `scripts/dump-lens-output.ts:1-12`

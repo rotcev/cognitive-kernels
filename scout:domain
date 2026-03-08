@@ -1,0 +1,304 @@
+## Domain Patterns + Prior Art (for ARCHITECTURE.md)
+
+**Timestamp:** 2026-03-08
+**Repo:** /Users/shawndavies/dev/cognitive-kernels
+
+### Concise context (pasteable)
+- **OS-as-cognitive-runtime:** kernel = scheduler + process table + IPC + memory + executors; “mind management” via process management primitives.
+- **Topology is the algorithm:** intelligence lives in the run graph (spawn/fork/join/kill + dependencies), not inside any single agent.
+- **Coordination substrate:** versioned **blackboard** (shared workspace + artifacts) + **signals** (pub/sub); workflows block on explicit **deferrals** (e.g., `blackboard_key_exists`, `process_dead_by_name`, `observation:passed:*`).
+- **Closed loop default:** encourage *produce → observe → proceed*; observations gate downstream execution rather than “fan-out then merge”.
+- **Self-adaptive control plane:** metacog reacts to triggers (stall/deadlock/resource/goal-drift) with a bounded command vocabulary (reprioritize/kill/rewrite DAG/blueprints/learn).
+- **Concurrent exec, serialized mutation:** processes can run concurrently, but kernel state mutations are serialized (mutex/event-loop style); scheduling is trending event-driven (react-to-completions) over batch ticks.
+- **Legibility layer:** protocol events + snapshots are the raw telemetry; Lens builds deltas/read-models/narratives for UI.
+- **Durable runs (direction):** protocol + snapshots can be backed by a DB storage backend (Neon/Drizzle plan), making run state observable without filesystem coupling.
+
+### Executive summary (what “domain-scout” should feed the architect)
+- This project is an **OS-flavored cognitive runtime**: “intelligence” is encoded in the **process topology** (spawn/fork/join/kill), plus **IPC** (blackboard + signals), plus **metacognitive control** (self-modifying interventions).
+- The key architectural through-line is a **closed loop**: *produce → observe → proceed*. Observation is first-class and frequently used as a **gate** (downstream work depends on observer success, not just producer completion).
+- Reusable topology templates (“**blueprints**”) and runtime DAG mutation (“**rewrite_dag / evolve_blueprint**”) place this in the family of **workflow orchestration + autonomic/self-adaptive systems** rather than a simple multi-agent “fan-out then merge” design.
+
+### Evidence pointers (exact local anchors for ARCHITECTURE.md)
+> Note: prefer symbol/filename anchors in narrative docs; use line anchors only for scout notes / evidence.
+
+- Repo-level one-liner + scope (kernel/scheduler/memory/substrate): `README.md`
+- Kernel entrypoint / API: `src/os/entry.ts` (`runOsMode`, config wiring)
+- Core domain “DSL” types (process/DAG/IPC/commands/deferrals/blueprints/metacog): `src/os/types.ts`
+  - `OsProcess`, `OsProcessBackend`, `OsProcessCommand`
+  - `OsBlackboardEntry`, `OsSignal`, `OsSignalSubscription`
+  - `OsDagTopology`, `OsDagPatch`, `OsDagSnapshot`
+  - `MetacogCommand`, `DagMutation`, `DeferCondition`, `TopologyBlueprint`
+- IPC bus implementation (blackboard versioning + signal glob patterns): `src/os/ipc-bus.ts` (`OsIpcBus`, `matchSignalPattern`)
+- DAG engine + “persistent patches” concept (patched nodes/edges survive rebuild): `src/os/dag-engine.ts` (`OsDagEngine.applyPatch`, `patchedEdges`, `patchedNodes`)
+- Seed blueprint patterns (parallel / pipeline / fan-in / closed-loop gating): `src/os/seed-blueprints.ts` (`SEED_*`)
+- Monitoring/read-model builder for UI (“topology view”): `src/runs/monitoring.ts` (`buildRunTopologyView`)
+- Conceptual framing + UI requirements (blackboard as global workspace): `docs/prompts/run-inspector-ui.md`
+- Scheduler direction (“event-driven kernel” + mutex serialization): `docs/plans/2026-03-07-event-driven-kernel.md`
+- Storage/durability direction (“fully DB-backed runs”): `docs/plans/2026-03-06-fully-db-backed-runs.md`
+- Lens UI components (topology/blackboard/deferrals panels): `packages/lens-ui/src/domain/*`
+
+---
+
+## 1) Local domain patterns in this codebase
+
+### 1.1 Process model (agent-as-process)
+From `src/os/types.ts`:
+- **Process types:** `daemon | lifecycle | event`
+- **States:** `spawned | running | sleeping | idle | suspended | checkpoint | dead`
+- **Backends:** `llm` (default), `system` (OS process), `kernel` (child sub-kernel/run)
+- **Lineage + resilience policies:** `onParentDeath: orphan|cascade`, `restartPolicy: always|on-failure|never`
+- **Capabilities as prompt/tool surface:** `capabilities.observationTools?: string[]` (e.g. `browser`, `shell`)
+
+Pattern: this is basically **actor-like** processes with explicit lifecycle + supervision knobs, extended with “backend = kernel/system” to unify LLM work with real execution.
+
+### 1.2 IPC: blackboard + signals (shared memory + pub/sub)
+From `src/os/types.ts` + docs:
+- **Blackboard entries** are versioned, attributed (`writtenBy`), and track readers (`readBy`).
+- **Signals** are emitted events with a `signalPattern` subscription model.
+- The orchestrator + workers coordinate using “write key X” and/or “emit signal Y”, then downstream processes **defer** until conditions are met.
+
+Pattern: “blackboard” doubles as both:
+- **global workspace** (shared knowledge for coordination), and
+- **artifact store** (contracts, results, observations).
+
+### 1.3 DAG-first orchestration with explicit gating
+From `src/os/types.ts`:
+- The system maintains a **DAG topology** with edges labeled `parent-child` vs `dependency`.
+- Deferrals are explicit (`DeferCondition`): e.g. `blackboard_key_exists`, `process_dead_by_name`, `all_of`, `any_of`.
+
+Pattern: “spawn_graph” + “after” dependencies is a **workflow engine** embedded in the kernel, but tuned for agentic work (soft contracts, observations, partial artifacts).
+
+### 1.3.1 “Rewriteable” topology (persistent DAG patches)
+From `src/os/dag-engine.ts`:
+- `rewrite_dag`-style interventions can be represented as **patches** (`OsDagPatch`) that add/remove/update nodes/edges.
+- The DAG engine persists “patched” nodes/edges (`patchedNodes`, `patchedEdges`) so certain structure changes **survive DAG rebuilds** from the live process table.
+
+Pattern: the kernel supports **planning/annotation topology** (virtual nodes/edges) alongside the live process tree, making “topology is the algorithm” literally persistent rather than a one-off visualization.
+
+### 1.4 Metacognition as a control plane (self-adaptive runtime)
+From `src/os/types.ts`:
+- **Triggers:** `dag_deadlock`, `resource_exhaustion`, `tick_stall`, `goal_drift`, `novel_situation`, etc.
+- **Commands:** `spawn`, `kill`, `reprioritize`, `rewrite_dag`, `learn` (heuristics), `fork`, `define_blueprint`, `evolve_blueprint`, `delegate_evaluation`, `halt`, etc.
+
+Pattern: this is a classic **monitor/analyze/plan/execute** control loop (autonomic computing), but with the “plan” represented as **topology interventions**.
+
+### 1.4.1 Meta-metacognition: awareness daemon over metacog
+From `src/os/types.ts` + `src/os/kernel.ts`:
+- The kernel tracks **metacog decision history** (`metacogHistory`), **intervention outcomes**, and **progress snapshots** (timeline), then feeds them to an **AwarenessDaemon**.
+- Awareness produces **adjustments** (e.g. kill-threshold tuning, focus suggestions, oscillation/blind-spot detection) that influence subsequent metacog evaluations.
+
+Pattern: a second-order controller that performs **introspective QA** on the executive loop itself (monitoring metacog for oscillations, overconfidence, and unused command vocabulary).
+
+### 1.4.2 Optimization substrate (performance + counterfactuals)
+From `src/os/kernel.ts`:
+- `PerfAnalyzer`, `SelfOptimizer`, and `CounterfactualSimulator` indicate an explicit “**learn from runs**” feedback loop beyond heuristics/blueprints.
+
+Pattern: treat scheduling + interventions as **optimizable policies**, evaluated against token/wall-time metrics and (in places) simulated counterfactuals.
+
+### 1.5 Seed blueprints = the house style (topology patterns)
+From `src/os/seed-blueprints.ts`:
+- `parallel` — independent workers
+- `pipeline` — sequential, signal-gated stages
+- `fan-out-fan-in` — parallel workers + synthesizer gated on `child:done`
+- `closed-loop-dev` — infra + alternating observers; downstream gates on `observation:passed:*`
+- `contract-first` — explicit contract phase + observer before implementation phases
+
+Pattern: the repo’s “native” orchestration idioms strongly emphasize **gated observations** and **contract-first decomposition** to prevent incompatible parallel work.
+
+### 1.6 “Topology is the algorithm” is explicitly encoded in prompts
+From `src/os/llm-executor.ts` + `docs/prompts/run-inspector-ui.md`:
+- Scout phase: spawn ephemerals; write `scout:*` keys; defer architecture.
+- Architect phase: **design topology**, write `architecture:*` keys, then `spawn_graph`.
+- Emphasis on **contract boundaries** and **pullback/join points** (multi-input gating).
+
+### 1.7 Concurrency model: event-driven kernel with serialized mutation
+From `docs/plans/2026-03-07-event-driven-kernel.md` + `src/os/kernel.ts`:
+- A promise/event-driven execution loop runs multiple process turns concurrently (bounded by `maxConcurrent`), while **all state mutation** is serialized via an async mutex (`AsyncMutex`).
+- The kernel maintains an `inflight` map for turn promises, plus periodic timers for housekeeping/snapshots/metacog evaluation, decoupled from “ticks”.
+
+Pattern: “**concurrent execution, single-threaded state**” — actor-like safety (no shared mutable state races) but with higher throughput than sequential tick batching.
+
+### 1.8 Observability as a first-class domain boundary (events + snapshots + “why”)
+From `src/os/protocol-emitter.ts` + `packages/lens/src/*`:
+- The kernel produces a structured **protocol event stream** (`RuntimeProtocolEvent`) plus periodic **snapshots** (`OsSystemSnapshot`) — both can be persisted and/or forwarded to observers.
+- `cognitive-lens` is a separate package that defines a **stable, self-contained contract** (types for processes/DAG/blackboard/events + snapshot deltas) so products can consume run telemetry without importing kernel internals.
+- Lens adds a key product-level move: **semantic extraction** of “cognitive events” (decision/observation/intervention/learning/planning) that answer **WHY** the system acted, not just **WHAT** happened.
+
+Pattern: this mirrors classic observability splits: raw telemetry → derived/semantic signals → UI/analytics. It also implies a clean CQRS-like boundary (kernel writes events; Lens/clients build read models).
+
+### 1.9 Durability: storage-backed protocol + snapshots (roadmap)
+From `docs/plans/2026-03-06-fully-db-backed-runs.md`:
+- Runs are moving toward a **DB-authoritative** model where protocol events + snapshots are written via a `StorageBackend` (Neon Postgres via Drizzle) rather than the filesystem.
+- This aligns naturally with **event sourcing** (append-only protocol log) + **snapshots** (materialized state), and improves “observe from anywhere” for long-lived runs.
+
+---
+
+## 2) Prior art / analogs (useful references for ARCHITECTURE.md)
+
+### 2.1 Blackboard systems (AI)
+- **Blackboard architecture** (e.g., Hearsay-II style): independent specialists read/write a shared blackboard; control component schedules work.
+  - Good analog for: `blackboard` + multi-process specialists + scheduler.
+
+### 2.2 Global Workspace Theory (cog sci)
+- “Global workspace” as a shared broadcast store: many modules compete/cooperate by publishing to a shared space.
+  - Good analog for: blackboard-as-shared-memory + attention/scheduling as “conscious access”.
+
+### 2.3 Actor model + supervision trees (distributed systems)
+- **Actor model**: isolated processes communicating via messages; fits the “process table + signals” mental model.
+- **Erlang/OTP supervision trees**: explicit restart policies and failure containment.
+  - Good analog for: `restartPolicy`, `onParentDeath`, cascaded kills, “let it crash” + recovery.
+
+### 2.4 Workflow/DAG orchestration engines (data/ops)
+- **Airflow-like DAGs**: explicit dependency edges and scheduling semantics.
+  - Good analog for: `spawn_graph` nodes + `after` dependencies + DAG metrics.
+
+### 2.5 Durable execution / workflow engines (reliability)
+- **Temporal-like workflows**: long-running orchestration with retries, persistence, and deterministic progression.
+  - Good analog for: checkpoints + run persistence + “resume a computation”.
+
+### 2.6 Tuple spaces (coordination models)
+- **Linda tuple space**: shared associative memory used to coordinate concurrent workers.
+  - Good analog for: blackboard keys as a coordination substrate (especially with match/contains conditions).
+
+### 2.7 Autonomic/self-adaptive systems (control theory in software)
+- **MAPE-K loop** (Monitor, Analyze, Plan, Execute over Knowledge):
+  - Monitor: telemetry + protocol + snapshots
+  - Analyze: perf analyzer, deadlock detection, stall detection
+  - Plan: metacog decisions
+  - Execute: commands that mutate topology / priorities / kill/restart
+  - Knowledge: heuristics + blueprint stats + memory store
+
+### 2.8 Event sourcing + CQRS (observability/read models)
+- **Event sourcing**: append-only event log as the durable record; materialize state via replay/snapshots.
+- **CQRS**: separate “write side” (kernel producing events/commands) from “read side” (Lens building snapshots/deltas and higher-level cognitive events).
+  - Good analog for: protocol emitter + snapshots + derived “cognitive events” feeding UI models.
+
+### 2.9 Distributed tracing (causal graphs over spans)
+- **Tracing/spans** (OpenTelemetry-style): reconstruct causal structure from events with ids/parents/links.
+  - Good analog for: DAG edges (`parent-child` vs `dependency` vs IPC/signal), plus timeline/event feed; “topology is the algorithm” becomes inspectable as a trace.
+
+### 2.10 Stigmergy (coordination via shared environment)
+- **Stigmergy** (multi-agent/swarm systems): agents coordinate indirectly by writing signals into a shared medium.
+  - Good analog for: blackboard-as-coordination substrate (agents “act on the world” by writing keys; others react).
+
+### 2.11 Task allocation protocols (multi-agent systems)
+- **Contract Net Protocol** (CNP): announce tasks → bid → award → execute → report.
+  - Good analog for: spawn/fan-out + prioritization + explicit result publication on blackboard.
+
+### 2.12 Hierarchical planning/control (AI/robotics)
+- **HTN planning / behavior trees**: represent strategy as composable, inspectable control structure.
+  - Good analog for: blueprints as reusable control programs + observation-gated phases.
+
+---
+
+## 3) Architecture-summary implications (what to emphasize)
+
+### 3.1 What’s “core” vs “layer”
+- Core kernel primitives to call out: `OsKernel` + `Scheduler` + `ProcessTable` + `DAG engine` + `IPC bus (blackboard/signals)` + `Executors` + `Metacog agent` + `Memory store`.
+- Observability layer (“Lens”) is a separate concern that consumes snapshots/protocol and produces deltas/view models.
+
+### 3.2 Invariants worth stating (these explain why it works)
+- **State mutation is serialized** (mutex/event-loop style) even if execution is concurrent.
+- **Coordination is explicit**: blackboard keys + signals + deferrals (no implicit “shared context”).
+- **Observation gates progress** in the recommended blueprints (closed-loop + contract-first).
+- **Self-modification is bounded**: metacog acts via a small command vocabulary and typed mutations.
+
+### 3.3 Suggested glossary (consistent wording across docs)
+- **Kernel**: runtime + scheduler + IPC + DAG + metacog loop
+- **Process**: an agent turn executor (LLM/system/child-kernel)
+- **Orchestrator / sub-kernel**: lifecycle process that spawns/coordinates a topology
+- **Blackboard**: shared key/value workspace (artifacts + coordination)
+- **Signal**: pub/sub notification mechanism
+- **Blueprint**: reusable topology template with applicability + stats
+- **Observer**: validator that gates downstream work via `observation:passed:*`
+
+---
+
+## 4) Handy external references (for citations/footnotes if desired)
+- Blackboard architecture (overview + history): https://en.wikipedia.org/wiki/Blackboard_system
+- Hearsay-II / blackboard systems (bibliography pointer): https://mas.cs.umass.edu/paper/218
+- Global Workspace Theory (overview): https://en.wikipedia.org/wiki/Global_workspace_theory
+- Erlang/OTP supervision principles: https://www.erlang.org/doc/design_principles/sup_princ
+- Apache Airflow (DAGs): https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html
+- Temporal workflows (durable orchestration): https://docs.temporal.io/
+- IBM autonomic computing (MAPE-K framing): https://research.ibm.com/publications/autonomic-computing-architectural-approach-and-prototype
+- OpenTelemetry traces/spans (causal graphs): https://opentelemetry.io/docs/concepts/signals/traces/
+- Tuple space / Linda coordination model: https://en.wikipedia.org/wiki/Tuple_space
+- Temporal (durable execution platform): https://docs.temporal.io/
+- Linda tuple spaces: https://en.wikipedia.org/wiki/Linda_(coordination_language)
+- Event sourcing (overview): https://martinfowler.com/eaaDev/EventSourcing.html
+- CQRS (overview): https://martinfowler.com/bliki/CQRS.html
+- OpenTelemetry tracing (spec overview): https://opentelemetry.io/docs/specs/otel/overview/
+
+---
+
+## 5) Local docs to cite for “what it is”
+
+### 5.1 OS-as-cognitive-architecture framing (UI + storytelling)
+From `docs/prompts/run-inspector-ui.md`:
+- Explicit thesis: “Operating systems as cognitive architecture” — scheduling/IPC/context switching/deadlock detection as mind-management primitives. (`docs/prompts/run-inspector-ui.md:13`)
+- “Topology is the algorithm”: intelligence is in the dynamics of the process graph; topology is a learnable object. (`docs/prompts/run-inspector-ui.md:16`–`docs/prompts/run-inspector-ui.md:18`)
+- Metacog described as “executive process” analogous to Global Workspace. (`docs/prompts/run-inspector-ui.md:19`)
+- UI implication: observer is “watching a mind think”; DAG restructuring is a first-class event worth highlighting. (`docs/prompts/run-inspector-ui.md:21`, `docs/prompts/run-inspector-ui.md:98`, `docs/prompts/run-inspector-ui.md:102`)
+- Blackboard described as the system’s shared memory / “global workspace”. (`docs/prompts/run-inspector-ui.md:117`)
+
+### 5.2 Observability as a separate “legibility layer” (Lens)
+From `docs/plans/lens-implementation-plan.md`:
+- Lens definition: layer between kernel telemetry (protocol + snapshots + blackboard) and human observer, pushing real-time views over WebSocket. (`docs/plans/lens-implementation-plan.md:5`–`docs/plans/lens-implementation-plan.md:7`)
+- High-level interaction diagram: Browser UI ⇄ Lens ⇄ MCP control plane ⇄ Kernel. (`docs/plans/lens-implementation-plan.md:13`–`docs/plans/lens-implementation-plan.md:52`)
+- Implementation strategy: optional in-process event bus for `OsProtocolEmitter`, with fallback to filesystem watching for child-process runs. (`docs/plans/lens-implementation-plan.md:65`–`docs/plans/lens-implementation-plan.md:101`)
+
+### 5.3 Concurrency model: “concurrent execution, serialized mutation”
+From `docs/plans/2026-03-07-event-driven-kernel.md`:
+- Goal: move from batch “tick loop” scheduling to an event-driven loop reacting to process completions. (`docs/plans/2026-03-07-event-driven-kernel.md:5`)
+- Safety invariant: even with concurrent execution, state mutation remains single-threaded via an async mutex. (`docs/plans/2026-03-07-event-driven-kernel.md:7`)
+
+---
+
+## 6) Verified code anchors (line-number evidence)
+
+### 6.1 Process model + supervision knobs
+- `src/os/types.ts:23`–`src/os/types.ts:26` — `OsProcessBackend` includes `{kind:"llm"}` plus `{kind:"system"}` and `{kind:"kernel"}`.
+- `src/os/types.ts:30`–`src/os/types.ts:39` — `OsProcessType` + `OsProcessState` enums.
+- `src/os/types.ts:76`–`src/os/types.ts:129` — `OsProcess` shape (priority, token budgets, wakeOnSignals, parent/children, restartPolicy, blackboardKeysWritten, capabilities).
+- `src/os/types.ts:41`–`src/os/types.ts:43` — supervision-ish policies: `OsParentDeathPolicy`, `OsRestartPolicy`.
+
+### 6.2 IPC substrate: blackboard + signals
+- `src/os/types.ts:172`–`src/os/types.ts:179` — `OsBlackboardEntry` includes `version`, `writtenBy/writtenAt`, `readBy`.
+- `src/os/ipc-bus.ts:64`–`src/os/ipc-bus.ts:87` — `bbWrite()` increments `version` and updates attribution.
+- `src/os/ipc-bus.ts:89`–`src/os/ipc-bus.ts:95` — `bbRead()` appends to `readBy` (per-reader tracking).
+- `src/os/types.ts:183`–`src/os/types.ts:193` — `OsSignal` + `OsSignalSubscription(signalPattern)`.
+- `src/os/ipc-bus.ts:10`–`src/os/ipc-bus.ts:50` — `matchSignalPattern()` glob semantics (`*` stops at `:`, `**` crosses `:`).
+- `src/os/ipc-bus.ts:107`–`src/os/ipc-bus.ts:150` — subscribe/unsubscribe + per-process pending signal queues + `getPendingSignals()` flush.
+
+### 6.3 Topology as first-class object (DAG + patches)
+- `src/os/types.ts:206`–`src/os/types.ts:224` — DAG nodes/edges/topology + `OsDagPatch`.
+- `src/os/dag-engine.ts:26`–`src/os/dag-engine.ts:31` — patched edges/nodes persist across DAG rebuilds.
+- `src/os/dag-engine.ts:59`–`src/os/dag-engine.ts:80` — rebuild re-applies patched nodes/edges.
+- `src/os/dag-engine.ts:136`–`src/os/dag-engine.ts:192` — `applyPatch()` persists patch mutations into `patchedNodes`/`patchedEdges`.
+
+### 6.4 Topology templates (“blueprints”) including closed-loop gating
+- `src/os/seed-blueprints.ts:24`–`src/os/seed-blueprints.ts:55` — `SEED_PARALLEL` (independent workers → blackboard results).
+- `src/os/seed-blueprints.ts:57`–`src/os/seed-blueprints.ts:92` — `SEED_PIPELINE` (blackboard + `signal_emit stage:*:done` gating).
+- `src/os/seed-blueprints.ts:94`–`src/os/seed-blueprints.ts:140` — `SEED_FAN_OUT_FAN_IN` (workers publish; synthesizer waits on `child:done`).
+- `src/os/seed-blueprints.ts:142`–`src/os/seed-blueprints.ts:154` — `SEED_CLOSED_LOOP_DEV` rationale: alternate produce/observe; gate on `observation:passed:*`.
+
+### 6.5 Deferrals and explicit gating
+- `src/os/types.ts:577`–`src/os/types.ts:589` — `SpawnGraphNode.after` semantics: name waits on process death; key-with-colon waits on blackboard key existence.
+- `src/os/types.ts:742`–`src/os/types.ts:749` — `DeferCondition` types (`blackboard_key_exists`, `process_dead_by_name`, `all_of`, `any_of`, etc).
+- `src/os/metacog-agent.ts:90`–`src/os/metacog-agent.ts:93` — “Gate, don't poll” as a metacog invariant.
+- `src/os/metacog-agent.ts:230`–`src/os/metacog-agent.ts:244` — metacog `defer` command: “kernel checks conditions every tick”; pending deferrals block halting.
+
+### 6.6 Metacognitive control plane (bounded command vocabulary)
+- `src/os/types.ts:721`–`src/os/types.ts:738` — `MetacogCommand` union (spawn/kill/reprioritize/rewrite_dag/learn/halt/define_blueprint/evolve_blueprint/fork/defer/etc).
+- `src/os/types.ts:693`–`src/os/types.ts:717` — `DagMutation` discriminated union for `rewrite_dag`.
+- `src/os/metacog-agent.ts:45`–`src/os/metacog-agent.ts:56` — “intelligence lives in the topology”; process table = working memory; blackboard = knowledge store; DAG = reasoning structure.
+- `src/os/metacog-agent.ts:58`–`src/os/metacog-agent.ts:62` — metacog has no tools; only outputs commands (cannot produce deliverables).
+
+### 6.7 Concurrency model: “eval outside mutex, mutations inside mutex”
+- `src/os/async-mutex.ts:1`–`src/os/async-mutex.ts:35` — `AsyncMutex` (FIFO) used to serialize kernel state changes.
+- `src/os/kernel.ts:894`–`src/os/kernel.ts:897` — kernel comment: LLM eval intentionally outside mutex; kills/spawns/IPC writes inside mutex to avoid races.
+
+### 6.8 Lens: derived “cognitive events” (WHY layer)
+- `packages/lens/src/cognitive-events.ts:104`–`packages/lens/src/cognitive-events.ts:112` — metacog intervention event shape (`assessment`, `commands`, `citedHeuristicIds`).
+- `packages/lens/src/cognitive-events.ts:177`–`packages/lens/src/cognitive-events.ts:193` — extractor maps `os_metacog` protocol events into Lens cognitive events.

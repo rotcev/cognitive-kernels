@@ -1,0 +1,23 @@
+status: completed
+artifact: /Users/shawndavies/dev/cognitive-kernels/ARCHITECTURE.md
+sectionsCompleted:
+  - Project overview
+  - Directory structure
+  - Core abstractions: kernel/processes/blackboard/metacog/lens
+  - Execution model
+  - IPC mechanisms
+  - Database schema
+  - Extension points
+  - Evidence map (claims -> repo anchors)
+evidenceMapping:
+  C01: [src/os/kernel.ts, src/os/schemas.ts, src/os/types.ts]
+  C02: [src/os/process-table.ts, src/os/process-supervisor.ts, src/os/types.ts]
+  C03: [src/os/ipc-bus.ts, src/os/types.ts]
+  C04: [src/os/kernel.ts, src/os/scheduler.ts, docs/plans/2026-03-07-event-driven-kernel.md]
+  C05: [src/os/metacog-agent.ts, src/os/schemas.ts, src/os/kernel.ts]
+  C06: [src/lens/server.ts, src/lens/session.ts, src/lens/view-models.ts, packages/lens/src/types.ts]
+  C07: [src/db/schema.ts, src/db/connection.ts, src/db/storage-backend.ts, drizzle.config.ts, package.json]
+  C08: [src/brain/create-brain.ts, src/os/executor-router.ts, src/db/storage-backend.ts, src/os/seed-blueprints.ts, src/mcp/control-plane.ts, src/api/app.ts]
+notes:
+  - Claims intentionally constrained to repository-backed evidence.
+  - DB behavior documented in both enabled and optional/gated modes via DATABASE_URL checks.
