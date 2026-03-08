@@ -5,14 +5,15 @@
  * Total function — for every valid (state, event) pair, produces exactly
  * one (state', effects) pair. No exceptions, no I/O, no randomness.
  *
- * Handles all 10 kernel event types:
+ * Handles all kernel event types:
  * - boot, halt_check, external_command, process_completed, ephemeral_completed
  * - timer_fired (housekeep, snapshot), metacog_evaluated, awareness_evaluated
  * - shell_output, process_submitted (observational no-op)
+ * - topology_declared, metacog_response_received, awareness_response_received
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology, MetacogHistoryEntry, MetacogCommand } from "../types.js";
 import { reconcile } from "../topology/reconcile.js";
@@ -55,6 +56,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleTopologyDeclared(state, event);
     case "metacog_response_received":
       return handleMetacogResponseReceived(state, event);
+    case "awareness_response_received":
+      return handleAwarenessResponseReceived(state, event);
     default:
       return [state, []];
   }
@@ -2444,6 +2447,71 @@ function handleMetacogResponseReceived(
     const result = reconcileTopologyInto(newState, topology, effects);
     return [result.state, assignEffectSeqs(result.effects)];
   }
+
+  return [newState, assignEffectSeqs(effects)];
+}
+
+/**
+ * Absorbs kernel.ts applyAwarenessAdjustment() + awareness notes/blindSpots/focus.
+ * Processes parsed awareness daemon response: stores notes (replace semantics),
+ * applies adjustments (kill threshold, focus, oscillation), stores blind spots.
+ */
+function handleAwarenessResponseReceived(
+  state: KernelState,
+  event: AwarenessResponseReceivedEvent,
+): TransitionResult {
+  const effects: KernelEffectInput[] = [];
+
+  // 1. Store notes — replace semantics (consumed once by next metacog)
+  let newState: KernelState = {
+    ...state,
+    awarenessNotes: [...event.notes],
+  };
+
+  // 2. Process adjustments
+  let killThresholdAdjustment = newState.killThresholdAdjustment;
+  let metacogFocus = newState.metacogFocus;
+  const oscillationWarnings = [...newState.oscillationWarnings];
+
+  for (const adj of event.adjustments) {
+    switch (adj.kind) {
+      case "adjust_kill_threshold":
+        killThresholdAdjustment += adj.delta;
+        break;
+      case "suggest_metacog_focus":
+        metacogFocus = adj.area;
+        break;
+      case "detect_oscillation":
+        oscillationWarnings.push({
+          processType: adj.processType,
+          killCount: adj.killCount,
+          respawnCount: adj.respawnCount,
+          windowTicks: adj.windowTicks,
+        });
+        break;
+      case "noop":
+        break;
+      // flag_overconfident_heuristic and detect_blind_spot are handled
+      // via flaggedHeuristics → blindSpots below (or by the interpreter for
+      // heuristic confidence adjustments that need the memory store).
+    }
+  }
+
+  // 3. Store flagged heuristics as blind spots
+  newState = {
+    ...newState,
+    killThresholdAdjustment,
+    metacogFocus,
+    oscillationWarnings,
+    blindSpots: [...event.flaggedHeuristics],
+  };
+
+  // 4. Emit protocol event for observability
+  effects.push({
+    type: "emit_protocol",
+    action: "os_awareness_eval",
+    message: `${event.notes.length} notes, ${event.adjustments.length} adjustments`,
+  });
 
   return [newState, assignEffectSeqs(effects)];
 }

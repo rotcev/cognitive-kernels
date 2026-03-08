@@ -3906,3 +3906,160 @@ describe("transition — metacog_response_received", () => {
     expect(memoryEffects).toHaveLength(2);
   });
 });
+
+describe("transition — awareness_response_received", () => {
+  function awarenessEvent(
+    overrides?: Partial<{
+      notes: string[];
+      adjustments: any[];
+      flaggedHeuristics: { id: string; reason: string }[];
+    }>,
+    seq = 0,
+  ): KernelEvent {
+    return {
+      type: "awareness_response_received",
+      notes: overrides?.notes ?? [],
+      adjustments: overrides?.adjustments ?? [],
+      flaggedHeuristics: overrides?.flaggedHeuristics ?? [],
+      timestamp: Date.now(),
+      seq,
+    };
+  }
+
+  test("stores awareness notes in state", () => {
+    const state = makeState();
+    const [newState] = transition(
+      state,
+      awarenessEvent({ notes: ["consider cost efficiency", "watch for oscillation"] }),
+    );
+
+    expect(newState.awarenessNotes).toEqual(["consider cost efficiency", "watch for oscillation"]);
+  });
+
+  test("applies kill threshold adjustment", () => {
+    const state = { ...makeState(), killThresholdAdjustment: 0.1 };
+    const [newState] = transition(
+      state,
+      awarenessEvent({
+        adjustments: [{ kind: "adjust_kill_threshold", delta: 0.05, reason: "too aggressive" }],
+      }),
+    );
+
+    expect(newState.killThresholdAdjustment).toBeCloseTo(0.15);
+  });
+
+  test("sets metacog focus from adjustment", () => {
+    const state = makeState();
+    const [newState] = transition(
+      state,
+      awarenessEvent({
+        adjustments: [{ kind: "suggest_metacog_focus", area: "resource efficiency", reason: "high token spend" }],
+      }),
+    );
+
+    expect(newState.metacogFocus).toBe("resource efficiency");
+  });
+
+  test("stores flagged heuristics as blind spots", () => {
+    const state = makeState();
+    const flagged = [
+      { id: "h-001", reason: "stale confidence" },
+      { id: "h-002", reason: "contradicted by recent outcome" },
+    ];
+    const [newState] = transition(
+      state,
+      awarenessEvent({ flaggedHeuristics: flagged }),
+    );
+
+    expect(newState.blindSpots).toEqual(flagged);
+  });
+
+  test("emits protocol event for observability", () => {
+    const state = makeState();
+    const [, effects] = transition(
+      state,
+      awarenessEvent({
+        notes: ["note-1", "note-2"],
+        adjustments: [
+          { kind: "adjust_kill_threshold", delta: 0.1, reason: "test" },
+          { kind: "suggest_metacog_focus", area: "cost", reason: "test" },
+        ],
+      }),
+    );
+
+    const protocolEffects = effects.filter(
+      e => e.type === "emit_protocol" && (e as any).action === "os_awareness_eval",
+    );
+    expect(protocolEffects).toHaveLength(1);
+    const msg = (protocolEffects[0] as any).message as string;
+    expect(msg).toContain("2 notes");
+    expect(msg).toContain("2 adjustments");
+  });
+
+  test("replaces previous notes (not appends)", () => {
+    const state = { ...makeState(), awarenessNotes: ["old-note-1", "old-note-2"] };
+    const [newState] = transition(
+      state,
+      awarenessEvent({ notes: ["new-note"] }),
+    );
+
+    expect(newState.awarenessNotes).toEqual(["new-note"]);
+    expect(newState.awarenessNotes).not.toContain("old-note-1");
+  });
+
+  test("stores oscillation warnings from detect_oscillation adjustments", () => {
+    const state = makeState();
+    const [newState] = transition(
+      state,
+      awarenessEvent({
+        adjustments: [
+          { kind: "detect_oscillation", processType: "lifecycle", killCount: 3, respawnCount: 3, windowTicks: 10 },
+        ],
+      }),
+    );
+
+    expect(newState.oscillationWarnings).toHaveLength(1);
+    expect(newState.oscillationWarnings[0]).toMatchObject({
+      processType: "lifecycle",
+      killCount: 3,
+      respawnCount: 3,
+    });
+  });
+
+  test("handles multiple adjustment types in single event", () => {
+    const state = { ...makeState(), killThresholdAdjustment: 0 };
+    const [newState] = transition(
+      state,
+      awarenessEvent({
+        notes: ["multi-test"],
+        adjustments: [
+          { kind: "adjust_kill_threshold", delta: 0.2, reason: "premature kills" },
+          { kind: "suggest_metacog_focus", area: "parallelism", reason: "underutilized" },
+          { kind: "detect_oscillation", processType: "event", killCount: 5, respawnCount: 4, windowTicks: 8 },
+          { kind: "noop", reasoning: "nothing else to do" },
+        ],
+        flaggedHeuristics: [{ id: "h-99", reason: "stale" }],
+      }),
+    );
+
+    expect(newState.killThresholdAdjustment).toBeCloseTo(0.2);
+    expect(newState.metacogFocus).toBe("parallelism");
+    expect(newState.oscillationWarnings).toHaveLength(1);
+    expect(newState.blindSpots).toEqual([{ id: "h-99", reason: "stale" }]);
+    expect(newState.awarenessNotes).toEqual(["multi-test"]);
+  });
+
+  test("noop adjustments do not alter state", () => {
+    const state = makeState();
+    const [newState] = transition(
+      state,
+      awarenessEvent({
+        adjustments: [{ kind: "noop", reasoning: "no action needed" }],
+      }),
+    );
+
+    expect(newState.killThresholdAdjustment).toBe(0);
+    expect(newState.metacogFocus).toBeNull();
+    expect(newState.oscillationWarnings).toHaveLength(0);
+  });
+});
