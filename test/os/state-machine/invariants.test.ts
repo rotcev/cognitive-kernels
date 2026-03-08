@@ -124,6 +124,42 @@ const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
     timestamp: fc.constant(Date.now()),
     seq: fc.nat(),
   }),
+  fc.record({
+    type: fc.constant("timer_fired" as const),
+    timer: fc.constantFrom("housekeep" as const, "metacog" as const, "watchdog" as const, "snapshot" as const),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  fc.record({
+    type: fc.constant("metacog_evaluated" as const),
+    commandCount: fc.nat({ max: 10 }),
+    triggerCount: fc.nat({ max: 5 }),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  fc.record({
+    type: fc.constant("awareness_evaluated" as const),
+    hasAdjustment: fc.boolean(),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  fc.record({
+    type: fc.constant("shell_output" as const),
+    pid: fc.constantFrom("p0", "p1", "nonexistent"),
+    hasStdout: fc.boolean(),
+    hasStderr: fc.boolean(),
+    exitCode: fc.option(fc.integer({ min: 0, max: 255 }), { nil: undefined }),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  fc.record({
+    type: fc.constant("process_submitted" as const),
+    pid: fc.constantFrom("p0", "p1", "nonexistent"),
+    name: fc.string({ minLength: 1, maxLength: 20 }),
+    model: fc.constant("gpt-4"),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
 );
 
 // ---------------------------------------------------------------------------

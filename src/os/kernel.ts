@@ -532,7 +532,6 @@ export class OsKernel {
 
       this.lastMetacogTick = this.scheduler.tickCount;
       const triggerCount = this.pendingTriggers.length;
-      this.pendingTriggers = [];
 
       // (2) Read all pending items from 'metacog:commands' channel
       // (3) Apply each MetacogCommand via executeMetacogCommand()
@@ -553,11 +552,21 @@ export class OsKernel {
       // Track metacog evaluation count
       this.metacogEvalCount += 1;
 
-      this.logEvent({
-        type: "metacog_evaluated",
-        commandCount: metacogCommandCount,
-        triggerCount,
-      });
+      // Delegate pure state changes to transition (clears pendingTriggers)
+      {
+        const mcEvent: KernelEvent = {
+          type: "metacog_evaluated",
+          commandCount: metacogCommandCount,
+          triggerCount,
+          timestamp: Date.now(),
+          seq: this.nextSeq(),
+        };
+        this.logEvent(mcEvent);
+        const mcState = this.extractState();
+        const [newState, effects] = transition(mcState, mcEvent);
+        this.applyStateChanges(newState);
+        this.interpretTransitionEffects(effects);
+      }
 
       // Record progress snapshot for awareness context
       this.recordProgressSnapshot();
@@ -610,10 +619,17 @@ export class OsKernel {
             },
           });
 
-          this.logEvent({
+          const awEvent: KernelEvent = {
             type: "awareness_evaluated",
             hasAdjustment: awarenessResp.adjustments.length > 0,
-          });
+            timestamp: Date.now(),
+            seq: this.nextSeq(),
+          };
+          this.logEvent(awEvent);
+          const awState = this.extractState();
+          const [awNewState, awEffects] = transition(awState, awEvent);
+          this.applyStateChanges(awNewState);
+          this.interpretTransitionEffects(awEffects);
         } catch {
           // Awareness eval failed — continue without notes
         }
@@ -951,10 +967,19 @@ export class OsKernel {
               },
             });
 
-            this.logEvent({
-              type: "awareness_evaluated",
-              hasAdjustment: awarenessResp.adjustments.length > 0,
-            });
+            {
+              const awEvent: KernelEvent = {
+                type: "awareness_evaluated",
+                hasAdjustment: awarenessResp.adjustments.length > 0,
+                timestamp: Date.now(),
+                seq: this.nextSeq(),
+              };
+              this.logEvent(awEvent);
+              const awState = this.extractState();
+              const [awNewState, awEffects] = transition(awState, awEvent);
+              this.applyStateChanges(awNewState);
+              this.interpretTransitionEffects(awEffects);
+            }
           } catch {
             // Awareness eval failed — non-critical, continue
           }
@@ -1476,10 +1501,19 @@ export class OsKernel {
             },
           });
 
-          this.logEvent({
-            type: "awareness_evaluated",
-            hasAdjustment: awarenessResp.adjustments.length > 0,
-          });
+          {
+            const awEvent: KernelEvent = {
+              type: "awareness_evaluated",
+              hasAdjustment: awarenessResp.adjustments.length > 0,
+              timestamp: Date.now(),
+              seq: this.nextSeq(),
+            };
+            this.logEvent(awEvent);
+            const awState = this.extractState();
+            const [awNewState, awEffects] = transition(awState, awEvent);
+            this.applyStateChanges(awNewState);
+            this.interpretTransitionEffects(awEffects);
+          }
         } catch {
           // Awareness eval failed — continue without notes
         }
@@ -1592,16 +1626,48 @@ export class OsKernel {
    * IPC flush + wake, zombie reaping, daemon restarts, DAG rebuild,
    * strategy application, stall detection, deadlock recovery.
    */
+  /**
+   * Run one housekeep cycle: transition for pure state + housekeepIO for runtime I/O.
+   * Used by safeHousekeep (adds mutex/halt/scheduling) and tests (direct call).
+   */
   private housekeep(): void {
+    const state = this.extractState();
+    const timerEvent: KernelEvent = {
+      type: "timer_fired",
+      timer: "housekeep",
+      pendingEphemeralCount: this.pendingEphemerals.length + this.activeEphemeralCount,
+      bbKeyCount: this.ipcBus.summary().blackboardKeyCount,
+      lastForceWakeTime: this.lastForceWakeTime,
+      bbKeysAtLastForceWake: this.bbKeysAtLastForceWake,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    };
+    const [newState, effects] = transition(state, timerEvent);
+    this.applyStateChanges(newState, { syncProcesses: true });
+    this.interpretTransitionEffects(effects);
+
+    // Track force-wake state for deadlock detection across housekeep cycles
+    const forceWokeOrchestrator = effects.some(
+      e => e.type === "emit_protocol" && e.message?.includes("deadlock_detected")
+    );
+    if (forceWokeOrchestrator) {
+      this.lastForceWakeTime = Date.now();
+      this.bbKeysAtLastForceWake = this.ipcBus.summary().blackboardKeyCount;
+    }
+
+    this.housekeepIO();
+  }
+
+  /**
+   * I/O-heavy housekeep operations that the transition function cannot handle.
+   * Called after transition has already applied pure state decisions
+   * (housekeepCount, cadence signals, stall/deadlock detection, sleeper/checkpoint waking).
+   */
+  private housekeepIO(): void {
     // 0. Reset per-tick state
     this.tickSignals = [];
 
-    // 1. Housekeep counter (wall-clock cadence for periodic signals).
-    // NOTE: scheduler.tick() is NOT called here — it's called in onProcessComplete()
-    // so tickCount reflects actual scheduling cycles, not 500ms timer fires.
-    this.housekeepCount += 1;
-
-    // 1b. Emit periodic cadence signals based on housekeepCount
+    // 1. Emit IPC signals for cadences (transition computed which, but IPC bus is I/O)
     const cadences = this.config.kernel.tickSignalCadences ?? [1, 5, 10];
     for (const cadence of cadences) {
       if (this.housekeepCount % cadence === 0) {
@@ -1611,15 +1677,7 @@ export class OsKernel {
       }
     }
 
-    // 2. Wake expired sleepers
-    this.supervisor.wakeExpiredSleepers();
-
-    // 2b. Restore checkpointed processes
-    for (const proc of this.table.getByState("checkpoint")) {
-      this.table.transitionState(proc.pid, "running");
-    }
-
-    // 2c. Check deferral conditions
+    // 2. Check deferral conditions (runtime: evaluates bb state, spawns processes)
     this.processDeferrals();
 
     // 3. Flush IPC bus — get woken PIDs, wake idle processes
@@ -1647,108 +1705,6 @@ export class OsKernel {
       this.activeStrategyId = applicable[0]!.id;
     }
     this.router.setStrategiesSnapshot(applicable);
-
-    // Stall detection — use both tick count AND wall clock for robustness.
-    // In the event-driven model, ticks only increment on real process completions,
-    // so wall clock is the primary signal during quiet periods.
-    const liveEphemeralCount = this.table.getAll().filter(
-      p => p.type === "event" && p.state !== "dead"
-    ).length;
-    const now = Date.now();
-    if (this.inflight.size === 0 && liveEphemeralCount === 0) {
-      this.consecutiveIdleTicks += 1;
-      // Wall-clock stall: 5s with no inflight work and idle processes present
-      const wallStall = this.lastProcessCompletionTime > 0 &&
-        (now - this.lastProcessCompletionTime) > 5_000;
-      if (this.consecutiveIdleTicks >= 3 || wallStall) {
-        const idleProcs = this.table.getByState("idle");
-        if (idleProcs.length > 0) {
-          for (const proc of idleProcs) {
-            this.supervisor.activate(proc.pid);
-          }
-          this.emitter?.emit({
-            action: "os_process_event",
-            status: "completed",
-            message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${this.consecutiveIdleTicks} housekeep cycles (${this.lastProcessCompletionTime ? Math.round((now - this.lastProcessCompletionTime) / 1000) + 's' : '?'} since last completion)`,
-          });
-          this.consecutiveIdleTicks = 0;
-        }
-      }
-    } else {
-      this.consecutiveIdleTicks = 0;
-    }
-
-    // Phase-transition deadlock detection
-    const orchestrator = this.table.getAll().find(p => !p.parentPid && p.type === "lifecycle");
-    if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
-      const allLivingWork = this.table.getAll().filter(
-        p => p.pid !== orchestrator.pid && p.state !== "dead" && p.type !== "daemon"
-      );
-      const pendingEphemerals = this.pendingEphemerals.length + liveEphemeralCount;
-      if (allLivingWork.length === 0 && pendingEphemerals === 0) {
-        const pendingDeferrals = this.deferrals.size;
-        const currentBbKeys = this.ipcBus.summary().blackboardKeyCount;
-        const bbChanged = currentBbKeys !== this.bbKeysAtLastForceWake;
-        // Wall-clock cooldown: 10s between force-wakes (not tick-based)
-        const wallCooldownExpired = (now - this.lastForceWakeTime) > 10_000;
-
-        // Always force-wake when nothing is left (no deferrals, no work)
-        const nothingLeft = pendingDeferrals === 0 && allLivingWork.length === 0;
-
-        if (nothingLeft || bbChanged || wallCooldownExpired) {
-          this.supervisor.activate(orchestrator.pid);
-          this.lastOrchestratorForceWakeTick = this.scheduler.tickCount;
-          this.lastForceWakeTime = now;
-          this.bbKeysAtLastForceWake = currentBbKeys;
-          this.emitter?.emit({
-            action: "os_process_event",
-            status: "completed",
-            message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, wallCooldown=${wallCooldownExpired})`,
-          });
-        }
-      }
-    }
-
-    // Dead executive recovery
-    const deadOrchestrator = this.table.getAll().find(
-      p => !p.parentPid && p.type === "lifecycle" && p.state === "dead" && p.name === "goal-orchestrator"
-    );
-    if (deadOrchestrator) {
-      // Only count lifecycle processes as "goal work" — ephemerals (type "event") are
-      // fire-and-forget scouts that don't need an executive to supervise them.
-      const livingGoalProcesses = this.table.getAll().filter(
-        p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type === "lifecycle"
-      );
-      const hasPendingDeferrals = this.deferrals.size > 0;
-
-      if (livingGoalProcesses.length > 0 || hasPendingDeferrals) {
-        const newOrch = this.supervisor.spawn({
-          type: "lifecycle",
-          name: "goal-orchestrator",
-          objective: this.goal,
-          priority: deadOrchestrator.priority,
-          model: deadOrchestrator.model,
-          workingDir: this.workingDir,
-        });
-        this.supervisor.activate(newOrch.pid);
-
-        // Re-parent orphaned lifecycle children so child:done signals route correctly
-        for (const proc of livingGoalProcesses) {
-          if (!proc.parentPid && proc.type === "lifecycle") {
-            proc.parentPid = newOrch.pid;
-            newOrch.children.push(proc.pid);
-          }
-        }
-
-        this.addTrigger("process_failed");
-
-        this.emitter?.emit({
-          action: "os_process_event",
-          status: "completed",
-          message: `dead_executive_recovery: restarted orchestrator as ${newOrch.pid}, reparented ${livingGoalProcesses.filter(p => p.type === "lifecycle").length} orphans, ${this.deferrals.size} deferrals pending`,
-        });
-      }
-    }
 
     // Telemetry collection + perf analysis (if enabled)
     if (this.config.kernel.telemetryEnabled) {
@@ -3594,6 +3550,14 @@ export class OsKernel {
               proc.checkpoint.executorState = this.router.captureCheckpointState(proc) ?? undefined;
               this.memoryStore.saveCheckpoint(proc.checkpoint);
             }
+          }
+          break;
+        }
+
+        case "wake_process": {
+          const wakeProc = this.table.get(effect.pid);
+          if (wakeProc && (wakeProc.state === "idle" || wakeProc.state === "sleeping")) {
+            this.supervisor.activate(effect.pid);
           }
           break;
         }

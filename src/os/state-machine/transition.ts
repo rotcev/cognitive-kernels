@@ -5,13 +5,14 @@
  * Total function — for every valid (state, event) pair, produces exactly
  * one (state', effects) pair. No exceptions, no I/O, no randomness.
  *
- * Phase 3: Handles boot, halt_check, external_command, and process_completed events.
- * Other events pass through as no-ops (strangler pattern — the kernel
- * class still handles them via its existing code paths).
+ * Handles all 10 kernel event types:
+ * - boot, halt_check, external_command, process_completed, ephemeral_completed
+ * - timer_fired (housekeep, snapshot), metacog_evaluated, awareness_evaluated
+ * - shell_output, process_submitted (observational no-op)
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport } from "../types.js";
 import { randomUUID } from "node:crypto";
@@ -36,9 +37,16 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleEphemeralCompleted(state, event);
     case "timer_fired":
       return handleTimerFired(state, event);
+    case "metacog_evaluated":
+      return handleMetacogEvaluated(state, event);
+    case "awareness_evaluated":
+      return handleAwarenessEvaluated(state, event);
+    case "shell_output":
+      return handleShellOutput(state, event);
+    case "process_submitted":
+      // Process submission is purely observational — no state changes.
+      return [state, []];
     default:
-      // Unhandled events are no-ops — the kernel class still handles them
-      // via its existing code paths (strangler pattern).
       return [state, []];
   }
 }
@@ -1376,6 +1384,109 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       housekeepCount,
       consecutiveIdleTicks,
     },
+    assignEffectSeqs(effects),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Metacog Evaluated Handler
+// ---------------------------------------------------------------------------
+
+function handleMetacogEvaluated(state: KernelState, event: MetacogEvaluatedEvent): TransitionResult {
+  if (state.halted) return [state, []];
+
+  const effects: KernelEffectInput[] = [];
+
+  // Clear pending triggers — metacog has consumed them
+  const pendingTriggers: string[] = [];
+
+  effects.push({
+    type: "emit_protocol",
+    action: "os_metacog_eval",
+    message: `metacog evaluated: ${event.commandCount} commands, ${event.triggerCount} triggers consumed`,
+  });
+
+  return [
+    {
+      ...state,
+      pendingTriggers,
+    },
+    assignEffectSeqs(effects),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Awareness Evaluated Handler
+// ---------------------------------------------------------------------------
+
+function handleAwarenessEvaluated(state: KernelState, _event: AwarenessEvaluatedEvent): TransitionResult {
+  if (state.halted) return [state, []];
+
+  // Awareness evaluation is I/O-heavy (LLM call, bb writes, adjustments).
+  // The transition function has no pure state to update — all state changes
+  // happen via kernel-side I/O operations.
+  return [state, []];
+}
+
+// ---------------------------------------------------------------------------
+// Shell Output Handler
+// ---------------------------------------------------------------------------
+
+function handleShellOutput(state: KernelState, event: ShellOutputEvent): TransitionResult {
+  if (state.halted) return [state, []];
+
+  const effects: KernelEffectInput[] = [];
+  const processes = new Map(state.processes);
+  const now = new Date().toISOString();
+
+  const proc = processes.get(event.pid);
+  if (!proc) return [state, []];
+
+  // If exitCode is present, the shell process has exited
+  if (event.exitCode !== undefined) {
+    const updated = {
+      ...proc,
+      state: "dead" as const,
+      exitCode: event.exitCode,
+      exitReason: event.exitCode === 0 ? "completed" : `exit code ${event.exitCode}`,
+      lastActiveAt: now,
+    };
+    processes.set(event.pid, updated);
+
+    // Notify parent via bb write
+    const blackboard = new Map(state.blackboard);
+    blackboard.set(`shell:exit:${event.pid}`, {
+      value: { exitCode: event.exitCode, pid: event.pid },
+      writtenBy: "kernel",
+      version: 1,
+    });
+
+    effects.push({
+      type: "emit_protocol",
+      action: "os_system_exit",
+      message: `shell pid=${event.pid} name=${proc.name} exitCode=${event.exitCode}`,
+    });
+
+    // Signal parent process
+    if (proc.parentPid) {
+      effects.push({
+        type: "wake_process",
+        pid: proc.parentPid,
+      });
+    }
+
+    return [
+      { ...state, processes, blackboard },
+      assignEffectSeqs(effects),
+    ];
+  }
+
+  // Output received but process still running — update lastActiveAt
+  const updated = { ...proc, lastActiveAt: now };
+  processes.set(event.pid, updated);
+
+  return [
+    { ...state, processes },
     assignEffectSeqs(effects),
   ];
 }

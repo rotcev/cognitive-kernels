@@ -395,7 +395,7 @@ describe("Event-driven kernel: safety guards", () => {
     kernel.halt("test_halt");
 
     const mutex = priv(kernel).mutex as AsyncMutex;
-    await priv(kernel).safeHousekeep();
+    await priv(kernel).housekeep();
 
     // Mutex should not be locked — returned early before acquiring
     expect(mutex.isLocked).toBe(false);

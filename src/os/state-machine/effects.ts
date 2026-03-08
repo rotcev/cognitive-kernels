@@ -97,6 +97,12 @@ export type HaltEffect = BaseEffect & {
   reason: string;
 };
 
+/** Wake a process (set to running if idle/sleeping). */
+export type WakeProcessEffect = BaseEffect & {
+  type: "wake_process";
+  pid: string;
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -111,6 +117,7 @@ export type KernelEffect =
   | PersistMemoryEffect
   | EmitProtocolEffect
   | HaltEffect
+  | WakeProcessEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */

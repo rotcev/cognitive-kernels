@@ -286,8 +286,8 @@ describe("transition — halt_check", () => {
   });
 });
 
-describe("transition — unhandled events", () => {
-  test("unhandled event returns state unchanged with no effects", () => {
+describe("transition — no-op event cases", () => {
+  test("shell_output for nonexistent PID returns state unchanged with no effects", () => {
     const state = makeState();
     const [newState, effects] = transition(state, {
       type: "shell_output",
@@ -1162,5 +1162,335 @@ describe("transition — timer_fired (housekeep)", () => {
 
     transition(s1, timerEvent("housekeep"));
     expect(s1.housekeepCount).toBe(beforeCount);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// metacog_evaluated
+// ---------------------------------------------------------------------------
+
+describe("transition — metacog_evaluated", () => {
+  test("clears pending triggers", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const s1WithTriggers = {
+      ...s1,
+      pendingTriggers: ["goal_drift", "process_failed", "novel_situation"],
+    };
+
+    const [s2, effects] = transition(s1WithTriggers, {
+      type: "metacog_evaluated",
+      commandCount: 2,
+      triggerCount: 3,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2.pendingTriggers).toEqual([]);
+    expect(effects.some(e => e.type === "emit_protocol")).toBe(true);
+  });
+
+  test("no-op when halted", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const haltedState = { ...s1, halted: true, pendingTriggers: ["goal_drift"] };
+
+    const [s2, effects] = transition(haltedState, {
+      type: "metacog_evaluated",
+      commandCount: 0,
+      triggerCount: 1,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    // Still has triggers (not cleared because halted)
+    expect(s2.pendingTriggers).toEqual(["goal_drift"]);
+    expect(effects).toHaveLength(0);
+  });
+
+  test("does not mutate input state", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const triggers = ["goal_drift", "process_failed"];
+    const s1WithTriggers = { ...s1, pendingTriggers: [...triggers] };
+
+    transition(s1WithTriggers, {
+      type: "metacog_evaluated",
+      commandCount: 1,
+      triggerCount: 2,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s1WithTriggers.pendingTriggers).toEqual(triggers);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// awareness_evaluated
+// ---------------------------------------------------------------------------
+
+describe("transition — awareness_evaluated", () => {
+  test("returns state unchanged (I/O-only event)", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const [s2, effects] = transition(s1, {
+      type: "awareness_evaluated",
+      hasAdjustment: true,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2).toBe(s1); // Reference equality — no state change
+    expect(effects).toHaveLength(0);
+  });
+
+  test("no-op when halted", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const haltedState = { ...s1, halted: true };
+
+    const [s2, effects] = transition(haltedState, {
+      type: "awareness_evaluated",
+      hasAdjustment: false,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2).toBe(haltedState);
+    expect(effects).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shell_output
+// ---------------------------------------------------------------------------
+
+describe("transition — shell_output", () => {
+  test("shell exit marks process dead and writes bb entry", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    // Add a shell process
+    const processes = new Map(s1.processes);
+    const shellPid = "shell-001";
+    processes.set(shellPid, {
+      pid: shellPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "dev-server",
+      parentPid: [...s1.processes.values()].find(p => p.name === "goal-orchestrator")?.pid ?? null,
+      objective: "Run dev server",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+      backend: { kind: "system" as const, command: "npm", args: ["run", "dev"] },
+    });
+    const shellState = { ...s1, processes };
+
+    const [s2, effects] = transition(shellState, {
+      type: "shell_output",
+      pid: shellPid,
+      hasStdout: false,
+      hasStderr: false,
+      exitCode: 0,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2.processes.get(shellPid)?.state).toBe("dead");
+    expect(s2.processes.get(shellPid)?.exitCode).toBe(0);
+    expect(s2.blackboard.has(`shell:exit:${shellPid}`)).toBe(true);
+    expect(effects.some(e => e.type === "emit_protocol")).toBe(true);
+  });
+
+  test("shell exit with non-zero code records exit reason", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    const shellPid = "shell-002";
+    processes.set(shellPid, {
+      pid: shellPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "test-runner",
+      parentPid: null,
+      objective: "Run tests",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+    const shellState = { ...s1, processes };
+
+    const [s2] = transition(shellState, {
+      type: "shell_output",
+      pid: shellPid,
+      hasStdout: true,
+      hasStderr: true,
+      exitCode: 1,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2.processes.get(shellPid)?.state).toBe("dead");
+    expect(s2.processes.get(shellPid)?.exitReason).toBe("exit code 1");
+  });
+
+  test("shell output without exit code just updates lastActiveAt", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const processes = new Map(s1.processes);
+    const shellPid = "shell-003";
+    const oldTime = "2020-01-01T00:00:00.000Z";
+    processes.set(shellPid, {
+      pid: shellPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "watcher",
+      parentPid: null,
+      objective: "Watch files",
+      priority: 50,
+      spawnedAt: oldTime,
+      lastActiveAt: oldTime,
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+    const shellState = { ...s1, processes };
+
+    const [s2, effects] = transition(shellState, {
+      type: "shell_output",
+      pid: shellPid,
+      hasStdout: true,
+      hasStderr: false,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2.processes.get(shellPid)?.state).toBe("running");
+    expect(s2.processes.get(shellPid)?.lastActiveAt).not.toBe(oldTime);
+    expect(effects).toHaveLength(0);
+  });
+
+  test("shell output for unknown pid returns state unchanged", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const [s2, effects] = transition(s1, {
+      type: "shell_output",
+      pid: "nonexistent",
+      hasStdout: true,
+      hasStderr: false,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2).toBe(s1);
+    expect(effects).toHaveLength(0);
+  });
+
+  test("shell exit emits wake_process for parent", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    const shellPid = "shell-004";
+    processes.set(shellPid, {
+      pid: shellPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "build-step",
+      parentPid: orch.pid,
+      objective: "Build project",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+    const shellState = { ...s1, processes };
+
+    const [, effects] = transition(shellState, {
+      type: "shell_output",
+      pid: shellPid,
+      hasStdout: false,
+      hasStderr: false,
+      exitCode: 0,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    const wakeEffect = effects.find(e => e.type === "wake_process");
+    expect(wakeEffect).toBeDefined();
+    expect(wakeEffect!.type === "wake_process" && wakeEffect!.pid).toBe(orch.pid);
+  });
+
+  test("no-op when halted", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const haltedState = { ...s1, halted: true };
+
+    const [s2, effects] = transition(haltedState, {
+      type: "shell_output",
+      pid: "any",
+      hasStdout: true,
+      hasStderr: false,
+      exitCode: 0,
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2).toBe(haltedState);
+    expect(effects).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// process_submitted
+// ---------------------------------------------------------------------------
+
+describe("transition — process_submitted", () => {
+  test("no-op — returns state unchanged", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const [s2, effects] = transition(s1, {
+      type: "process_submitted",
+      pid: "some-pid",
+      name: "worker",
+      model: "gpt-4",
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    expect(s2).toBe(s1);
+    expect(effects).toHaveLength(0);
   });
 });
