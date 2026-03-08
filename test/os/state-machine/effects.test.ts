@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import type { KernelEffect } from "../../../src/os/state-machine/effects.js";
+import type { KernelEffect, KernelEffectInput } from "../../../src/os/state-machine/effects.js";
 import { OsKernel } from "../../../src/os/kernel.js";
 import { parseOsConfig } from "../../../src/os/config.js";
 import type { Brain, BrainThread, TurnResult } from "../../../src/types.js";
@@ -53,8 +53,17 @@ describe("KernelEffect types", () => {
       { type: "rebuild_dag", seq: 17 },
       { type: "schedule_pass", seq: 18 },
       { type: "apply_strategies", strategyIds: ["s1", "s2"], seq: 19 },
+      { type: "spawn_topology_process", name: "worker-1", objective: "do stuff", model: "gpt-4", priority: 1, seq: 20 },
+      { type: "kill_process", pid: "p", name: "worker-1", seq: 21 },
+      { type: "drain_process", pid: "p", name: "worker-1", seq: 22 },
+      { type: "run_llm", pid: "p1", seq: 23 },
+      { type: "run_metacog", context: { tick: 1 }, seq: 24 },
+      { type: "run_awareness", context: { snapshot: {} }, seq: 25 },
+      { type: "run_ephemeral", pid: "e1", parentPid: "p1", objective: "scout", model: "gpt-4", seq: 26 },
+      { type: "run_shell", pid: "s1", command: "ls", args: ["-la"], workingDir: "/tmp", seq: 27 },
+      { type: "run_subkernel", pid: "sk1", goal: "sub-goal", maxTicks: 10, seq: 28 },
     ];
-    expect(effects).toHaveLength(20);
+    expect(effects).toHaveLength(29);
     // Verify seq is monotonically increasing
     for (let i = 1; i < effects.length; i++) {
       expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);
@@ -107,6 +116,83 @@ describe("KernelEffect types", () => {
       if (e.type === "schedule_pass") {
         expect(e.seq).toBe(6);
       }
+    }
+  });
+
+  test("type discrimination works for run_* effect types", () => {
+    const effects: KernelEffect[] = [
+      { type: "run_llm", pid: "p1", seq: 0 },
+      { type: "run_metacog", context: { tick: 5, processCount: 3 }, seq: 1 },
+      { type: "run_awareness", context: { snapshot: { processes: [] } }, seq: 2 },
+      { type: "run_ephemeral", pid: "e1", parentPid: "p1", objective: "scout ahead", model: "gpt-4", seq: 3 },
+      { type: "run_shell", pid: "s1", command: "npm", args: ["test"], workingDir: "/app", seq: 4 },
+      { type: "run_subkernel", pid: "sk1", goal: "research topic", maxTicks: 20, seq: 5 },
+    ];
+
+    for (const e of effects) {
+      if (e.type === "run_llm") {
+        expect(e.pid).toBe("p1");
+      }
+      if (e.type === "run_metacog") {
+        expect(e.context.tick).toBe(5);
+        expect(e.context.processCount).toBe(3);
+      }
+      if (e.type === "run_awareness") {
+        expect(e.context.snapshot).toBeDefined();
+      }
+      if (e.type === "run_ephemeral") {
+        expect(e.pid).toBe("e1");
+        expect(e.parentPid).toBe("p1");
+        expect(e.objective).toBe("scout ahead");
+        expect(e.model).toBe("gpt-4");
+      }
+      if (e.type === "run_shell") {
+        expect(e.pid).toBe("s1");
+        expect(e.command).toBe("npm");
+        expect(e.args).toEqual(["test"]);
+        expect(e.workingDir).toBe("/app");
+      }
+      if (e.type === "run_subkernel") {
+        expect(e.pid).toBe("sk1");
+        expect(e.goal).toBe("research topic");
+        expect(e.maxTicks).toBe(20);
+      }
+    }
+  });
+
+  test("run_* effects work with optional fields omitted", () => {
+    const effects: KernelEffect[] = [
+      { type: "run_ephemeral", pid: "e1", parentPid: "p1", objective: "scout", seq: 0 },
+      { type: "run_shell", pid: "s1", command: "echo", args: ["hi"], seq: 1 },
+      { type: "run_subkernel", pid: "sk1", goal: "sub-goal", seq: 2 },
+    ];
+
+    expect(effects).toHaveLength(3);
+
+    if (effects[0].type === "run_ephemeral") {
+      expect(effects[0].model).toBeUndefined();
+    }
+    if (effects[1].type === "run_shell") {
+      expect(effects[1].workingDir).toBeUndefined();
+    }
+    if (effects[2].type === "run_subkernel") {
+      expect(effects[2].maxTicks).toBeUndefined();
+    }
+  });
+
+  test("KernelEffectInput omits seq for run_* types", () => {
+    const inputs: KernelEffectInput[] = [
+      { type: "run_llm", pid: "p1" },
+      { type: "run_metacog", context: { tick: 1 } },
+      { type: "run_awareness", context: {} },
+      { type: "run_ephemeral", pid: "e1", parentPid: "p1", objective: "scout" },
+      { type: "run_shell", pid: "s1", command: "ls", args: ["-la"] },
+      { type: "run_subkernel", pid: "sk1", goal: "sub-goal" },
+    ];
+    expect(inputs).toHaveLength(6);
+    // Verify none have a seq property
+    for (const input of inputs) {
+      expect("seq" in input).toBe(false);
     }
   });
 });

@@ -175,6 +175,50 @@ export type DrainProcessEffect = BaseEffect & {
   name: string;
 };
 
+/** Execute an LLM process turn. */
+export type RunLlmEffect = BaseEffect & {
+  type: "run_llm";
+  pid: string;
+};
+
+/** Execute a metacog evaluation pass. */
+export type RunMetacogEffect = BaseEffect & {
+  type: "run_metacog";
+  context: any; // MetacogContext — transition builds this from state
+};
+
+/** Execute an awareness daemon pass. */
+export type RunAwarenessEffect = BaseEffect & {
+  type: "run_awareness";
+  context: any; // AwarenessContext
+};
+
+/** Execute an ephemeral (fire-and-forget scout) process. */
+export type RunEphemeralEffect = BaseEffect & {
+  type: "run_ephemeral";
+  pid: string;
+  parentPid: string;
+  objective: string;
+  model?: string;
+};
+
+/** Execute a shell (system) command. */
+export type RunShellEffect = BaseEffect & {
+  type: "run_shell";
+  pid: string;
+  command: string;
+  args: string[];
+  workingDir?: string;
+};
+
+/** Execute a sub-kernel process. */
+export type RunSubkernelEffect = BaseEffect & {
+  type: "run_subkernel";
+  pid: string;
+  goal: string;
+  maxTicks?: number;
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -200,6 +244,12 @@ export type KernelEffect =
   | SpawnTopologyProcessEffect
   | KillProcessEffect
   | DrainProcessEffect
+  | RunLlmEffect
+  | RunMetacogEffect
+  | RunAwarenessEffect
+  | RunEphemeralEffect
+  | RunShellEffect
+  | RunSubkernelEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */
