@@ -20,6 +20,10 @@ function haltCheckEvent(seq = 1): KernelEvent {
   return { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq };
 }
 
+function timerEvent(timer: "housekeep" | "snapshot" | "metacog" | "watchdog", extra?: Partial<import("../../../src/os/state-machine/events.js").TimerFiredEvent>): KernelEvent {
+  return { type: "timer_fired", timer, timestamp: Date.now(), seq: 0, ...extra };
+}
+
 describe("transition — boot", () => {
   test("boot sets goal on state", () => {
     const state = makeState();
@@ -1025,10 +1029,6 @@ describe("transition — ephemeral_completed", () => {
 // ---------------------------------------------------------------------------
 
 describe("transition — timer_fired (housekeep)", () => {
-  function timerEvent(timer: "housekeep" | "snapshot" | "metacog" | "watchdog", extra?: Partial<import("../../../src/os/state-machine/events.js").TimerFiredEvent>): import("../../../src/os/state-machine/events.js").KernelEvent {
-    return { type: "timer_fired", timer, timestamp: Date.now(), seq: 0, ...extra };
-  }
-
   test("housekeep increments housekeepCount", () => {
     const state = makeState();
     const [s1] = transition(state, bootEvent());
@@ -1492,5 +1492,171 @@ describe("transition — process_submitted", () => {
 
     expect(s2).toBe(s1);
     expect(effects).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferral processing (integrated into housekeep + process_completed)
+// ---------------------------------------------------------------------------
+
+describe("transition — deferral processing", () => {
+  function makeDeferral(overrides: Partial<import("../../../src/os/types.js").DeferEntry> & {
+    condition: import("../../../src/os/types.js").DeferCondition;
+    descriptor: { name: string; objective: string; type?: string };
+  }): import("../../../src/os/types.js").DeferEntry {
+    return {
+      id: overrides.id ?? "defer-1",
+      descriptor: {
+        type: "lifecycle" as const,
+        priority: 50,
+        ...overrides.descriptor,
+      },
+      condition: overrides.condition,
+      registeredAt: new Date().toISOString(),
+      registeredAtMs: overrides.registeredAtMs ?? Date.now(),
+      registeredByTick: overrides.registeredByTick ?? 0,
+      registeredByPid: overrides.registeredByPid ?? null,
+      reason: overrides.reason ?? "test deferral",
+      maxWaitTicks: overrides.maxWaitTicks,
+      maxWaitMs: overrides.maxWaitMs,
+    };
+  }
+
+  test("housekeep triggers deferral when blackboard_key_exists condition met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    // Add a deferral that waits for a blackboard key
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-1", makeDeferral({
+      condition: { type: "blackboard_key_exists", key: "research:done" },
+      descriptor: { name: "writer", objective: "Write report" },
+    }));
+
+    // Add the key to blackboard
+    const blackboard = new Map(s1.blackboard);
+    blackboard.set("research:done", { value: true, writtenBy: "researcher", version: 1 });
+
+    const deferState = { ...s1, deferrals, blackboard };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    // Deferral should be consumed
+    expect(s2.deferrals.size).toBe(0);
+    // New process should be spawned
+    const newProcs = [...s2.processes.values()].filter(p => p.name === "writer");
+    expect(newProcs.length).toBe(1);
+    expect(newProcs[0]!.state).toBe("running");
+    // Should have submit_llm effect
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+  });
+
+  test("housekeep does NOT trigger deferral when condition not met", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-1", makeDeferral({
+      condition: { type: "blackboard_key_exists", key: "research:done" },
+      descriptor: { name: "writer", objective: "Write report" },
+    }));
+
+    // NO blackboard key — condition not met
+    const deferState = { ...s1, deferrals };
+    const [s2] = transition(deferState, timerEvent("housekeep"));
+
+    // Deferral should remain
+    expect(s2.deferrals.size).toBe(1);
+    // No new process
+    const writers = [...s2.processes.values()].filter(p => p.name === "writer");
+    expect(writers.length).toBe(0);
+  });
+
+  test("process_completed triggers process_dead deferral", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Add a worker process
+    const processes = new Map(s1.processes);
+    const workerPid = "worker-1";
+    processes.set(workerPid, {
+      pid: workerPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "researcher",
+      parentPid: orch.pid,
+      objective: "Do research",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 1,
+      tokensUsed: 100,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+    orch.children = [workerPid];
+
+    // Add a deferral that waits for researcher to die
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-2", makeDeferral({
+      id: "defer-2",
+      condition: { type: "process_dead", pid: workerPid },
+      descriptor: { name: "writer", objective: "Write based on research" },
+      registeredByPid: orch.pid,
+    }));
+
+    const deferState = { ...s1, processes, deferrals };
+
+    // Worker exits
+    const [s2, effects] = transition(deferState, {
+      type: "process_completed",
+      pid: workerPid,
+      name: "researcher",
+      success: true,
+      commandCount: 1,
+      tokensUsed: 100,
+      commands: [{ kind: "exit" as const, code: 0, reason: "done" }],
+      response: "Research complete.",
+      timestamp: Date.now(),
+      seq: 99,
+    });
+
+    // Worker should be dead
+    expect(s2.processes.get(workerPid)?.state).toBe("dead");
+    // Deferral should be consumed — process_dead condition met
+    expect(s2.deferrals.size).toBe(0);
+    // Writer should be spawned
+    const writers = [...s2.processes.values()].filter(p => p.name === "writer");
+    expect(writers.length).toBe(1);
+    // submit_llm for the writer
+    expect(effects.some(e => e.type === "submit_llm" && "name" in e && e.name === "writer")).toBe(true);
+  });
+
+  test("deferral TTL expiry spawns process anyway", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const deferrals = new Map<string, import("../../../src/os/types.js").DeferEntry>();
+    deferrals.set("defer-ttl", makeDeferral({
+      id: "defer-ttl",
+      condition: { type: "blackboard_key_exists", key: "never-written" },
+      descriptor: { name: "impatient-worker", objective: "Do work" },
+      registeredAtMs: Date.now() - 100000, // registered 100s ago
+      maxWaitMs: 5000, // TTL 5s — long expired
+    }));
+
+    const deferState = { ...s1, deferrals };
+    const [s2, effects] = transition(deferState, timerEvent("housekeep"));
+
+    // Should spawn despite condition not met
+    expect(s2.deferrals.size).toBe(0);
+    const workers = [...s2.processes.values()].filter(p => p.name === "impatient-worker");
+    expect(workers.length).toBe(1);
+    expect(effects.some(e =>
+      e.type === "emit_protocol" && "message" in e && e.message.includes("expired_but_spawned")
+    )).toBe(true);
   });
 });

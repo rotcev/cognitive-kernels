@@ -3361,6 +3361,7 @@ export class OsKernel {
     // NOTE: Do NOT set this.halted here — haltResolve() sets it and must
     // not see it as already true (it uses the flag to prevent duplicate halts).
     // The caller checks newState.halted and calls haltResolve() if needed.
+    this.goal = newState.goal;
     this.haltReason = newState.haltReason ?? "";
     this.goalWorkDoneAt = newState.goalWorkDoneAt;
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;

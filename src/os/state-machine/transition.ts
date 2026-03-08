@@ -882,6 +882,9 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
 
   processes.set(event.pid, updatedProc);
 
+  // Process deferrals — a process dying or bb writes may trigger conditions
+  processPureDeferrals(state, processes, deferrals, effects);
+
   return [
     {
       ...state,
@@ -1375,6 +1378,9 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     }
   }
 
+  // 6. Process deferrals — conditions may be met after sleeper/checkpoint/stall changes
+  processPureDeferrals(state, processes, deferrals, effects);
+
   return [
     {
       ...state,
@@ -1489,6 +1495,169 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
     { ...state, processes },
     assignEffectSeqs(effects),
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Deferral Processing (Pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Evaluate deferral conditions and spawn triggered processes.
+ * Pure function — reads from state's blackboard and processes, mutates
+ * the passed-in maps (already copies of state).
+ */
+function processPureDeferrals(
+  state: KernelState,
+  processes: Map<string, OsProcess>,
+  deferrals: Map<string, DeferEntry>,
+  effects: KernelEffectInput[],
+): void {
+  if (deferrals.size === 0) return;
+
+  const nowMs = Date.now();
+  const now = new Date().toISOString();
+  const triggered: string[] = [];
+
+  for (const [id, ds] of deferrals) {
+    // TTL expiry — spawn anyway instead of silently dropping work
+    const waited = state.tickCount - ds.registeredByTick;
+    const wallWaitMs = ds.registeredAtMs ? nowMs - ds.registeredAtMs : 0;
+    const tickExpired = ds.maxWaitTicks && waited > ds.maxWaitTicks;
+    const wallExpired = ds.maxWaitMs && wallWaitMs > ds.maxWaitMs;
+
+    if (tickExpired || wallExpired) {
+      const pid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const proc: OsProcess = {
+        pid,
+        type: ds.descriptor.type ?? "lifecycle",
+        state: "running",
+        name: ds.descriptor.name,
+        parentPid: ds.registeredByPid ?? null,
+        objective: ds.descriptor.objective ?? "",
+        priority: ds.descriptor.priority ?? 50,
+        spawnedAt: now,
+        lastActiveAt: now,
+        tickCount: 0,
+        tokensUsed: 0,
+        model: state.config.kernel.processModel,
+        workingDir: ds.descriptor.workingDir ?? state.processes.values().next().value?.workingDir ?? "/tmp",
+        children: [],
+        onParentDeath: "orphan",
+        restartPolicy: "never",
+      };
+      processes.set(pid, proc);
+
+      // Register as child of parent
+      if (ds.registeredByPid) {
+        const parent = processes.get(ds.registeredByPid);
+        if (parent) {
+          const updated = { ...parent, children: [...(parent.children ?? []), pid] };
+          processes.set(ds.registeredByPid, updated);
+        }
+      }
+
+      triggered.push(id);
+      effects.push({
+        type: "submit_llm",
+        pid,
+        name: ds.descriptor.name,
+        model: state.config.kernel.processModel,
+      });
+      effects.push({
+        type: "emit_protocol",
+        action: "os_defer",
+        message: `expired_but_spawned id=${id} name=${ds.descriptor.name} — condition not met after ${waited} ticks (${Math.round(wallWaitMs / 1000)}s wall), spawning anyway`,
+      });
+      continue;
+    }
+
+    // Evaluate condition against current state
+    if (evaluateDeferConditionPure(ds.condition, state.blackboard, processes)) {
+      const pid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const proc: OsProcess = {
+        pid,
+        type: ds.descriptor.type ?? "lifecycle",
+        state: "running",
+        name: ds.descriptor.name,
+        parentPid: ds.registeredByPid ?? null,
+        objective: ds.descriptor.objective ?? "",
+        priority: ds.descriptor.priority ?? 50,
+        spawnedAt: now,
+        lastActiveAt: now,
+        tickCount: 0,
+        tokensUsed: 0,
+        model: state.config.kernel.processModel,
+        workingDir: ds.descriptor.workingDir ?? state.processes.values().next().value?.workingDir ?? "/tmp",
+        children: [],
+        onParentDeath: "orphan",
+        restartPolicy: "never",
+      };
+      processes.set(pid, proc);
+
+      // Register as child of parent
+      if (ds.registeredByPid) {
+        const parent = processes.get(ds.registeredByPid);
+        if (parent) {
+          const updated = { ...parent, children: [...(parent.children ?? []), pid] };
+          processes.set(ds.registeredByPid, updated);
+        }
+      }
+
+      triggered.push(id);
+      effects.push({
+        type: "submit_llm",
+        pid,
+        name: ds.descriptor.name,
+        model: state.config.kernel.processModel,
+      });
+      effects.push({
+        type: "emit_protocol",
+        action: "os_defer",
+        message: `triggered id=${id} reason="${ds.reason}" waited=${state.tickCount - ds.registeredByTick} ticks`,
+      });
+    }
+  }
+
+  for (const id of triggered) {
+    deferrals.delete(id);
+  }
+}
+
+/**
+ * Pure evaluation of a deferral condition against blackboard and process state.
+ * No I/O — reads only from the provided maps.
+ */
+function evaluateDeferConditionPure(
+  cond: DeferCondition,
+  blackboard: Map<string, { value: unknown; writtenBy: string | null; version: number }>,
+  processes: Map<string, OsProcess>,
+): boolean {
+  switch (cond.type) {
+    case "blackboard_key_exists":
+      return blackboard.has(cond.key);
+    case "blackboard_key_match": {
+      const entry = blackboard.get(cond.key);
+      return entry !== undefined && entry.value === cond.value;
+    }
+    case "blackboard_value_contains": {
+      const entry = blackboard.get(cond.key);
+      if (!entry) return false;
+      const val = typeof entry.value === "string" ? entry.value : JSON.stringify(entry.value);
+      return val.includes(cond.substring);
+    }
+    case "process_dead": {
+      const proc = processes.get(cond.pid);
+      return !proc || proc.state === "dead";
+    }
+    case "process_dead_by_name": {
+      const matching = [...processes.values()].filter(p => p.name === cond.name);
+      return matching.length > 0 && matching.every(p => p.state === "dead");
+    }
+    case "all_of":
+      return cond.conditions.every(c => evaluateDeferConditionPure(c, blackboard, processes));
+    case "any_of":
+      return cond.conditions.some(c => evaluateDeferConditionPure(c, blackboard, processes));
+  }
 }
 
 /** Assign monotonic seq numbers to effect inputs. */
