@@ -211,6 +211,50 @@ describe("Kernel effect log", () => {
   });
 });
 
+describe("emit_protocol effect wrapping", () => {
+  test("boot with awareness enabled collects emit_protocol for awareness-daemon spawn", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: true }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const effects = kernel.getEffectLog();
+    const spawns = effects.filter((e: any) => e.type === "emit_protocol" && e.action === "os_process_spawn");
+    const awarenessSpawn = spawns.find((e: any) => e.message.includes("awareness-daemon"));
+    expect(awarenessSpawn).toBeDefined();
+    expect((awarenessSpawn as any).message).toBe("boot awareness-daemon");
+  });
+
+  test("halt() collects emit_protocol effect for os_halt", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    kernel.halt("test_halt_reason");
+
+    const effects = kernel.getEffectLog();
+    const haltEffects = effects.filter((e: any) => e.type === "emit_protocol" && e.action === "os_halt");
+    expect(haltEffects).toHaveLength(1);
+    expect((haltEffects[0] as any).message).toBe("test_halt_reason");
+  });
+
+  test("effect seq values are monotonically increasing across mixed effect types", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: true }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+    kernel.halt("done");
+
+    const effects = kernel.getEffectLog();
+    // Should have both spawn and halt protocol effects
+    const protocolEffects = effects.filter((e: any) => e.type === "emit_protocol");
+    expect(protocolEffects.length).toBeGreaterThanOrEqual(2);
+
+    // All effects (not just protocol) should have monotonically increasing seq
+    for (let i = 1; i < effects.length; i++) {
+      expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);
+    }
+  });
+});
+
 describe("Effect log integration", () => {
   test("a minimal kernel run captures submit_llm, schedule_timer, and emit_protocol effects", async () => {
     const config = parseOsConfig({

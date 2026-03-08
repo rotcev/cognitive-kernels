@@ -397,12 +397,9 @@ export class OsKernel {
       this.supervisor.activate(awarenessDaemonProc.pid);
       this.supervisor.idle(awarenessDaemonProc.pid, {});
 
-      this.emitter?.emit({
-        action: "os_process_spawn",
-        status: "completed",
+      this.emitProtocol("os_process_spawn", `boot awareness-daemon`, {
         agentId: awarenessDaemonProc.pid,
         agentName: awarenessDaemonProc.name,
-        message: `boot awareness-daemon`,
       });
     }
 
@@ -448,15 +445,19 @@ export class OsKernel {
       };
 
       // Start background timers
+      const housekeepMs = this.config.kernel.housekeepIntervalMs ?? 500;
       this.housekeepTimer = setInterval(() => {
         this.safeHousekeep();
-      }, this.config.kernel.housekeepIntervalMs ?? 500);
+      }, housekeepMs);
       (this.housekeepTimer as NodeJS.Timeout).unref?.();
+      this.collectEffect({ type: "schedule_timer", timer: "housekeep", delayMs: housekeepMs });
 
+      const snapshotMs = this.config.kernel.snapshotIntervalMs ?? 10_000;
       this.snapshotTimer = setInterval(() => {
         this.safeSnapshotWrite();
-      }, this.config.kernel.snapshotIntervalMs ?? 10_000);
+      }, snapshotMs);
       (this.snapshotTimer as NodeJS.Timeout).unref?.();
+      this.collectEffect({ type: "schedule_timer", timer: "snapshot", delayMs: snapshotMs });
 
       // Self-scheduling metacog: fires once at boot, then reschedules based on
       // metacog's own nextWakeMs (capped at metacogIntervalMs as fallback max).
@@ -785,6 +786,7 @@ export class OsKernel {
       void this.safeMetacogCheck();
     }, clamped);
     (this.metacogTimer as NodeJS.Timeout).unref?.();
+    this.collectEffect({ type: "schedule_timer", timer: "metacog", delayMs: clamped });
   }
 
   /**
@@ -825,6 +827,7 @@ export class OsKernel {
     if (this.watchdogTimer && 'unref' in this.watchdogTimer) {
       (this.watchdogTimer as NodeJS.Timeout).unref();
     }
+    this.collectEffect({ type: "schedule_timer", timer: "watchdog", delayMs: intervalMs });
   }
 
   /** Stop the watchdog timer. */
@@ -2281,12 +2284,9 @@ export class OsKernel {
       this.supervisor.kill(proc.pid, false, `execution_failed: ${result.response}`);
       this.executor.disposeThread(proc.pid);
       this.router.disposeThread(proc.pid);
-      this.emitter?.emit({
-        action: "os_process_kill",
-        status: "completed",
+      this.emitProtocol("os_process_kill", `execution_failed`, {
         agentId: proc.pid,
         agentName: proc.name,
-        message: `execution_failed`,
       });
       this.addTrigger("process_failed");
 
@@ -2748,12 +2748,9 @@ export class OsKernel {
               // Immediate spawn (existing behavior)
               const child = this.supervisor.spawn(resolvedDescriptor);
               this.supervisor.activate(child.pid);
-              this.emitter?.emit({
-                action: "os_process_spawn",
-                status: "completed",
+              this.emitProtocol("os_process_spawn", `parent=${pid}`, {
                 agentId: child.pid,
                 agentName: child.name,
-                message: `parent=${pid}`,
               });
             }
             break;
@@ -2791,12 +2788,9 @@ export class OsKernel {
                 const child = this.supervisor.spawn(nodeDescriptor);
                 this.supervisor.activate(child.pid);
                 immediateCount++;
-                this.emitter?.emit({
-                  action: "os_process_spawn",
-                  status: "completed",
+                this.emitProtocol("os_process_spawn", `parent=${pid} (graph immediate: "${node.name}")`, {
                   agentId: child.pid,
                   agentName: child.name,
-                  message: `parent=${pid} (graph immediate: "${node.name}")`,
                 });
               } else {
                 // Parse after strings into DeferCondition
@@ -2963,12 +2957,10 @@ export class OsKernel {
               workingDir: ephProc.workingDir,
             });
             this.supervisor.activate(ephTableProc.pid);
-            this.emitter?.emit({
-              action: "os_process_spawn",
+            this.emitProtocol("os_process_spawn", `parent=${procName} type=ephemeral model=${ephModel}`, {
               status: "started",
               agentId: ephTableProc.pid,
               agentName: ephName,
-              message: `parent=${procName} type=ephemeral model=${ephModel}`,
             });
 
             // Non-blocking: push descriptor, increment count, continue processing commands
@@ -3217,12 +3209,9 @@ export class OsKernel {
             this.supervisor.kill(pid, false, cmd.reason);
             this.executor.disposeThread(pid);
             this.router.disposeThread(pid);
-            this.emitter?.emit({
-              action: "os_process_kill",
-              status: "completed",
+            this.emitProtocol("os_process_kill", `exit: ${cmd.reason}`, {
               agentId: pid,
               agentName: exitingProc?.name ?? procName,
-              message: `exit: ${cmd.reason}`,
             });
             // Auto-signal parent when a child exits (structural, not LLM-dependent)
             if (parentOfExiting && exitingProc) {
@@ -3445,12 +3434,9 @@ export class OsKernel {
           workingDir: cmd.descriptor.workingDir ?? this.workingDir,
         });
         this.supervisor.activate(proc.pid);
-        this.emitter?.emit({
-          action: "os_process_spawn",
-          status: "completed",
+        this.emitProtocol("os_process_spawn", `metacog_spawn`, {
           agentId: proc.pid,
           agentName: proc.name,
-          message: `metacog_spawn`,
           detail: {
             trigger: "metacog",
             objective: cmd.descriptor.objective,
@@ -3602,12 +3588,9 @@ export class OsKernel {
         // Cancel inflight LLM call if still running (same as watchdog kill path)
         const killCb = this.turnKillCallbacks.get(cmd.pid);
         if (killCb) killCb();
-        this.emitter?.emit({
-          action: "os_process_kill",
-          status: "completed",
+        this.emitProtocol("os_process_kill", `metacog_kill: ${cmd.reason}`, {
           agentId: cmd.pid,
           agentName: targetProc?.name,
-          message: `metacog_kill: ${cmd.reason}`,
           detail: {
             trigger: "metacog",
             reason: cmd.reason,
@@ -3767,12 +3750,9 @@ export class OsKernel {
           this.supervisor.setPriority(forked.pid, cmd.newPriority);
         }
         this.supervisor.activate(forked.pid);
-        this.emitter?.emit({
-          action: "os_process_spawn",
-          status: "completed",
+        this.emitProtocol("os_process_spawn", `metacog_fork source=${cmd.pid}`, {
           agentId: forked.pid,
           agentName: forked.name,
-          message: `metacog_fork source=${cmd.pid}`,
         });
         // DC-1: Wire TelemetryCollector.onFork()
         this.telemetryCollector.onFork(cmd.pid, forked.pid);
@@ -3928,12 +3908,9 @@ export class OsKernel {
           workingDir: this.workingDir,
         });
         this.supervisor.activate(subEvalProc.pid);
-        this.emitter?.emit({
-          action: 'os_process_spawn',
-          status: 'completed',
+        this.emitProtocol("os_process_spawn", `delegate_evaluation scope="${evalScope}"`, {
           agentId: subEvalProc.pid,
           agentName: subEvalProc.name,
-          message: `delegate_evaluation scope="${evalScope}"`,
         });
         break;
       }
