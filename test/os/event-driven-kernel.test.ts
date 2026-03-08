@@ -549,6 +549,10 @@ describe("Event-driven kernel: housekeep integration", () => {
 
   test("stall detection force-wakes idle processes after 3 empty cycles", () => {
     const kernel = bootKernel();
+    stubSchedulingPass(kernel);
+    // Stub submitProcess to prevent MockBrain instant-resolution loops
+    // (transition now emits submit_llm effects inline via scheduling pass)
+    priv(kernel).submitProcess = () => {};
     const supervisor = priv(kernel).supervisor;
     const table = priv(kernel).table;
 
