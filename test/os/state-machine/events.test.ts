@@ -127,4 +127,34 @@ describe("Kernel event log", () => {
     expect(first.name).toBeTruthy();
     expect(first.seq).toBeGreaterThan(0);
   });
+
+  test("process completion records process_completed event", async () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000, maxConcurrentProcesses: 10 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.doSchedulingPass = () => {};
+
+    const proc = k.table.getAll().find((p: any) => p.name === "goal-orchestrator");
+    expect(proc).toBeTruthy();
+
+    await k.onProcessComplete({
+      pid: proc.pid,
+      success: true,
+      response: "test",
+      tokensUsed: 500,
+      commands: [{ kind: "idle", wakeOnSignals: ["tick:1"] }],
+    });
+
+    const log = kernel.getEventLog();
+    const completed = log.filter((e: any) => e.type === "process_completed");
+    expect(completed.length).toBe(1);
+    const evt = completed[0] as any;
+    expect(evt.pid).toBe(proc.pid);
+    expect(evt.name).toBe("goal-orchestrator");
+    expect(evt.success).toBe(true);
+    expect(evt.tokensUsed).toBe(500);
+    expect(evt.commandCount).toBe(1);
+  });
 });

@@ -1869,6 +1869,15 @@ export class OsKernel {
    */
   private async onProcessComplete(result: OsProcessTurnResult): Promise<void> {
     if (this.halted) return;
+    const completedProc = this.table.get(result.pid);
+    this.logEvent({
+      type: "process_completed",
+      pid: result.pid,
+      name: completedProc?.name ?? "unknown",
+      success: result.success,
+      commandCount: result.commands.length,
+      tokensUsed: result.tokensUsed,
+    });
     const release = await this.mutex.acquire();
     try {
       await this.processOneResult(result);
