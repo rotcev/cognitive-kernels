@@ -3464,3 +3464,84 @@ describe("transition — housekeep scheduling (Wave 4)", () => {
     expect(submitEffects.length).toBeLessThanOrEqual(2);
   });
 });
+
+describe("handleTopologyDeclared", () => {
+  test("null topology → zero effects", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: null,
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    expect(effects).toHaveLength(0);
+  });
+
+  test("valid topology → spawn effects emitted", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "par", children: [
+        { type: "task", name: "A", objective: "do A" },
+        { type: "task", name: "B", objective: "do B" },
+      ]},
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const spawns = effects.filter(e => e.type === "spawn_topology_process");
+    expect(spawns).toHaveLength(2);
+  });
+
+  test("invalid topology → error protocol emitted", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: { type: "seq", children: [] },
+      memory: [],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const errors = effects.filter(e => e.type === "emit_protocol" && (e as any).action === "os_topology_error");
+    expect(errors).toHaveLength(1);
+  });
+
+  test("halt command → kernel halts", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: null,
+      memory: [],
+      halt: { status: "achieved", summary: "goal completed" },
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    expect(newState.halted).toBe(true);
+    expect(effects.some(e => e.type === "halt")).toBe(true);
+  });
+
+  test("memory commands → protocol effects emitted", () => {
+    const state = makeState();
+    const event: KernelEvent = {
+      type: "topology_declared",
+      topology: null,
+      memory: [
+        { kind: "learn", heuristic: "test", confidence: 0.8, context: "test" },
+      ],
+      halt: null,
+      timestamp: Date.now(),
+      seq: 0,
+    };
+    const [newState, effects] = transition(state, event);
+    const memEffects = effects.filter(e => e.type === "emit_protocol" && (e as any).action === "os_metacog_memory");
+    expect(memEffects).toHaveLength(1);
+  });
+});

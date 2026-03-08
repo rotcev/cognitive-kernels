@@ -14,6 +14,8 @@
  * the entire command array). Full payloads live in the state.
  */
 
+import type { TopologyExpr, MetacogMemoryCommand } from "../topology/types.js";
+
 /** Base fields present on every event. */
 type BaseEvent = {
   timestamp: number;
@@ -129,6 +131,14 @@ export type HaltCheckEvent = BaseEvent & {
   reason: string | null;
 };
 
+/** Metacog declared a new desired topology. */
+export type TopologyDeclaredEvent = BaseEvent & {
+  type: "topology_declared";
+  topology: TopologyExpr | null;
+  memory: MetacogMemoryCommand[];
+  halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null;
+};
+
 /** The discriminated union of all kernel events. */
 export type KernelEvent =
   | BootEvent
@@ -141,6 +151,7 @@ export type KernelEvent =
   | ShellOutputEvent
   | ExternalCommandEvent
   | HaltCheckEvent
+  | TopologyDeclaredEvent
   ;
 
 /**

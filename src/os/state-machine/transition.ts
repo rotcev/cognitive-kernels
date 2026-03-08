@@ -12,9 +12,13 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology } from "../types.js";
+import { reconcile } from "../topology/reconcile.js";
+import { validateTopology } from "../topology/validate.js";
+import { optimizeTopology } from "../topology/optimize.js";
+import type { TopologyExpr, MetacogMemoryCommand } from "../topology/types.js";
 import { randomUUID } from "node:crypto";
 
 export type TransitionResult = readonly [KernelState, KernelEffect[]];
@@ -46,6 +50,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
     case "process_submitted":
       // Process submission is purely observational — no state changes.
       return [state, []];
+    case "topology_declared":
+      return handleTopologyDeclared(state, event);
     default:
       return [state, []];
   }
@@ -2253,6 +2259,93 @@ function learnedSelect(
 }
 
 /** Assign monotonic seq numbers to effect inputs. */
+function handleTopologyDeclared(state: KernelState, event: TopologyDeclaredEvent): TransitionResult {
+  if (state.halted) return [state, []];
+
+  const effects: KernelEffectInput[] = [];
+
+  // Handle halt command
+  if (event.halt) {
+    return [
+      { ...state, halted: true, haltReason: `metacog: ${event.halt.status} — ${event.halt.summary}` },
+      assignEffectSeqs([{ type: "halt", reason: `metacog: ${event.halt.status}` }]),
+    ];
+  }
+
+  // Handle memory commands (emit effects for kernel to execute)
+  for (const cmd of event.memory) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_metacog_memory",
+      message: `memory command: ${cmd.kind}`,
+    });
+  }
+
+  // Handle topology declaration
+  if (event.topology !== null) {
+    // Validate
+    const validation = validateTopology(event.topology);
+    if (!validation.valid) {
+      effects.push({
+        type: "emit_protocol",
+        action: "os_topology_error",
+        message: `invalid topology: ${validation.errors.map(e => e.message).join(", ")}`,
+      });
+      return [state, assignEffectSeqs(effects)];
+    }
+
+    // Optimize
+    const { optimized, warnings } = optimizeTopology(event.topology);
+    for (const w of warnings) {
+      effects.push({
+        type: "emit_protocol",
+        action: "os_topology_warning",
+        message: `${w.type}: ${w.message}`,
+      });
+    }
+
+    // Reconcile — cast blackboard to reconciler's interface (writtenBy: string|null → string|undefined)
+    const reconcileEffects = reconcile(
+      state.processes,
+      optimized,
+      state.blackboard as Map<string, { value: unknown; writtenBy?: string }>,
+      state.inflight,
+    );
+
+    // Convert reconcile effects to kernel effects
+    for (const re of reconcileEffects) {
+      switch (re.type) {
+        case "spawn_process":
+          effects.push({
+            type: "spawn_topology_process",
+            name: re.name,
+            objective: re.objective,
+            model: re.model,
+            priority: re.priority,
+            backend: re.backend,
+          });
+          break;
+        case "kill_process":
+          effects.push({ type: "kill_process", pid: re.pid, name: re.name });
+          break;
+        case "drain_process":
+          effects.push({ type: "drain_process", pid: re.pid, name: re.name });
+          break;
+        case "activate_process":
+          if (re.pid) {
+            effects.push({ type: "activate_process", pid: re.pid });
+          }
+          break;
+        case "emit_protocol":
+          effects.push({ type: "emit_protocol", action: re.action, message: re.message });
+          break;
+      }
+    }
+  }
+
+  return [state, assignEffectSeqs(effects)];
+}
+
 function assignEffectSeqs(inputs: KernelEffectInput[]): KernelEffect[] {
   return inputs.map((input, i) => ({ ...input, seq: i }) as KernelEffect);
 }

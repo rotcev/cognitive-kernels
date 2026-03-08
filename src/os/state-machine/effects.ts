@@ -9,6 +9,8 @@
  * interpret them asynchronously.
  */
 
+import type { TaskBackend } from "../topology/types.js";
+
 type BaseEffect = {
   /** Monotonic sequence number for ordering. */
   seq: number;
@@ -149,6 +151,30 @@ export type ApplyStrategiesEffect = BaseEffect & {
   strategyIds: string[];
 };
 
+/** Spawn a new process from topology reconciliation. */
+export type SpawnTopologyProcessEffect = BaseEffect & {
+  type: "spawn_topology_process";
+  name: string;
+  objective: string;
+  model?: string;
+  priority?: number;
+  backend?: TaskBackend;
+};
+
+/** Kill a process removed from topology. */
+export type KillProcessEffect = BaseEffect & {
+  type: "kill_process";
+  pid: string;
+  name: string;
+};
+
+/** Drain an inflight process (let current turn finish, then kill). */
+export type DrainProcessEffect = BaseEffect & {
+  type: "drain_process";
+  pid: string;
+  name: string;
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -171,6 +197,9 @@ export type KernelEffect =
   | RebuildDAGEffect
   | SchedulePassEffect
   | ApplyStrategiesEffect
+  | SpawnTopologyProcessEffect
+  | KillProcessEffect
+  | DrainProcessEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */
