@@ -2478,6 +2478,13 @@ export class OsKernel {
           this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid });
           this.tickSignals.push("ephemeral:ready");
 
+          this.logEvent({
+            type: "ephemeral_completed",
+            id: desc.ephemeralId,
+            name: desc.name,
+            success: true,
+          });
+
           // Kill the process table entry so it shows as dead in topology
           this.supervisor.kill(desc.tablePid, false, "ephemeral completed");
           this.emitter?.emit({
@@ -2541,6 +2548,13 @@ export class OsKernel {
           this.ipcBus.bbWrite(`ephemeral:${desc.name}:${desc.ephemeralId}`, ephResult, "kernel");
           this.ipcBus.emitSignal("ephemeral:ready", "kernel", { name: desc.name, id: desc.ephemeralId, parentPid: desc.pid, error: true });
           this.tickSignals.push("ephemeral:ready");
+
+          this.logEvent({
+            type: "ephemeral_completed",
+            id: desc.ephemeralId,
+            name: desc.name,
+            success: false,
+          });
 
           // Kill the process table entry so it shows as dead in topology
           this.supervisor.kill(desc.tablePid, false, `ephemeral failed: ${errorMsg}`);
@@ -4448,6 +4462,11 @@ Example: ["strategy-123", "strategy-456"]`;
   }
 
   shouldHalt(): boolean {
+    const logResult = (result: boolean): boolean => {
+      this.logEvent({ type: "halt_check", result, reason: result ? this.haltReason : null });
+      return result;
+    };
+
     if (this.halted) {
       return true;
     }
@@ -4459,7 +4478,7 @@ Example: ["strategy-123", "strategy-456"]`;
       Date.now() - this.startTime > this.config.kernel.wallTimeLimitMs
     ) {
       this.haltReason = "wall_time_exceeded";
-      return true;
+      return logResult(true);
     }
 
     // Token budget exceeded
@@ -4470,7 +4489,7 @@ Example: ["strategy-123", "strategy-456"]`;
     );
     if (totalTokensUsed >= this.config.kernel.tokenBudget) {
       this.haltReason = "token_budget_exceeded";
-      return true;
+      return logResult(true);
     }
 
     // Never halt while LLM calls or ephemerals are still in-flight —
@@ -4491,13 +4510,13 @@ Example: ["strategy-123", "strategy-456"]`;
       );
       if (restartable.length === 0) {
         this.haltReason = "all_processes_dead";
-        return true;
+        return logResult(true);
       }
     }
 
     // Don't halt if deferrals are pending — more goal work is expected
     if (this.deferrals.size > 0) {
-      return false;
+      return logResult(false);
     }
 
     // All goal work is done: no lifecycle/event processes alive, only daemons remain.
@@ -4518,15 +4537,15 @@ Example: ["strategy-123", "strategy-456"]`;
             status: "completed",
             message: `only daemons remain — grace period started (${gracePeriodMs}ms). Metacog can respawn workers to continue goal work.`,
           });
-          return false;
+          return logResult(false);
         }
 
         if (Date.now() - this.goalWorkDoneAt < gracePeriodMs) {
-          return false; // still in grace period
+          return logResult(false); // still in grace period
         }
 
         this.haltReason = "goal_work_complete";
-        return true;
+        return logResult(true);
       } else {
         // Lifecycle/event processes exist again (metacog respawned something) — reset grace period
         if (this.goalWorkDoneAt > 0) {
@@ -4540,7 +4559,7 @@ Example: ["strategy-123", "strategy-456"]`;
       }
     }
 
-    return false;
+    return logResult(false);
   }
 
   halt(reason: string): void {

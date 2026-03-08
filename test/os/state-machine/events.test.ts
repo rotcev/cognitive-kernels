@@ -171,4 +171,20 @@ describe("Kernel event log", () => {
     expect(evt.tokensUsed).toBe(500);
     expect(evt.commandCount).toBe(1);
   });
+
+  test("shouldHalt records halt_check event", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.eventLog.length = 0;
+
+    kernel.shouldHalt();
+
+    const log = kernel.getEventLog();
+    const haltChecks = log.filter((e: any) => e.type === "halt_check");
+    expect(haltChecks.length).toBe(1);
+    expect((haltChecks[0] as any).result).toBe(false);
+  });
 });
