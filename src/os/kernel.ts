@@ -3439,25 +3439,15 @@ export class OsKernel {
       metacogHistory: [...this.metacogHistory],
 
       awarenessNotes: [...this.pendingAwarenessNotes],
-      oscillationWarnings: [...this.pendingOscillationWarnings],
-      blindSpots: [],
-      metacogFocus: this.metacogFocus,
 
       drainingPids: new Set(this.drainingPids),
 
-      killThresholdAdjustment: this.killThresholdAdjustment,
-      killEvalHistory: [...this.killEvalHistory],
-
-      selectedBlueprintInfo: this.selectedBlueprintInfo,
-
       ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
-      heuristicApplicationLog: [...this.heuristicApplicationLog],
 
       halted: this.halted,
       haltReason: this.haltReason,
       goalWorkDoneAt: this.goalWorkDoneAt,
       startTime: this.startTime,
-      consecutiveIdleTicks: this.consecutiveIdleTicks,
       lastProcessCompletionTime: this.lastProcessCompletionTime,
       housekeepCount: this.housekeepCount,
     };
@@ -3477,7 +3467,6 @@ export class OsKernel {
     this.haltReason = newState.haltReason ?? "";
     this.goalWorkDoneAt = newState.goalWorkDoneAt;
     this.activeStrategyId = newState.activeStrategyId ?? undefined;
-    this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
     this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
     this.housekeepCount = newState.housekeepCount;
     this.lastMetacogTick = newState.lastMetacogTick;

@@ -4,7 +4,7 @@ import { config as loadDotenv } from "dotenv";
 import { runOsMode } from "./os/entry.js";
 import { KernelRunManager } from "./runs/run-manager.js";
 import { createRunsApiServer } from "./api/server.js";
-import { createDbConnection } from "./db/connection.js";
+import { createDbConnectionAsync } from "./db/connection.js";
 import { NeonStorageBackend } from "./db/storage-backend.js";
 import { LensSession } from "./lens/session.js";
 import type { BrainProvider } from "./types.js";
@@ -94,7 +94,7 @@ async function handleServeCommand(flags: Map<string, string | boolean>): Promise
 
   let storageBackend: NeonStorageBackend | undefined;
   if (process.env.DATABASE_URL) {
-    const db = createDbConnection(process.env.DATABASE_URL);
+    const db = await createDbConnectionAsync(process.env.DATABASE_URL);
     storageBackend = new NeonStorageBackend(db);
     await storageBackend.connect();
     await storageBackend.loadRuns();

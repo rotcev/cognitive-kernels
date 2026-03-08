@@ -26,7 +26,6 @@ describe("KernelState", () => {
     expect(state.haltReason).toBeNull();
     expect(state.goalWorkDoneAt).toBe(0);
     expect(state.startTime).toBe(0);
-    expect(state.consecutiveIdleTicks).toBe(0);
     expect(state.lastProcessCompletionTime).toBe(0);
     expect(state.housekeepCount).toBe(0);
   });
@@ -59,27 +58,28 @@ describe("KernelState", () => {
       activeEphemeralCount: 1,
       blackboard: new Map([["key1", { value: "val", writtenBy: "p1", version: 1 }]]),
       tickCount: 5,
+      schedulerStrategy: "priority",
+      schedulerMaxConcurrent: 4,
+      schedulerRoundRobinIndex: 0,
+      schedulerHeuristics: [],
+      currentStrategies: [],
       dagTopology: { nodes: [], edges: [] },
       deferrals: new Map(),
       pendingTriggers: [],
+      lastMetacogTick: 0,
+      metacogEvalCount: 0,
+      activeStrategyId: null,
+      matchedStrategyIds: new Set(),
       metacogInflight: false,
       lastMetacogWakeAt: 0,
       metacogHistory: [],
       awarenessNotes: [],
-      oscillationWarnings: [],
-      blindSpots: [],
-      metacogFocus: null,
       drainingPids: new Set(),
-      killThresholdAdjustment: 0,
-      killEvalHistory: [],
-      selectedBlueprintInfo: null,
       ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
-      heuristicApplicationLog: [],
       halted: false,
       haltReason: null,
       goalWorkDoneAt: 0,
       startTime: Date.now(),
-      consecutiveIdleTicks: 0,
       lastProcessCompletionTime: 0,
       housekeepCount: 3,
     };
@@ -100,20 +100,10 @@ describe("KernelState", () => {
 
     // Awareness state
     expect(state.awarenessNotes).toEqual([]);
-    expect(state.oscillationWarnings).toEqual([]);
-    expect(state.blindSpots).toEqual([]);
-    expect(state.metacogFocus).toBeNull();
 
     // Drain tracking
     expect(state.drainingPids).toBeInstanceOf(Set);
     expect(state.drainingPids.size).toBe(0);
-
-    // Kill calibration
-    expect(state.killThresholdAdjustment).toBe(0);
-    expect(state.killEvalHistory).toEqual([]);
-
-    // Blueprint tracking
-    expect(state.selectedBlueprintInfo).toBeNull();
 
     // Telemetry
     expect(state.ephemeralStats).toEqual({
@@ -122,7 +112,6 @@ describe("KernelState", () => {
       failures: 0,
       totalDurationMs: 0,
     });
-    expect(state.heuristicApplicationLog).toEqual([]);
   });
 
   test("BlackboardEntry type works with various value types", () => {

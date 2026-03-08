@@ -20,7 +20,42 @@ import { EventQueue } from "./event-queue.js";
 import { OsMetacognitiveAgent } from "./metacog-agent.js";
 import type { KernelState } from "./state-machine/state.js";
 import type { KernelEffect } from "./state-machine/effects.js";
-import type { OsSystemSnapshot, OsProcess } from "./types.js";
+import type { OsSystemSnapshot } from "./types.js";
+
+/** Worker system prompt — tells the LLM how to format its response. */
+const WORKER_SYSTEM_PROMPT = `You are a worker process in a cognitive kernel. Your job is to accomplish your objective and report results.
+
+IMPORTANT: End your response with a JSON command block wrapped in \`\`\`json fences:
+
+\`\`\`json
+{
+  "commands": [
+    { "kind": "bb_write", "key": "result:your-name", "value": "your result here" },
+    { "kind": "exit", "reason": "completed" }
+  ]
+}
+\`\`\`
+
+Available commands:
+- bb_write(key, value): Write a result to the shared blackboard. Use "result:<your-process-name>" as the key.
+- spawn_ephemeral(objective, name?): Spawn a lightweight scout to explore or investigate something concurrently. The scout runs in parallel and its result is written to the blackboard at "ephemeral:<name>:<id>". You can spawn multiple ephemerals and then idle to wait for their results.
+- exit(reason?, code?): You're done. Use code=0 for success. Always exit when your work is complete.
+- idle(wakeOnSignals?): Pause and wait for new information (e.g. ephemeral results arriving on the blackboard).
+- sleep(durationMs): Pause for a duration.
+
+## When to use ephemerals
+
+If your objective involves multiple independent sub-tasks — reading several files, researching different topics, exploring different approaches — spawn ephemerals to do them in parallel instead of doing everything sequentially yourself. Each ephemeral is a fast, focused scout. Example workflow:
+
+1. Analyze your objective and identify independent sub-investigations
+2. Spawn an ephemeral for each one: { "kind": "spawn_ephemeral", "objective": "Read and summarize src/foo.ts", "name": "scout-foo" }
+3. Idle to wait: { "kind": "idle" }
+4. When you wake, read ephemeral results from the blackboard and synthesize
+
+This is significantly faster than doing everything yourself for tasks with 3+ independent parts.
+
+If you don't include a command block, the kernel will auto-write your full response to the blackboard and exit you.
+`;
 
 export class KernelInterpreter {
   private readonly brain: Brain;
@@ -64,29 +99,25 @@ export class KernelInterpreter {
           action: effect.action as any,
           status: "started",
           message: effect.message,
+          detail: effect.detail,
         });
         break;
       }
 
       // ── Timers ────────────────────────────────────────────────
       case "schedule_timer": {
-        // Clear existing timer with same name (replace semantics)
         const existing = this.timers.get(effect.timer);
         if (existing) {
           clearInterval(existing);
         }
-
-        // Use setInterval so timers recur (housekeep, metacog, snapshot, watchdog).
-        // The transition decides what to do each time — the interpreter just delivers events.
         const timer = setInterval(() => {
           this.queue.enqueue({
             type: "timer_fired",
             timer: effect.timer as "housekeep" | "metacog" | "watchdog" | "snapshot",
             timestamp: Date.now(),
-            seq: 0, // The event loop will re-sequence
+            seq: 0,
           });
         }, effect.delayMs);
-
         this.timers.set(effect.timer, timer);
         break;
       }
@@ -100,24 +131,28 @@ export class KernelInterpreter {
         break;
       }
 
-      // ── LLM process execution ────────────────────────────────
-      case "run_llm": {
+      // ── LLM worker execution ──────────────────────────────────
+      // run_llm and submit_llm are the same: start an LLM thread for a worker process.
+      case "run_llm":
+      case "submit_llm": {
         const proc = state.processes.get(effect.pid);
         if (!proc) break;
 
         const thread = this.getOrCreateThread(effect.pid, proc.model ?? state.config.kernel.processModel);
+        const prompt = WORKER_SYSTEM_PROMPT + "\n\n# Your Objective\n\n" + proc.objective;
+        const processName = proc.name;
 
-        // Fire-and-forget: enqueue completion event when done
         void thread
-          .run(proc.objective)
+          .run(prompt)
           .then((result) => {
+            const parsed = parseWorkerCommands(result.finalResponse, processName);
             this.queue.enqueue({
               type: "llm_turn_completed",
               pid: effect.pid,
               success: true,
               response: result.finalResponse,
               tokensUsed: 0,
-              commands: [],
+              commands: parsed,
               usage: result.usage as any,
               timestamp: Date.now(),
               seq: 0,
@@ -152,7 +187,6 @@ export class KernelInterpreter {
               seq: 0,
             });
           } catch (_err) {
-            // On error, enqueue a no-op response so the kernel doesn't stall
             this.queue.enqueue({
               type: "metacog_response_received",
               response: JSON.stringify({ topology: null, memory: [], halt: null }),
@@ -167,7 +201,6 @@ export class KernelInterpreter {
       // ── Awareness daemon ──────────────────────────────────────
       case "run_awareness": {
         // TODO: Wire awareness daemon LLM call
-        // For now: enqueue empty response so the kernel loop continues
         this.queue.enqueue({
           type: "awareness_response_received",
           adjustments: [],
@@ -192,6 +225,7 @@ export class KernelInterpreter {
               type: "ephemeral_completed",
               id: effect.pid,
               name: `ephemeral-${effect.pid}`,
+              tablePid: effect.pid,
               success: true,
               parentPid: effect.parentPid,
               response: result.finalResponse,
@@ -206,6 +240,7 @@ export class KernelInterpreter {
               type: "ephemeral_completed",
               id: effect.pid,
               name: `ephemeral-${effect.pid}`,
+              tablePid: effect.pid,
               success: false,
               parentPid: effect.parentPid,
               error: err instanceof Error ? err.message : String(err),
@@ -221,7 +256,6 @@ export class KernelInterpreter {
       // ── Shell process ─────────────────────────────────────────
       case "run_shell": {
         // TODO: Wire shell process execution (spawn child_process)
-        // For now: enqueue placeholder response
         this.queue.enqueue({
           type: "shell_output_received",
           pid: effect.pid,
@@ -236,7 +270,6 @@ export class KernelInterpreter {
       // ── Sub-kernel ────────────────────────────────────────────
       case "run_subkernel": {
         // TODO: Wire sub-kernel execution
-        // For now: enqueue placeholder response
         this.queue.enqueue({
           type: "subkernel_completed",
           pid: effect.pid,
@@ -258,7 +291,6 @@ export class KernelInterpreter {
 
       case "persist_memory": {
         // TODO: Route to memoryStore based on operation kind
-        // For now this is a no-op until we wire memory operations
         break;
       }
 
@@ -268,66 +300,10 @@ export class KernelInterpreter {
         break;
       }
 
-      // ── Legacy effects ────────────────────────────────────────
-      // submit_llm is emitted by the transition's scheduling pass.
-      // Treat it the same as run_llm — start an LLM thread for the process.
-      // Skip daemons — they use specialized execution paths (run_metacog, run_awareness).
-      case "submit_llm": {
-        const proc = state.processes.get(effect.pid);
-        if (!proc) break;
-        if (proc.type === "daemon") break;
-
-        const thread = this.getOrCreateThread(effect.pid, proc.model ?? state.config.kernel.processModel);
-
-        void thread
-          .run(proc.objective)
-          .then((result) => {
-            this.queue.enqueue({
-              type: "llm_turn_completed",
-              pid: effect.pid,
-              success: true,
-              response: result.finalResponse,
-              tokensUsed: 0,
-              commands: [],
-              usage: result.usage as any,
-              timestamp: Date.now(),
-              seq: 0,
-            });
-          })
-          .catch((err) => {
-            this.queue.enqueue({
-              type: "llm_turn_completed",
-              pid: effect.pid,
-              success: false,
-              response: err instanceof Error ? err.message : String(err),
-              tokensUsed: 0,
-              commands: [],
-              timestamp: Date.now(),
-              seq: 0,
-            });
-          });
-        break;
-      }
-
-      // These are state changes handled inside the transition function,
-      // or legacy effects that are no longer needed.
-      case "submit_ephemeral":
-      case "submit_metacog":
-      case "submit_awareness":
-      case "activate_process":
-      case "idle_process":
-      case "signal_emit":
-      case "child_done_signal":
-      case "flush_ipc":
-      case "rebuild_dag":
-      case "schedule_pass":
-      case "apply_strategies":
-      case "spawn_topology_process":
-      case "kill_process":
-      case "drain_process":
-      case "start_shell":
-      case "start_subkernel":
-        // No-op — handled by transition or superseded by run_* effects
+      // ── State-only effects (no I/O needed) ─────────────────────
+      // These effects represent state changes already applied by the transition function.
+      // The interpreter has nothing to do — they exist only for effect logging/replay.
+      default:
         break;
     }
   }
@@ -349,11 +325,16 @@ export class KernelInterpreter {
 
   // ── Private helpers ─────────────────────────────────────────
 
-  /** Get or create a BrainThread for a process. */
+  /** Get or create a BrainThread for a process with full tool access. */
   private getOrCreateThread(pid: string, model: string): BrainThread {
     let thread = this.threads.get(pid);
     if (!thread) {
-      thread = this.brain.startThread({ model });
+      thread = this.brain.startThread({
+        model,
+        workingDirectory: this.workingDir,
+        sandboxMode: "danger-full-access" as any,
+        skipGitRepoCheck: true,
+      });
       this.threads.set(pid, thread);
     }
     return thread;
@@ -391,6 +372,14 @@ export class KernelInterpreter {
       }
     }
 
+    const deferrals = Array.from(state.deferrals?.values() ?? []).map(d => ({
+      id: d.id,
+      name: d.descriptor.name,
+      condition: d.condition,
+      waitedTicks: state.tickCount - d.registeredByTick,
+      reason: d.reason,
+    }));
+
     return {
       runId: state.runId,
       tickCount: state.tickCount,
@@ -399,6 +388,7 @@ export class KernelInterpreter {
       dagTopology: state.dagTopology,
       dagMetrics: { nodeCount: state.dagTopology.nodes.length, edgeCount: state.dagTopology.edges.length, maxDepth: 0, runningCount: activeProcessCount, stalledCount: stalledProcessCount, deadCount: 0 },
       ipcSummary: { signalCount: 0, blackboardKeyCount: state.blackboard.size },
+      deferrals,
       progressMetrics: {
         activeProcessCount,
         stalledProcessCount,
@@ -412,4 +402,33 @@ export class KernelInterpreter {
       blackboard,
     };
   }
+}
+
+// ── Worker response parser ──────────────────────────────────────
+
+/**
+ * Parse worker LLM response for commands. Looks for a JSON block in ```json fences.
+ * If no valid command block found, auto-generates bb_write + exit commands.
+ */
+function parseWorkerCommands(response: string, processName: string): any[] {
+  // Try to extract JSON from ```json ... ``` fences
+  const jsonMatch = response.match(/```json\s*\n?([\s\S]*?)\n?\s*```/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]!);
+      if (parsed && Array.isArray(parsed.commands) && parsed.commands.length > 0) {
+        return parsed.commands;
+      }
+    } catch {
+      // Fall through to auto-wrap
+    }
+  }
+
+  // No valid command block — auto-wrap the response as a bb_write + exit
+  // Truncate response for blackboard (keep first 4000 chars)
+  const truncated = response.length > 4000 ? response.slice(0, 4000) + "..." : response;
+  return [
+    { kind: "bb_write", key: `result:${processName}`, value: truncated },
+    { kind: "exit", reason: "completed", code: 0 },
+  ];
 }

@@ -203,17 +203,11 @@ describe("buildMetacogContextPure", () => {
   test("includes awareness state from KernelState", () => {
     const state = makeState({
       awarenessNotes: ["check process p1", "high token usage"],
-      metacogFocus: "resource_management",
-      oscillationWarnings: [{ processType: "lifecycle", killCount: 3, respawnCount: 3, windowTicks: 10 }],
-      blindSpots: [{ unusedCommandKind: "adjust_priority", ticksSinceLastUse: 50 }],
     });
 
     const ctx = buildMetacogContextPure(state);
 
     expect(ctx.awarenessNotes).toEqual(["check process p1", "high token usage"]);
-    expect(ctx.metacogFocus).toBe("resource_management");
-    expect(ctx.oscillationWarnings).toHaveLength(1);
-    expect(ctx.detectedBlindSpots).toHaveLength(1);
   });
 
   test("includes deferrals from state", () => {
@@ -237,21 +231,7 @@ describe("buildMetacogContextPure", () => {
     expect(ctx.deferrals![0].waitedTicks).toBe(10);
   });
 
-  test("includes killThresholdAdjustment and avgTokenSavedPerKill", () => {
-    const state = makeState({
-      killThresholdAdjustment: -0.1,
-      killEvalHistory: [
-        { tokenDelta: 100 },
-        { tokenDelta: 200 },
-        { tokenDelta: 300 },
-      ],
-    });
-
-    const ctx = buildMetacogContextPure(state);
-
-    expect(ctx.killThresholdAdjustment).toBe(-0.1);
-    expect(ctx.avgTokenSavedPerKill).toBe(200);
-  });
+  // killThresholdAdjustment and killEvalHistory removed from KernelState
 
   test("returns empty blackboardValueSummaries as undefined when no keys", () => {
     const state = makeState({ blackboard: new Map() });

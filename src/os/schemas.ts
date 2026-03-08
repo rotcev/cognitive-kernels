@@ -131,7 +131,8 @@ export const METACOG_OUTPUT_SCHEMA = {
       description: "Overall assessment of system state and progress toward the goal",
     },
     topology: {
-      description: "Desired work graph using topology primitives (task, seq, par, gate). Set to null if no changes needed.",
+      anyOf: [{ type: "string" }, { type: "null" }],
+      description: "JSON-encoded topology expression using primitives (task, seq, par, gate). Set to null if no changes needed. Example: {\"type\":\"par\",\"children\":[{\"type\":\"task\",\"name\":\"worker-1\",\"objective\":\"do X\"}]}",
     },
     memory: {
       type: "array",
@@ -147,28 +148,37 @@ export const METACOG_OUTPUT_SCHEMA = {
           confidence: { type: "number" },
           context: { type: "string" },
           scope: { type: "string", enum: ["global", "local"] },
-          blueprint: { type: "object" },
+          blueprint: { type: "string", description: "JSON-encoded blueprint object" },
           sourceBlueprintId: { type: "string" },
-          mutations: { type: "object" },
+          mutations: { type: "string", description: "JSON-encoded mutations object" },
           description: { type: "string" },
-          strategy: { type: "object" },
+          strategy: { type: "string", description: "JSON-encoded strategy object" },
         },
         required: ["kind"],
       },
     },
     halt: {
-      type: ["object", "null"],
+      anyOf: [
+        {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["achieved", "unachievable", "stalled"] },
+            summary: { type: "string" },
+          },
+          required: ["status", "summary"],
+        },
+        { type: "null" },
+      ],
       description: "Stop the system. Null if not halting.",
-      properties: {
-        status: { type: "string", enum: ["achieved", "unachievable", "stalled"] },
-        summary: { type: "string" },
-      },
-      required: ["status", "summary"],
     },
     citedHeuristicIds: {
       type: "array",
       description: "IDs of heuristics that influenced your decisions",
       items: { type: "string" },
+    },
+    nextEvalDelayMs: {
+      anyOf: [{ type: "number" }, { type: "null" }],
+      description: "Milliseconds until the next metacog evaluation. Use shorter delays (5-15s) when workers are about to complete or topology needs attention. Use longer delays (60-120s) when workers are mid-execution and no intervention is needed. Null uses the default interval.",
     },
   },
   required: ["assessment", "topology", "memory", "halt", "citedHeuristicIds"],

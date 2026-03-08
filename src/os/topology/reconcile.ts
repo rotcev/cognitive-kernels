@@ -57,15 +57,18 @@ export function reconcile(
     activeNodes.set(name, node);
   }
 
-  // 3. Build lookup: name -> existing alive process
+  // 3. Build lookups: name -> existing alive process, and completed (dead) names
   const existingByName = new Map<string, ProcessInfo>();
+  const completedByName = new Set<string>();
   for (const [pid, proc] of currentProcesses) {
     if (proc.state !== "dead") {
       existingByName.set(proc.name, proc);
+    } else {
+      completedByName.add(proc.name);
     }
   }
 
-  // 4. Match: desired vs existing
+  // 4. Match: desired vs existing (skip already-completed work)
   const matched = new Map<string, ProcessInfo>();
   const toSpawn: FlatNode[] = [];
   const toKill: ProcessInfo[] = [];
@@ -78,6 +81,9 @@ export function reconcile(
       if (node.priority !== undefined && node.priority !== existing.priority) {
         effects.push({ type: "update_process", pid: existing.pid, priority: node.priority });
       }
+    } else if (completedByName.has(name)) {
+      // Process already completed — don't re-spawn
+      continue;
     } else {
       toSpawn.push(node);
     }

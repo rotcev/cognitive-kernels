@@ -77,20 +77,10 @@ export type KernelState = {
 
   // --- Awareness state ---
   awarenessNotes: string[];
-  oscillationWarnings: any[];
-  blindSpots: any[];
-  metacogFocus: string | null;
 
   // --- Drain tracking ---
   /** PIDs currently being drained (graceful shutdown). */
   drainingPids: Set<string>;
-
-  // --- Kill calibration ---
-  killThresholdAdjustment: number;
-  killEvalHistory: any[];
-
-  // --- Blueprint tracking ---
-  selectedBlueprintInfo: any | null;
 
   // --- Telemetry ---
   ephemeralStats: {
@@ -99,7 +89,6 @@ export type KernelState = {
     failures: number;
     totalDurationMs: number;
   };
-  heuristicApplicationLog: any[];
 
   // --- Halt logic ---
   halted: boolean;
@@ -107,7 +96,6 @@ export type KernelState = {
   /** Wall-clock ms when only daemons remained (grace period start). 0 = not started. */
   goalWorkDoneAt: number;
   startTime: number;
-  consecutiveIdleTicks: number;
   lastProcessCompletionTime: number;
   housekeepCount: number;
 };
@@ -155,25 +143,15 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     metacogHistory: [],
 
     awarenessNotes: [],
-    oscillationWarnings: [],
-    blindSpots: [],
-    metacogFocus: null,
 
     drainingPids: new Set(),
 
-    killThresholdAdjustment: 0,
-    killEvalHistory: [],
-
-    selectedBlueprintInfo: null,
-
     ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
-    heuristicApplicationLog: [],
 
     halted: false,
     haltReason: null,
     goalWorkDoneAt: 0,
     startTime: 0,
-    consecutiveIdleTicks: 0,
     lastProcessCompletionTime: 0,
     housekeepCount: 0,
   };

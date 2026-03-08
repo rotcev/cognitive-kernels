@@ -58,19 +58,12 @@ describe("transition — boot", () => {
     expect(newState.goal).toBe("build a calculator");
   });
 
-  test("boot creates metacog-daemon and sets pendingTriggers (no submit_metacog)", () => {
+  test("boot creates no daemon processes and sets pendingTriggers (no submit_metacog)", () => {
     const state = makeState();
     const [newState, effects] = transition(state, bootEvent());
 
-    expect(newState.processes.size).toBe(1);
-
-    const procs = [...newState.processes.values()];
-    const metacog = procs.find(p => p.name === "metacog-daemon");
-
-    expect(metacog).toBeDefined();
-    expect(metacog!.type).toBe("daemon");
-    expect(metacog!.state).toBe("idle");
-    expect(metacog!.priority).toBe(50);
+    // Boot creates NO processes — metacog/awareness are kernel-level modules
+    expect(newState.processes.size).toBe(0);
 
     // boot no longer emits submit_metacog — uses pendingTriggers instead
     const submitMetacog = effects.find(e => e.type === "submit_metacog");
@@ -78,12 +71,9 @@ describe("transition — boot", () => {
     expect(newState.pendingTriggers).toContain("boot");
   });
 
-  test("boot produces emit_protocol effects but no submit_metacog or submit_llm", () => {
+  test("boot produces no submit_metacog or submit_llm effects", () => {
     const state = makeState();
     const [newState, effects] = transition(state, bootEvent());
-
-    const spawnEffects = effects.filter(e => e.type === "emit_protocol");
-    expect(spawnEffects.length).toBeGreaterThanOrEqual(1);
 
     // Boot no longer emits submit_metacog — pendingTriggers: ["boot"] is sufficient
     const metacogEffects = effects.filter(e => e.type === "submit_metacog");
@@ -211,57 +201,9 @@ describe("transition — halt_check", () => {
     expect(effects.some(e => e.type === "halt")).toBe(true);
   });
 
-  test("only daemons remaining starts grace period", () => {
+  test("living processes prevent halt", () => {
     const state = makeState();
-    state.processes.set("d1", {
-      pid: "d1", type: "daemon", state: "idle", name: "metacog",
-      parentPid: null, objective: "metacog", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan", restartPolicy: "always",
-    });
     state.startTime = Date.now();
-
-    const [newState, effects] = transition(state, haltCheckEvent());
-
-    expect(newState.halted).toBe(false);
-    expect(newState.goalWorkDoneAt).toBeGreaterThan(0);
-    // Should emit grace period start event
-    const graceEffects = effects.filter(
-      (e: any) => e.type === "emit_protocol" && e.action === "os_halt_grace_period"
-    );
-    expect(graceEffects.length).toBeGreaterThanOrEqual(1);
-  });
-
-  test("grace period expired halts with goal_work_complete", () => {
-    const state = makeState({ goalCompleteGracePeriodMs: 100 });
-    state.processes.set("d1", {
-      pid: "d1", type: "daemon", state: "idle", name: "metacog",
-      parentPid: null, objective: "metacog", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan", restartPolicy: "always",
-    });
-    state.startTime = Date.now();
-    state.goalWorkDoneAt = Date.now() - 200; // expired
-
-    const [newState] = transition(state, haltCheckEvent());
-
-    expect(newState.halted).toBe(true);
-    expect(newState.haltReason).toBe("goal_work_complete");
-  });
-
-  test("lifecycle processes reappearing resets grace period", () => {
-    const state = makeState();
-    state.goalWorkDoneAt = Date.now() - 1000; // grace period active
-    state.startTime = Date.now() - 5000;
-    state.processes.set("d1", {
-      pid: "d1", type: "daemon", state: "idle", name: "metacog",
-      parentPid: null, objective: "metacog", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan", restartPolicy: "always",
-    });
     state.processes.set("w1", {
       pid: "w1", type: "lifecycle", state: "running", name: "worker",
       parentPid: null, objective: "work", priority: 5,
@@ -273,7 +215,6 @@ describe("transition — halt_check", () => {
     const [newState] = transition(state, haltCheckEvent());
 
     expect(newState.halted).toBe(false);
-    expect(newState.goalWorkDoneAt).toBe(0); // reset
   });
 
   test("deferrals prevent halt even when no living processes", () => {
@@ -426,27 +367,19 @@ describe("transition — integration roundtrip", () => {
     // 1. Boot
     const [s1, e1] = transition(state, { type: "boot", goal: "test", timestamp: Date.now(), seq: seq++ });
     expect(s1.goal).toBe("test");
-    expect(s1.processes.size).toBe(1); // just metacog-daemon
-    expect(e1.some(e => e.type === "emit_protocol")).toBe(true);
+    expect(s1.processes.size).toBe(0); // boot creates no daemon processes
 
-    // 2. Add a worker process and have it complete with spawn (50 tokens used)
-    const s1WithProc = addProcess(s1, "worker-A", { priority: 90 });
-    const orch = [...s1WithProc.processes.values()].find(p => p.name === "worker-A")!;
-    const [s2] = transition(s1WithProc, {
-      type: "process_completed", pid: orch.pid, name: orch.name,
-      success: true, commandCount: 1, tokensUsed: 50,
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-      response: "", timestamp: Date.now(), seq: seq++,
-    });
-    expect(s2.processes.size).toBe(3); // worker-A + metacog + w1
-    expect(s2.processes.get(orch.pid)!.tokensUsed).toBe(50);
+    // 2. Add worker processes manually (spawn_child removed from command handlers)
+    const s1WithWorkerA = addProcess(s1, "worker-A", { priority: 90, tokensUsed: 50 });
+    const s1WithW1 = addProcess(s1WithWorkerA, "w1", { priority: 70, tokensUsed: 0 });
+    const orch = [...s1WithW1.processes.values()].find(p => p.name === "worker-A")!;
 
     // 3. Halt check — should not halt (50 < 200 budget)
-    const [s3] = transition(s2, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    const [s3] = transition(s1WithW1, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
     expect(s3.halted).toBe(false);
 
     // 4. Worker completes with 250 tokens → total now 300 > 200 budget
-    const worker = [...s2.processes.values()].find(p => p.name === "w1")!;
+    const worker = [...s1WithW1.processes.values()].find(p => p.name === "w1")!;
     const [s4] = transition(s3, {
       type: "process_completed", pid: worker.pid, name: worker.name,
       success: true, commandCount: 1, tokensUsed: 250,
@@ -502,7 +435,9 @@ describe("transition — integration roundtrip", () => {
 
     // s1 should differ from original
     expect(s1.goal).not.toBe(original.goal);
-    expect(s1.processes.size).not.toBe(original.processes.size);
+    // Boot sets pendingTriggers and blackboard — verify state differs
+    expect(s1.pendingTriggers).toContain("boot");
+    expect(original.pendingTriggers).not.toContain("boot");
   });
 });
 
@@ -589,14 +524,11 @@ describe("transition — process_completed basics", () => {
 describe("transition — process_completed commands", () => {
   test("idle command sets process state to idle", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // First: satisfy hard spawn enforcement with a spawn, then do idle on second tick
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    // Find the worker we spawned
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    // Add a worker process manually
+    const workerState = addProcess(state, "w1", { priority: 50 });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
     // Worker goes idle
-    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+    const [s2] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "idle", wakeOnSignals: ["tick:1"] }],
     }));
 
@@ -607,12 +539,11 @@ describe("transition — process_completed commands", () => {
 
   test("exit command kills process and emits protocol effect", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    // Add a worker with parent set to orchestrator
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [s2, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [s2, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "exit", code: 0, reason: "done" }],
     }));
 
@@ -663,71 +594,29 @@ describe("transition — process_completed commands", () => {
     expect(inboxValue["data:missing"]).toBeUndefined();
   });
 
-  test("spawn_child creates new process and emits submit_llm effect", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{
-        kind: "spawn_child",
-        descriptor: { type: "lifecycle", name: "worker-1", objective: "do work", priority: 70 },
-      }],
-    }));
+  // spawn_child removed from command handlers — topology reconcile handles process spawning
 
-    // New process created
-    expect(newState.processes.size).toBe(state.processes.size + 1);
-    const worker = [...newState.processes.values()].find(p => p.name === "worker-1")!;
-    expect(worker).toBeDefined();
-    expect(worker.type).toBe("lifecycle");
-    expect(worker.parentPid).toBe(orchestratorPid);
-    expect(worker.state).toBe("running");
-    expect(worker.priority).toBe(70);
-
-    // submit_llm effect emitted
-    expect(effects.some(e => e.type === "submit_llm" && (e as any).name === "worker-1")).toBe(true);
-    // Protocol effect
-    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_spawn")).toBe(true);
-  });
-
-  test("spawn_graph with immediate and deferred nodes", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{
-        kind: "spawn_graph",
-        nodes: [
-          { name: "phase-0", type: "lifecycle", objective: "gather", after: [], priority: 80 },
-          { name: "phase-1", type: "lifecycle", objective: "process", after: ["phase-0"], priority: 70 },
-        ],
-      }],
-    }));
-
-    // phase-0 spawned immediately
-    const phase0 = [...newState.processes.values()].find(p => p.name === "phase-0");
-    expect(phase0).toBeDefined();
-    expect(phase0!.state).toBe("running");
-    expect(effects.some(e => e.type === "submit_llm" && (e as any).name === "phase-0")).toBe(true);
-
-    // phase-1 deferred
-    expect(newState.deferrals.size).toBe(1);
-    const deferral = [...newState.deferrals.values()][0];
-    expect(deferral.descriptor.name).toBe("phase-1");
-    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("graph deferred"))).toBe(true);
-  });
+  // spawn_graph removed from command handlers — topology reconcile handles graph spawning
 
   test("cancel_defer removes matching deferrals", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // First spawn a deferred process
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{
-        kind: "spawn_graph",
-        nodes: [
-          { name: "immediate", type: "lifecycle", objective: "now", after: [] },
-          { name: "deferred-work", type: "lifecycle", objective: "later", after: ["immediate"] },
-        ],
-      }],
-    }));
-    expect(s1.deferrals.size).toBe(1);
+    // Manually add a deferral registered by the orchestrator
+    const deferrals = new Map(state.deferrals);
+    deferrals.set("defer-1", {
+      id: "defer-1",
+      descriptor: { type: "lifecycle" as const, name: "deferred-work", objective: "later" },
+      condition: { type: "blackboard_key_exists" as const, key: "signal:go" },
+      registeredAt: new Date().toISOString(),
+      registeredAtMs: Date.now(),
+      registeredByTick: 0,
+      registeredByPid: orchestratorPid,
+      reason: "test deferral",
+    });
+    const stateWithDefer = { ...state, deferrals };
+    expect(stateWithDefer.deferrals.size).toBe(1);
 
-    // Now cancel it (from the orchestrator's second tick)
-    const [s2, effects] = transition(s1, processCompletedEvent(orchestratorPid, {
+    // Now cancel it
+    const [s2, effects] = transition(stateWithDefer, processCompletedEvent(orchestratorPid, {
       commands: [{ kind: "cancel_defer", name: "deferred-work", reason: "no longer needed" }],
     }));
     expect(s2.deferrals.size).toBe(0);
@@ -745,7 +634,7 @@ describe("transition — process_completed commands", () => {
           resourcePressure: "low",
           suggestedAction: "continue",
         },
-        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+        { kind: "idle" },
       ],
     }));
 
@@ -755,15 +644,12 @@ describe("transition — process_completed commands", () => {
   });
 
   test("sleep command sets sleeping state", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [
-        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
-      ],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const { state } = bootAndGetOrchestrator();
+    // Add a worker process manually
+    const workerState = addProcess(state, "w1", { priority: 50 });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+    const [s2] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "sleep", durationMs: 5000 }],
     }));
 
@@ -773,14 +659,13 @@ describe("transition — process_completed commands", () => {
   });
 
   test("exit is reordered to run last (after bb_write)", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const { state } = bootAndGetOrchestrator();
+    // Add a worker process manually
+    const workerState = addProcess(state, "w1", { priority: 50 });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
     // Exit first in array, bb_write second — should still write before killing
-    const [s2] = transition(s1, processCompletedEvent(worker.pid, {
+    const [s2] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [
         { kind: "exit", code: 0, reason: "done" },
         { kind: "bb_write", key: "result:w1", value: "final output" },
@@ -793,129 +678,12 @@ describe("transition — process_completed commands", () => {
   });
 });
 
-describe("transition — process_completed enforcement", () => {
-  test("hard spawn enforcement: orchestrator first tick without spawn is rejected", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [
-        { kind: "bb_write", key: "plan", value: "I will do it myself" },
-        { kind: "idle" },
-      ],
-    }));
+// Hard spawn enforcement, auto-exit daemons, and executive exit prevention
+// have been removed from the pure kernel. Enforcement is now handled by
+// metacog (topology reconcile) and kernel-level modules.
 
-    // bb_write preserved
-    expect(newState.blackboard.get("plan")).toBeDefined();
-
-    // Idle was rejected — process should still be running (not idle)
-    const proc = newState.processes.get(orchestratorPid)!;
-    expect(proc.state).toBe("running");
-
-    // Rejection effect emitted
-    expect(effects.some(e =>
-      e.type === "emit_protocol" && (e as any).action === "os_command_rejected"
-    )).toBe(true);
-  });
-
-  test("auto-exit: daemon without lifecycle command is killed", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const metacog = [...state.processes.values()].find(p => p.name === "metacog-daemon")!;
-
-    // Daemon completes a turn with only bb_write — no idle/exit/sleep
-    // First set state to running (it starts as idle)
-    const s0 = { ...state, processes: new Map(state.processes) };
-    s0.processes.set(metacog.pid, { ...metacog, state: "running" });
-
-    const [newState, effects] = transition(s0, processCompletedEvent(metacog.pid, {
-      commands: [{ kind: "bb_write", key: "metacog:result", value: "ok" }],
-    }));
-
-    const updated = newState.processes.get(metacog.pid)!;
-    expect(updated.state).toBe("dead");
-    expect(updated.exitReason).toContain("auto-exit");
-    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_exit")).toBe(true);
-  });
-
-  test("executive exit prevention: orchestrator cannot exit while children live", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // Spawn a child first
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-
-    // Now orchestrator tries to exit
-    const [s2, effects] = transition(s1, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "exit", code: 0, reason: "done" }],
-    }));
-
-    // Exit should be rejected — orchestrator should be idle instead
-    const orch = s2.processes.get(orchestratorPid)!;
-    expect(orch.state).toBe("idle");
-    expect(orch.wakeOnSignals).toContain("child:done");
-    expect(effects.some(e =>
-      e.type === "emit_protocol" && (e as any).message.includes("executive exit prevented")
-    )).toBe(true);
-  });
-});
-
-describe("transition — process_completed spawn_system / spawn_kernel", () => {
-  test("spawn_system creates shell process and emits start_shell effect", () => {
-    const config = parseOsConfig({
-      enabled: true,
-      kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
-      systemProcess: { enabled: true, maxSystemProcesses: 5 },
-    });
-    const [bootState] = transition(initialState(config, "test"), bootEvent("test"));
-    const state = addProcess(bootState, "worker-A", { priority: 90 });
-    const orchestratorPid = [...state.processes.values()].find(p => p.name === "worker-A")!.pid;
-
-    const [newState, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [
-        { kind: "spawn_system", name: "dev-server", command: "npm", args: ["run", "dev"] },
-      ],
-    }));
-
-    const shell = [...newState.processes.values()].find(p => p.name === "dev-server");
-    expect(shell).toBeDefined();
-    expect(shell!.backend).toEqual({ kind: "system", command: "npm", args: ["run", "dev"] });
-    expect(effects.some(e => e.type === "start_shell")).toBe(true);
-  });
-
-  test("spawn_system rejected when disabled", () => {
-    const config = parseOsConfig({
-      enabled: true,
-      kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 },
-      systemProcess: { enabled: false },
-    });
-    const [bootState] = transition(initialState(config, "test"), bootEvent("test"));
-    const state = addProcess(bootState, "worker-A", { priority: 90 });
-    const orchestratorPid = [...state.processes.values()].find(p => p.name === "worker-A")!.pid;
-
-    const [, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [
-        { kind: "spawn_system", name: "srv", command: "node" },
-        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
-      ],
-    }));
-
-    expect(effects.some(e =>
-      e.type === "emit_protocol" && (e as any).message.includes("spawn_system rejected")
-    )).toBe(true);
-  });
-
-  test("spawn_kernel rejected when disabled", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [, effects] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [
-        { kind: "spawn_kernel", name: "sub", goal: "sub-goal" },
-        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
-      ],
-    }));
-
-    expect(effects.some(e =>
-      e.type === "emit_protocol" && (e as any).message.includes("spawn_kernel rejected")
-    )).toBe(true);
-  });
-});
+// spawn_system and spawn_kernel removed from command handlers.
+// System process and sub-kernel spawning now handled via topology reconcile.
 
 // ---------------------------------------------------------------------------
 // ephemeral_completed
@@ -1107,29 +875,6 @@ describe("transition — timer_fired (housekeep)", () => {
 
     const [s2] = transition(cpState, timerEvent("housekeep"));
     expect(s2.processes.get(orch.pid)?.state).toBe("running");
-  });
-
-  test("housekeep stall detection force-wakes idle processes", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    // Set up stall conditions: no inflight, worker idle, 3+ idle ticks
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "idle" as const });
-    const stallState = {
-      ...s1,
-      processes,
-      inflight: new Set<string>(),
-      consecutiveIdleTicks: 3,
-      lastProcessCompletionTime: Date.now() - 10000,
-    };
-
-    const [s2, effects] = transition(stallState, timerEvent("housekeep"));
-    expect(s2.processes.get(orch.pid)?.state).toBe("running");
-    expect(s2.consecutiveIdleTicks).toBe(0);
-    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("stall_detected"))).toBe(true);
   });
 
   test("snapshot timer emits persist_snapshot effect", () => {
@@ -2106,14 +1851,12 @@ describe("transition — deferral processing", () => {
 describe("transition — typed effects: process_completed exit emits child_done_signal", () => {
   test("exit command emits child_done_signal with correct fields", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // Spawn a child worker first
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    // Add a child worker manually
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
     // Worker exits
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "exit", code: 0, reason: "completed successfully" }],
     }));
 
@@ -2128,12 +1871,10 @@ describe("transition — typed effects: process_completed exit emits child_done_
 
   test("exit command emits flush_ipc after child_done_signal", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "exit", code: 0, reason: "done" }],
     }));
 
@@ -2149,12 +1890,10 @@ describe("transition — typed effects: process_completed exit emits child_done_
 
   test("exit command emits rebuild_dag effect", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [{ kind: "exit", code: 0, reason: "done" }],
     }));
 
@@ -2162,25 +1901,13 @@ describe("transition — typed effects: process_completed exit emits child_done_
   });
 
   test("parentless process exit does not emit child_done_signal", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // Spawn a child so orchestrator has work, then attempt orchestrator exit
-    // which will be prevented — instead test with a parentless worker
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
+    const { state } = bootAndGetOrchestrator();
 
     // Add a parentless lifecycle process
-    const processes = new Map(s1.processes);
-    const orphanPid = "orphan-1";
-    processes.set(orphanPid, {
-      pid: orphanPid, type: "lifecycle" as const, state: "running" as const,
-      name: "orphan-worker", parentPid: null, objective: "solo work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
-    });
+    const orphanState = addProcess(state, "orphan-worker", { priority: 50, parentPid: null });
+    const orphanPid = [...orphanState.processes.values()].find(p => p.name === "orphan-worker")!.pid;
 
-    const [, effects] = transition({ ...s1, processes }, processCompletedEvent(orphanPid, {
+    const [, effects] = transition(orphanState, processCompletedEvent(orphanPid, {
       commands: [{ kind: "exit", code: 0, reason: "done" }],
     }));
 
@@ -2194,12 +1921,10 @@ describe("transition — typed effects: process_completed exit emits child_done_
 describe("transition — typed effects: failed process emits child_done_signal", () => {
   test("failed process with parent emits child_done_signal with exit code 1", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       success: false,
       response: "LLM crashed",
     }));
@@ -2213,12 +1938,10 @@ describe("transition — typed effects: failed process emits child_done_signal",
 
   test("failed process emits flush_ipc and rebuild_dag", () => {
     const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const workerState = addProcess(state, "w1", { priority: 50, parentPid: orchestratorPid });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       success: false,
       response: "error",
     }));
@@ -2228,23 +1951,13 @@ describe("transition — typed effects: failed process emits child_done_signal",
   });
 
   test("failed parentless process emits rebuild_dag but not child_done_signal", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
+    const { state } = bootAndGetOrchestrator();
 
     // Add a parentless lifecycle process
-    const processes = new Map(s1.processes);
-    const orphanPid = "orphan-fail";
-    processes.set(orphanPid, {
-      pid: orphanPid, type: "lifecycle" as const, state: "running" as const,
-      name: "orphan-worker", parentPid: null, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 1, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
-    });
+    const orphanState = addProcess(state, "orphan-worker", { priority: 50, parentPid: null });
+    const orphanPid = [...orphanState.processes.values()].find(p => p.name === "orphan-worker")!.pid;
 
-    const [, effects] = transition({ ...s1, processes }, processCompletedEvent(orphanPid, {
+    const [, effects] = transition(orphanState, processCompletedEvent(orphanPid, {
       success: false,
       response: "crashed",
     }));
@@ -2256,13 +1969,11 @@ describe("transition — typed effects: failed process emits child_done_signal",
 
 describe("transition — typed effects: signal_emit command emits signal_emit effect", () => {
   test("signal_emit command produces signal_emit and flush_ipc effects", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    const [s1] = transition(state, processCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const { state } = bootAndGetOrchestrator();
+    const workerState = addProcess(state, "w1", { priority: 50 });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
 
-    const [, effects] = transition(s1, processCompletedEvent(worker.pid, {
+    const [, effects] = transition(workerState, processCompletedEvent(worker.pid, {
       commands: [
         { kind: "signal_emit", signal: "data:ready" },
         { kind: "idle" },
@@ -2385,55 +2096,6 @@ describe("transition — typed effects: ephemeral_completed emits signal_emit + 
   });
 });
 
-describe("transition — typed effects: housekeep stall detection emits activate_process", () => {
-  test("stall detection emits activate_process for each idle process", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-    const metacog = [...s1.processes.values()].find(p => p.name === "metacog-daemon")!;
-
-    // Set up: worker and metacog both idle, stall conditions met
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "idle" as const });
-    processes.set(metacog.pid, { ...metacog, state: "idle" as const });
-    const stallState = {
-      ...s1,
-      processes,
-      inflight: new Set<string>(),
-      consecutiveIdleTicks: 3,
-      lastProcessCompletionTime: Date.now() - 10000,
-    };
-
-    const [, effects] = transition(stallState, timerEvent("housekeep"));
-
-    const activateEffects = effects.filter(e => e.type === "activate_process");
-    expect(activateEffects.length).toBe(2); // both worker and metacog
-    const activatedPids = activateEffects.map(e => e.type === "activate_process" ? e.pid : "");
-    expect(activatedPids).toContain(orch.pid);
-    expect(activatedPids).toContain(metacog.pid);
-  });
-
-  test("no stall detection when inflight work exists", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "idle" as const });
-    const noStallState = {
-      ...s1,
-      processes,
-      inflight: new Set<string>(["some-pid"]), // inflight work prevents stall
-      consecutiveIdleTicks: 10,
-    };
-
-    const [, effects] = transition(noStallState, timerEvent("housekeep"));
-
-    expect(effects.some(e => e.type === "activate_process")).toBe(false);
-  });
-});
 
 describe("transition — typed effects: housekeep cadence signals emit signal_emit", () => {
   test("cadence signal emits signal_emit with correct signal name and payload", () => {
@@ -2502,97 +2164,7 @@ describe("transition — typed effects: housekeep cadence signals emit signal_em
   });
 });
 
-describe("transition — typed effects: housekeep deadlock detection emits activate_process", () => {
-  test("deadlock detection emits activate_process for idle root process", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    // Set up: worker idle with tick >= 1, no living workers, no ephemerals
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
-    // Kill or remove any non-daemon, non-worker-A processes
-    for (const [pid, proc] of processes) {
-      if (pid !== orch.pid && proc.type !== "daemon") {
-        processes.set(pid, { ...proc, state: "dead" as const });
-      }
-    }
-
-    const deadlockState = {
-      ...s1,
-      processes,
-      inflight: new Set<string>(),
-    };
-
-    const [s2, effects] = transition(deadlockState, timerEvent("housekeep", {
-      pendingEphemeralCount: 0,
-      bbKeyCount: 5,
-      bbKeysAtLastForceWake: 3, // bbChanged = true
-    }));
-
-    // Orchestrator should be woken
-    expect(s2.processes.get(orch.pid)?.state).toBe("running");
-
-    // activate_process effect emitted
-    const activateEffect = effects.find(e => e.type === "activate_process");
-    expect(activateEffect).toBeDefined();
-    expect(activateEffect!.type === "activate_process" && activateEffect!.pid).toBe(orch.pid);
-  });
-
-  test("no deadlock detection when root process is running", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    // Worker is running, not idle
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
-
-    const runningState = { ...s1, processes };
-
-    const [, effects] = transition(runningState, timerEvent("housekeep", {
-      pendingEphemeralCount: 0,
-    }));
-
-    // No activate_process from deadlock detection
-    // (there might be one from stall detection if conditions align, so filter specifically)
-    const deadlockProtocol = effects.find(
-      e => e.type === "emit_protocol" && (e as any).message.includes("deadlock_detected")
-    );
-    expect(deadlockProtocol).toBeUndefined();
-  });
-
-  test("no deadlock detection when living workers exist", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "idle" as const, tickCount: 2 });
-    // Add a living worker
-    processes.set("w1", {
-      pid: "w1", type: "lifecycle" as const, state: "running" as const,
-      name: "active-worker", parentPid: orch.pid, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
-    });
-
-    const activeState = { ...s1, processes };
-
-    const [, effects] = transition(activeState, timerEvent("housekeep", {
-      pendingEphemeralCount: 0,
-    }));
-
-    const deadlockProtocol = effects.find(
-      e => e.type === "emit_protocol" && (e as any).message.includes("deadlock_detected")
-    );
-    expect(deadlockProtocol).toBeUndefined();
-  });
-});
+// Orchestrator deadlock detection removed — handled by metacog now.
 
 // ---------------------------------------------------------------------------
 // Wave 2: Process Lifecycle Through Effects
@@ -2929,53 +2501,7 @@ describe("transition — Wave 2: checkpoint restoration emits activate_process",
   });
 });
 
-describe("transition — Wave 2: executive exit prevention emits idle_process", () => {
-  test("root lifecycle process prevented from exiting emits idle_process with wakeOnSignals", () => {
-    const state = makeState();
-    const [s1boot] = transition(state, bootEvent());
-    const s1 = addProcess(s1boot, "worker-A", { priority: 90 });
-    const orch = [...s1.processes.values()].find(p => p.name === "worker-A")!;
-
-    const processes = new Map(s1.processes);
-    processes.set(orch.pid, { ...orch, state: "running" as const, tickCount: 2 });
-    // Add a living child
-    processes.set("child-alive", {
-      pid: "child-alive", type: "lifecycle" as const, state: "running" as const,
-      name: "active-child", parentPid: orch.pid, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 0, tokensUsed: 0, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
-    });
-
-    const stateWithChildren = { ...s1, processes };
-
-    // Root process tries to exit
-    const event: KernelEvent = {
-      type: "process_completed",
-      pid: orch.pid,
-      name: "worker-A",
-      success: true,
-      commandCount: 1,
-      tokensUsed: 50,
-      commands: [{ kind: "exit" as const, code: 0, reason: "done" }],
-      response: "exiting",
-      timestamp: Date.now(),
-      seq: 1,
-    };
-
-    const [newState, effects] = transition(stateWithChildren, event);
-
-    // Root process should be idle (exit prevented)
-    const orchState = newState.processes.get(orch.pid);
-    expect(orchState?.state).toBe("idle");
-
-    // idle_process effect with child:done signal
-    const idleEffects = effects.filter(e => e.type === "idle_process");
-    expect(idleEffects.length).toBe(1);
-    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.pid).toBe(orch.pid);
-    expect(idleEffects[0]!.type === "idle_process" && idleEffects[0]!.wakeOnSignals).toContain("child:done");
-  });
-});
+// Executive exit prevention removed — processes can now exit freely.
 
 // ---------------------------------------------------------------------------
 // Wave 3: Housekeep I/O migration — zombie reaping, daemon restart, strategy
@@ -3073,213 +2599,12 @@ describe("transition — housekeep zombie reaping", () => {
   });
 });
 
-describe("transition — housekeep daemon restart", () => {
-  test("dead daemon with restartPolicy='always' gets respawned", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
+// Daemon restart removed from housekeep — daemons are kernel-level modules now.
 
-    const processes = new Map(s1.processes);
+// Strategy application removed from housekeep — scheduling strategies
+// are handled through topology reconcile now.
 
-    processes.set("dead-daemon", {
-      pid: "dead-daemon", type: "daemon" as const, state: "dead" as const,
-      name: "my-daemon", parentPid: null, objective: "daemon work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 5, tokensUsed: 200, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
-      exitCode: 0, exitReason: "completed",
-    });
-
-    const stateWithDeadDaemon = { ...s1, processes };
-    const [newState, effects] = transition(stateWithDeadDaemon, timerEvent("housekeep"));
-
-    // Original dead daemon should have restartPolicy changed to "never"
-    const deadDaemon = newState.processes.get("dead-daemon");
-    expect(deadDaemon!.restartPolicy).toBe("never");
-
-    // A new process should have been created with the same name
-    const newDaemons = [...newState.processes.values()].filter(
-      p => p.name === "my-daemon" && p.pid !== "dead-daemon"
-    );
-    expect(newDaemons).toHaveLength(1);
-    const newDaemon = newDaemons[0]!;
-    expect(newDaemon.state).toBe("running");
-    expect(newDaemon.type).toBe("daemon");
-    expect(newDaemon.restartPolicy).toBe("on-failure");
-    expect(newDaemon.tickCount).toBe(0);
-    expect(newDaemon.tokensUsed).toBe(0);
-
-    // Should emit submit_llm for the new process
-    const submitEffects = effects.filter(
-      e => e.type === "submit_llm" && e.pid === newDaemon.pid
-    );
-    expect(submitEffects).toHaveLength(1);
-
-    // Should emit activate_process
-    const activateEffects = effects.filter(
-      e => e.type === "activate_process" && e.pid === newDaemon.pid
-    );
-    expect(activateEffects).toHaveLength(1);
-
-    // Should emit protocol event
-    const restartEffects = effects.filter(
-      e => e.type === "emit_protocol" && "message" in e && (e.message as string).includes("daemon_restart")
-    );
-    expect(restartEffects).toHaveLength(1);
-  });
-
-  test("dead daemon with restartPolicy='on-failure' only restarts on non-zero exit", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    const processes = new Map(s1.processes);
-
-    // Dead daemon with exitCode=0 and on-failure policy — should NOT restart
-    processes.set("success-daemon", {
-      pid: "success-daemon", type: "daemon" as const, state: "dead" as const,
-      name: "success-daemon", parentPid: null, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "on-failure" as const,
-      exitCode: 0, exitReason: "completed",
-    });
-
-    const stateSuccessDaemon = { ...s1, processes };
-    const [newState1] = transition(stateSuccessDaemon, timerEvent("housekeep"));
-
-    // No new process should be created (exitCode=0, on-failure)
-    const newDaemons1 = [...newState1.processes.values()].filter(
-      p => p.name === "success-daemon" && p.pid !== "success-daemon"
-    );
-    expect(newDaemons1).toHaveLength(0);
-
-    // Dead daemon with exitCode=1 and on-failure policy — SHOULD restart
-    const processes2 = new Map(s1.processes);
-    processes2.set("failure-daemon", {
-      pid: "failure-daemon", type: "daemon" as const, state: "dead" as const,
-      name: "failure-daemon", parentPid: null, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "on-failure" as const,
-      exitCode: 1, exitReason: "error",
-    });
-
-    const stateFailDaemon = { ...s1, processes: processes2 };
-    const [newState2] = transition(stateFailDaemon, timerEvent("housekeep"));
-
-    const newDaemons2 = [...newState2.processes.values()].filter(
-      p => p.name === "failure-daemon" && p.pid !== "failure-daemon"
-    );
-    expect(newDaemons2).toHaveLength(1);
-  });
-
-  test("dead daemon with restartPolicy='never' does not restart", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    const processes = new Map(s1.processes);
-
-    processes.set("no-restart", {
-      pid: "no-restart", type: "daemon" as const, state: "dead" as const,
-      name: "no-restart-daemon", parentPid: null, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 3, tokensUsed: 100, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "never" as const,
-      exitCode: 1, exitReason: "error",
-    });
-
-    const stateNoRestart = { ...s1, processes };
-    const [newState] = transition(stateNoRestart, timerEvent("housekeep"));
-
-    const newDaemons = [...newState.processes.values()].filter(
-      p => p.name === "no-restart-daemon" && p.pid !== "no-restart"
-    );
-    expect(newDaemons).toHaveLength(0);
-  });
-
-  test("restarted daemon preserves checkpoint from dead process", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    const processes = new Map(s1.processes);
-
-    const checkpoint = {
-      pid: "cp-daemon",
-      capturedAt: new Date().toISOString(),
-      conversationSummary: "was doing important work",
-      pendingObjectives: ["finish the thing"],
-      artifacts: { "key": "value" },
-    };
-
-    processes.set("cp-daemon", {
-      pid: "cp-daemon", type: "daemon" as const, state: "dead" as const,
-      name: "checkpointed-daemon", parentPid: null, objective: "work", priority: 50,
-      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
-      tickCount: 5, tokensUsed: 300, model: "gpt-4", workingDir: "/tmp",
-      children: [], onParentDeath: "orphan" as const, restartPolicy: "always" as const,
-      exitCode: 0, exitReason: "completed",
-      checkpoint,
-    });
-
-    const stateWithCheckpoint = { ...s1, processes };
-    const [newState] = transition(stateWithCheckpoint, timerEvent("housekeep"));
-
-    const newDaemons = [...newState.processes.values()].filter(
-      p => p.name === "checkpointed-daemon" && p.pid !== "cp-daemon"
-    );
-    expect(newDaemons).toHaveLength(1);
-    expect(newDaemons[0]!.checkpoint).toBeDefined();
-    expect(newDaemons[0]!.checkpoint!.conversationSummary).toBe("was doing important work");
-  });
-});
-
-describe("transition — housekeep strategy application", () => {
-  test("matched strategy IDs produce apply_strategies effect and set activeStrategyId", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    const stateWithStrategies = {
-      ...s1,
-      matchedStrategyIds: new Set(["strategy-1", "strategy-2"]),
-    };
-
-    const [newState, effects] = transition(stateWithStrategies, timerEvent("housekeep"));
-
-    // activeStrategyId should be set to the first matched strategy
-    expect(newState.activeStrategyId).toBe("strategy-1");
-
-    // Should emit apply_strategies effect
-    const strategyEffects = effects.filter(e => e.type === "apply_strategies");
-    expect(strategyEffects).toHaveLength(1);
-    expect(strategyEffects[0]!.type === "apply_strategies" && strategyEffects[0]!.strategyIds).toEqual(
-      expect.arrayContaining(["strategy-1", "strategy-2"])
-    );
-  });
-
-  test("empty matchedStrategyIds does not produce apply_strategies effect", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    // matchedStrategyIds is empty by default
-    const [newState, effects] = transition(s1, timerEvent("housekeep"));
-
-    expect(newState.activeStrategyId).toBeNull();
-
-    const strategyEffects = effects.filter(e => e.type === "apply_strategies");
-    expect(strategyEffects).toHaveLength(0);
-  });
-});
-
-describe("transition — housekeep rebuild_dag effect", () => {
-  test("housekeep emits rebuild_dag effect", () => {
-    const state = makeState();
-    const [s1] = transition(state, bootEvent("test"));
-
-    const [, effects] = transition(s1, timerEvent("housekeep"));
-
-    const dagEffects = effects.filter(e => e.type === "rebuild_dag");
-    expect(dagEffects).toHaveLength(1);
-  });
-});
+// rebuild_dag removed from housekeep — only emitted on process exit/failure now.
 
 // ---------------------------------------------------------------------------
 // Wave 4: Scheduling Through Transition
@@ -3820,9 +3145,16 @@ describe("transition — metacog_response_received", () => {
     expect(spawns).toHaveLength(0);
   });
 
-  test("clears pending triggers after processing", () => {
+  test("clears pending triggers after processing when living processes exist", () => {
+    const base = makeState();
+    const processes = new Map(base.processes);
+    processes.set("alive-1", {
+      ...makeProcess("alive-1", "worker"),
+      state: "running",
+    } as any);
     const state = {
-      ...makeState(),
+      ...base,
+      processes,
       metacogInflight: true,
       pendingTriggers: ["boot", "process_completed"] as any[],
     };
@@ -3835,6 +3167,25 @@ describe("transition — metacog_response_received", () => {
     const [newState] = transition(state, metacogResponseEvent(response));
 
     expect(newState.pendingTriggers).toHaveLength(0);
+  });
+
+  test("preserves pending triggers when all processes are dead", () => {
+    const state = {
+      ...makeState(),
+      metacogInflight: true,
+      pendingTriggers: ["process_completed"] as any[],
+    };
+    const response = JSON.stringify({
+      assessment: "processed",
+      topology: null,
+      memory: [],
+      halt: null,
+    });
+    const [newState] = transition(state, metacogResponseEvent(response));
+
+    // Triggers preserved so metacog gets another evaluation pass
+    expect(newState.pendingTriggers).toHaveLength(1);
+    expect(newState.pendingTriggers[0]).toBe("process_completed");
   });
 
   test("records metacog history entry with assessment and trigger", () => {
@@ -3938,43 +3289,8 @@ describe("transition — awareness_response_received", () => {
     expect(newState.awarenessNotes).toEqual(["consider cost efficiency", "watch for oscillation"]);
   });
 
-  test("applies kill threshold adjustment", () => {
-    const state = { ...makeState(), killThresholdAdjustment: 0.1 };
-    const [newState] = transition(
-      state,
-      awarenessEvent({
-        adjustments: [{ kind: "adjust_kill_threshold", delta: 0.05, reason: "too aggressive" }],
-      }),
-    );
-
-    expect(newState.killThresholdAdjustment).toBeCloseTo(0.15);
-  });
-
-  test("sets metacog focus from adjustment", () => {
-    const state = makeState();
-    const [newState] = transition(
-      state,
-      awarenessEvent({
-        adjustments: [{ kind: "suggest_metacog_focus", area: "resource efficiency", reason: "high token spend" }],
-      }),
-    );
-
-    expect(newState.metacogFocus).toBe("resource efficiency");
-  });
-
-  test("stores flagged heuristics as blind spots", () => {
-    const state = makeState();
-    const flagged = [
-      { id: "h-001", reason: "stale confidence" },
-      { id: "h-002", reason: "contradicted by recent outcome" },
-    ];
-    const [newState] = transition(
-      state,
-      awarenessEvent({ flaggedHeuristics: flagged }),
-    );
-
-    expect(newState.blindSpots).toEqual(flagged);
-  });
+  // killThresholdAdjustment, metacogFocus, and blindSpots removed from KernelState.
+  // Awareness adjustments are no longer processed in the transition function.
 
   test("emits protocol event for observability", () => {
     const state = makeState();
@@ -4009,61 +3325,8 @@ describe("transition — awareness_response_received", () => {
     expect(newState.awarenessNotes).not.toContain("old-note-1");
   });
 
-  test("stores oscillation warnings from detect_oscillation adjustments", () => {
-    const state = makeState();
-    const [newState] = transition(
-      state,
-      awarenessEvent({
-        adjustments: [
-          { kind: "detect_oscillation", processType: "lifecycle", killCount: 3, respawnCount: 3, windowTicks: 10 },
-        ],
-      }),
-    );
-
-    expect(newState.oscillationWarnings).toHaveLength(1);
-    expect(newState.oscillationWarnings[0]).toMatchObject({
-      processType: "lifecycle",
-      killCount: 3,
-      respawnCount: 3,
-    });
-  });
-
-  test("handles multiple adjustment types in single event", () => {
-    const state = { ...makeState(), killThresholdAdjustment: 0 };
-    const [newState] = transition(
-      state,
-      awarenessEvent({
-        notes: ["multi-test"],
-        adjustments: [
-          { kind: "adjust_kill_threshold", delta: 0.2, reason: "premature kills" },
-          { kind: "suggest_metacog_focus", area: "parallelism", reason: "underutilized" },
-          { kind: "detect_oscillation", processType: "event", killCount: 5, respawnCount: 4, windowTicks: 8 },
-          { kind: "noop", reasoning: "nothing else to do" },
-        ],
-        flaggedHeuristics: [{ id: "h-99", reason: "stale" }],
-      }),
-    );
-
-    expect(newState.killThresholdAdjustment).toBeCloseTo(0.2);
-    expect(newState.metacogFocus).toBe("parallelism");
-    expect(newState.oscillationWarnings).toHaveLength(1);
-    expect(newState.blindSpots).toEqual([{ id: "h-99", reason: "stale" }]);
-    expect(newState.awarenessNotes).toEqual(["multi-test"]);
-  });
-
-  test("noop adjustments do not alter state", () => {
-    const state = makeState();
-    const [newState] = transition(
-      state,
-      awarenessEvent({
-        adjustments: [{ kind: "noop", reasoning: "no action needed" }],
-      }),
-    );
-
-    expect(newState.killThresholdAdjustment).toBe(0);
-    expect(newState.metacogFocus).toBeNull();
-    expect(newState.oscillationWarnings).toHaveLength(0);
-  });
+  // oscillationWarnings, killThresholdAdjustment, metacogFocus, blindSpots removed.
+  // Multiple adjustment types and noop tests no longer applicable.
 });
 
 // ---------------------------------------------------------------------------
@@ -4172,15 +3435,12 @@ describe("transition — llm_turn_completed", () => {
   });
 
   test("idle command keeps process alive", () => {
-    const { state, orchestratorPid } = bootAndGetOrchestrator();
-    // First: satisfy hard spawn enforcement with a spawn, then do idle on second tick
-    const [s1] = transition(state, llmTurnCompletedEvent(orchestratorPid, {
-      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
-    }));
-    // Find the worker we spawned
-    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    const { state } = bootAndGetOrchestrator();
+    // Add a worker process manually
+    const workerState = addProcess(state, "w1", { priority: 50 });
+    const worker = [...workerState.processes.values()].find(p => p.name === "w1")!;
     // Worker goes idle
-    const [s2] = transition(s1, llmTurnCompletedEvent(worker.pid, {
+    const [s2] = transition(workerState, llmTurnCompletedEvent(worker.pid, {
       commands: [{ kind: "idle", wakeOnSignals: ["tick:1"] }],
     }));
 

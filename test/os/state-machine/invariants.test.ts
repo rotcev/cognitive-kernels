@@ -304,7 +304,7 @@ describe("Transition invariants (property-based)", () => {
     );
   });
 
-  test("INVARIANT: boot always produces processes and sets goal", () => {
+  test("INVARIANT: boot always sets goal and pendingTriggers", () => {
     fc.assert(
       fc.property(
         arbState,
@@ -314,14 +314,11 @@ describe("Transition invariants (property-based)", () => {
             type: "boot", goal, timestamp: Date.now(), seq: 0,
           });
 
-          // Boot always creates at least 1 process (metacog-daemon)
-          expect(newState.processes.size).toBeGreaterThanOrEqual(1);
-
-          // Boot produces emit_protocol effects (no submit_llm — tick loop handles that)
-          expect(effects.some(e => e.type === "emit_protocol")).toBe(true);
-
           // Goal is always set
           expect(newState.goal).toBe(goal);
+
+          // Boot always sets pendingTriggers to include "boot"
+          expect(newState.pendingTriggers).toContain("boot");
         },
       ),
       { numRuns: 200 },
@@ -448,6 +445,7 @@ describe("Transition effect completeness (property-based)", () => {
           "process_failed", "dag_deadlock", "resource_exhaustion",
           "ipc_timeout", "priority_conflict", "checkpoint_restore",
           "goal_drift", "novel_situation", "tick_stall", "observation_failed",
+          "process_completed",
         ]);
         for (const trigger of newState.pendingTriggers) {
           expect(knownTriggers.has(trigger)).toBe(true);

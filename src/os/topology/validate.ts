@@ -27,35 +27,44 @@ export function validateTopology(expr: TopologyExpr): TopologyValidationResult {
 }
 
 function collectNames(expr: TopologyExpr, names: string[]): void {
+  if (!expr || typeof expr !== "object") return;
   switch (expr.type) {
     case "task":
-      names.push(expr.name);
+      if (expr.name) names.push(expr.name);
       break;
     case "seq":
     case "par":
-      for (const child of expr.children) collectNames(child, names);
+      if (Array.isArray(expr.children)) {
+        for (const child of expr.children) collectNames(child, names);
+      }
       break;
     case "gate":
-      collectNames(expr.child, names);
+      if (expr.child) collectNames(expr.child, names);
       break;
   }
 }
 
 function collectErrors(expr: TopologyExpr, path: string, errors: TopologyValidationError[]): void {
+  if (!expr || typeof expr !== "object") {
+    errors.push({ path, message: "topology node must be an object" });
+    return;
+  }
+
   switch (expr.type) {
     case "task": {
-      if (!expr.name || expr.name.trim() === "") {
+      if (!expr.name || typeof expr.name !== "string" || expr.name.trim() === "") {
         errors.push({ path, message: "task name must not be empty" });
       }
-      if (!expr.objective || expr.objective.trim() === "") {
+      if (!expr.objective || typeof expr.objective !== "string" || expr.objective.trim() === "") {
         errors.push({ path, message: "task objective must not be empty" });
       }
       break;
     }
     case "seq":
     case "par": {
-      if (expr.children.length === 0) {
+      if (!Array.isArray(expr.children) || expr.children.length === 0) {
         errors.push({ path, message: `${expr.type} must have at least one child` });
+        break;
       }
       for (let i = 0; i < expr.children.length; i++) {
         collectErrors(expr.children[i], `${path}.${expr.type}[${i}]`, errors);
@@ -63,7 +72,15 @@ function collectErrors(expr: TopologyExpr, path: string, errors: TopologyValidat
       break;
     }
     case "gate": {
+      if (!expr.child) {
+        errors.push({ path, message: "gate must have a child" });
+        break;
+      }
       collectErrors(expr.child, `${path}.gate`, errors);
+      break;
+    }
+    default: {
+      errors.push({ path, message: `unknown topology node type: "${(expr as any).type}"` });
       break;
     }
   }

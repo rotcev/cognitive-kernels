@@ -90,6 +90,9 @@ function strictifySchema(schema: unknown): unknown {
       result[key] = props;
     } else if (key === "items") {
       result[key] = strictifySchema(value);
+    } else if ((key === "anyOf" || key === "oneOf" || key === "allOf") && Array.isArray(value)) {
+      // Recurse into each variant — objects inside anyOf need additionalProperties too
+      result[key] = value.map(strictifySchema);
     } else {
       result[key] = value;
     }
@@ -292,8 +295,22 @@ export class CodexBrainThread implements BrainThread {
       }
 
       const turn = await this.thread.run(input, sdkOpts);
+
+      // When outputSchema is provided, the structured output may be in the last
+      // agent_message item rather than finalResponse (which can be empty).
+      let response = turn.finalResponse;
+      if (!response && turnOptions?.outputSchema && turn.items.length > 0) {
+        for (let i = turn.items.length - 1; i >= 0; i--) {
+          const item = turn.items[i]!;
+          if (item.type === "agent_message" && (item as any).text) {
+            response = (item as any).text;
+            break;
+          }
+        }
+      }
+
       return {
-        finalResponse: turn.finalResponse,
+        finalResponse: response,
         usage: turn.usage ? normalizeUsage(turn.usage) : undefined,
       };
     } finally {

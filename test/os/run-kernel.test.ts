@@ -120,18 +120,17 @@ describe("runKernel", () => {
     expect(state.goal).toBe("say hello");
   }, 10_000);
 
-  it("boot event creates metacog-daemon process", async () => {
+  it("boot creates no daemon processes (metacog/awareness are kernel-level modules)", async () => {
     const brain = makeHaltingBrain();
     const config = makeTestConfig();
 
     const state = await runKernel("test goal", config, brain, null);
 
-    // Find metacog-daemon in process table
+    // No metacog-daemon or awareness-daemon in process table — they're kernel-level modules now
     const metacogDaemon = [...state.processes.values()].find(
       (p) => p.name === "metacog-daemon",
     );
-    expect(metacogDaemon).toBeDefined();
-    expect(metacogDaemon!.type).toBe("daemon");
+    expect(metacogDaemon).toBeUndefined();
   }, 10_000);
 
   it("halt reason is set", async () => {

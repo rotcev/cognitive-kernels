@@ -286,7 +286,8 @@ export type OsMetacogTrigger =
   | "goal_drift"
   | "novel_situation"
   | "tick_stall"
-  | "observation_failed";
+  | "observation_failed"
+  | "process_completed";
 
 // ─── Scheduling Strategy ─────────────────────────────────────────
 

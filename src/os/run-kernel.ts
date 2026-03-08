@@ -63,7 +63,7 @@ export async function runKernel(
 
   // Schedule initial wall-clock timers
   await interpreter.interpret(
-    { type: "schedule_timer", timer: "metacog", delayMs: 5_000, seq: 0 },
+    { type: "schedule_timer", timer: "metacog", delayMs: config.kernel.metacogIntervalMs ?? 60_000, seq: 0 },
     state,
   );
   await interpreter.interpret(
@@ -93,6 +93,21 @@ export async function runKernel(
 
     for (const effect of effects) {
       await interpreter.interpret(effect, state);
+    }
+
+    // After every transition, check halt conditions
+    if (!state.halted) {
+      const [haltState, haltEffects] = transition(state, {
+        type: "halt_check",
+        result: false,
+        reason: null,
+        timestamp: Date.now(),
+        seq: seq++,
+      } as KernelEvent);
+      state = haltState;
+      for (const effect of haltEffects) {
+        await interpreter.interpret(effect, state);
+      }
     }
   }
 
@@ -131,6 +146,14 @@ export function stateToSnapshot(state: KernelState): OsSystemSnapshot {
     }
   }
 
+  const deferrals = Array.from(state.deferrals?.values() ?? []).map(d => ({
+    id: d.id,
+    name: d.descriptor.name,
+    condition: d.condition,
+    waitedTicks: state.tickCount - d.registeredByTick,
+    reason: d.reason,
+  }));
+
   return {
     runId: state.runId,
     tickCount: state.tickCount,
@@ -149,6 +172,7 @@ export function stateToSnapshot(state: KernelState): OsSystemSnapshot {
       signalCount: 0,
       blackboardKeyCount: state.blackboard.size,
     },
+    deferrals,
     progressMetrics: {
       activeProcessCount,
       stalledProcessCount,

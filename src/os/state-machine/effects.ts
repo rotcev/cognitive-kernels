@@ -91,6 +91,8 @@ export type EmitProtocolEffect = BaseEffect & {
   type: "emit_protocol";
   action: string;
   message: string;
+  /** Structured detail payload — carries typed data alongside the human-readable message. */
+  detail?: Record<string, unknown>;
 };
 
 /** Kernel is halting. */

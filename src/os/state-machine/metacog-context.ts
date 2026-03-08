@@ -71,11 +71,6 @@ export function buildMetacogContextPure(state: KernelState): MetacogContext {
     summaries[key] = val.length > 200 ? val.slice(0, 200) + "..." : val;
   }
 
-  // Kill threshold calibration
-  const avgTokenSavedPerKill = state.killEvalHistory.length > 0
-    ? state.killEvalHistory.reduce((sum: number, r: any) => sum + r.tokenDelta, 0) / state.killEvalHistory.length
-    : undefined;
-
   // Deferrals
   const deferrals = state.deferrals.size > 0
     ? Array.from(state.deferrals.values()).map(ds => ({
@@ -118,15 +113,10 @@ export function buildMetacogContextPure(state: KernelState): MetacogContext {
     relevantHeuristics: state.schedulerHeuristics,
     systemComplexity,
     awarenessNotes: state.awarenessNotes.length > 0 ? [...state.awarenessNotes] : undefined,
-    metacogFocus: state.metacogFocus ?? undefined,
-    oscillationWarnings: state.oscillationWarnings.length > 0 ? [...state.oscillationWarnings] : undefined,
-    detectedBlindSpots: state.blindSpots.length > 0 ? [...state.blindSpots] : undefined,
     blackboardValueSummaries: Object.keys(summaries).length > 0 ? summaries : undefined,
     deferrals,
     observationResults: observationResults.length > 0 ? observationResults : undefined,
     flaggedHeuristics,
-    killThresholdAdjustment: state.killThresholdAdjustment !== 0 ? state.killThresholdAdjustment : undefined,
-    avgTokenSavedPerKill,
     sinceLastWakeSec,
   };
 }

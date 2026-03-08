@@ -1,18 +1,4 @@
 {
-  "heuristics": [
-    {
-      "id": "6f97f459-46b5-4b2f-acbc-3619c33656c5",
-      "heuristic": "Avoid spawning exploratory scout workers in this project/runtime configuration with unsupported external model defaults; prefer the known-supported default executor or reuse existing scout outputs unless a new scout is strictly necessary.",
-      "confidence": 0.10000000000000007,
-      "context": "Three scout processes failed with the same unsupported-model error while contract planning succeeded from existing outputs; repeated retries would waste tokens without advancing the goal.",
-      "source": {
-        "runId": "0205e1a0-b855-44fa-9357-a50d3b6c7687"
-      },
-      "reinforcementCount": 0,
-      "learnedAt": "2026-03-06T06:18:57.377Z",
-      "reinforcedAt": "2026-03-06T06:18:57.377Z",
-      "scope": "local"
-    }
-  ],
+  "heuristics": [],
   "promotionLog": []
 }

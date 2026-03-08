@@ -5,7 +5,7 @@ import { parse as parseToml } from "smol-toml";
 import { parseOsConfig } from "./config.js";
 import { OsProtocolEmitter } from "./protocol-emitter.js";
 import { createBrain } from "../brain/create-brain.js";
-import { createDbConnection } from "../db/connection.js";
+import { createDbConnectionAsync } from "../db/connection.js";
 import { NeonStorageBackend } from "../db/storage-backend.js";
 import { ScopedMemoryStore } from "./scoped-memory-store.js";
 import { runKernel, stateToSnapshot } from "./run-kernel.js";
@@ -37,10 +37,10 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
 
   const osConfig = parseOsConfig(osConfigRaw);
 
-  // Provider priority: explicit input > TOML [codex] section > default "claude"
+  // Provider priority: explicit input > TOML [codex] section > default "codex"
   const codexSection = parsedToml.codex as Record<string, unknown> | undefined;
   const provider: "codex" | "claude" = input.provider
-    ?? (codexSection?.provider === "codex" ? "codex" : "claude");
+    ?? (codexSection?.provider === "claude" ? "claude" : "codex");
 
   // When using Codex SDK, default all model fields to gpt-5.3-codex unless explicitly set in TOML
   if (provider === "codex") {
@@ -89,7 +89,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
 
   if (input.protocolLogPath && process.env.DATABASE_URL) {
     // Dual-write: filesystem + DB
-    const db = createDbConnection(process.env.DATABASE_URL);
+    const db = await createDbConnectionAsync(process.env.DATABASE_URL);
     const backend = new NeonStorageBackend(db);
     await backend.connect();
     const snapshotPath = path.join(path.dirname(input.protocolLogPath), "os-snapshot.json");
@@ -111,7 +111,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
     });
   } else if (process.env.DATABASE_URL && input.runId) {
     // DB-only mode
-    const db = createDbConnection(process.env.DATABASE_URL);
+    const db = await createDbConnectionAsync(process.env.DATABASE_URL);
     const backend = new NeonStorageBackend(db);
     await backend.connect();
     emitter = new OsProtocolEmitter({

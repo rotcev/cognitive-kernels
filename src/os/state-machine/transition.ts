@@ -77,91 +77,10 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
 
   const now = new Date().toISOString();
 
-  // Spawn memory-consolidator daemon (conditionally)
-  if (event.hasNewEpisodicData && event.consolidatorObjective) {
-    const consolidatorPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-    const consolidator: OsProcess = {
-      pid: consolidatorPid,
-      type: "daemon",
-      state: "running",
-      name: "memory-consolidator",
-      parentPid: null,
-      objective: event.consolidatorObjective,
-      priority: 20,
-      spawnedAt: now,
-      lastActiveAt: now,
-      tickCount: 0,
-      tokensUsed: 0,
-      model: state.config.kernel.processModel,
-      workingDir,
-      children: [],
-      onParentDeath: "orphan",
-      restartPolicy: "never",
-    };
-    processes.set(consolidatorPid, consolidator);
-  } else {
-    effects.push({
-      type: "emit_protocol",
-      action: "os_boot",
-      message: "memory-consolidator skipped: no new episodic data",
-    });
-  }
-
-  // NOTE: No submit_metacog effect here — boot sets pendingTriggers: ["boot"],
-  // and the metacog timer will see the trigger and emit run_metacog.
-  // NOTE: No submit_llm effect here — boot only sets up the process topology.
-  // The kernel's tick loop / scheduling pass handles actual LLM submission.
-
-  // Spawn metacog-daemon
-  const metacogPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-  const metacogDaemon: OsProcess = {
-    pid: metacogPid,
-    type: "daemon",
-    state: "idle",
-    name: "metacog-daemon",
-    parentPid: null,
-    objective: "Periodically evaluate system state and issue metacognitive commands",
-    priority: 50,
-    spawnedAt: now,
-    lastActiveAt: now,
-    tickCount: 0,
-    tokensUsed: 0,
-    model: state.config.kernel.metacogModel,
-    workingDir,
-    children: [],
-    onParentDeath: "orphan",
-    restartPolicy: "always",
-  };
-  processes.set(metacogPid, metacogDaemon);
-
-  // Spawn awareness-daemon (conditionally)
-  if (event.awarenessEnabled) {
-    const awarenessPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-    const awarenessDaemon: OsProcess = {
-      pid: awarenessPid,
-      type: "daemon",
-      state: "idle",
-      name: "awareness-daemon",
-      parentPid: null,
-      objective: "Monitor metacog decision quality and inject corrective awareness notes",
-      priority: 30,
-      spawnedAt: now,
-      lastActiveAt: now,
-      tickCount: 0,
-      tokensUsed: 0,
-      model: event.awarenessModel ?? state.config.kernel.processModel,
-      workingDir,
-      children: [],
-      onParentDeath: "orphan",
-      restartPolicy: "on-failure",
-    };
-    processes.set(awarenessPid, awarenessDaemon);
-    effects.push({
-      type: "emit_protocol",
-      action: "os_process_spawn",
-      message: "boot awareness-daemon",
-    });
-  }
+  // NOTE: Metacog and awareness are kernel-level modules, not processes.
+  // Memory consolidation is handled by the persist_memory effect, not a daemon process.
+  // The metacog timer handles when to run metacog. Boot sets pendingTriggers: ["boot"]
+  // so the first metacog timer fire will trigger an evaluation.
 
   // Pre-seed design guidelines on blackboard
   blackboard.set("system:design-guidelines", {
@@ -230,44 +149,18 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
     return [state, []];
   }
 
-  // 5. All processes dead — halt
+  // 5. All processes dead — halt (but only if metacog has had a chance to evaluate)
   const livingProcesses = [...state.processes.values()].filter(p => p.state !== "dead");
   if (livingProcesses.length === 0) {
+    // Don't halt if metacog still needs to evaluate (pending triggers or inflight)
+    if (state.pendingTriggers.length > 0 || state.metacogInflight) {
+      return [state, []];
+    }
     return haltWith(state, "all_processes_dead", effects);
   }
 
-  // 6. Grace period: only daemons remain
-  const goalProcesses = livingProcesses.filter(p => p.type !== "daemon");
-  if (goalProcesses.length === 0) {
-    const gracePeriodMs = config.goalCompleteGracePeriodMs ?? 30_000;
-
-    if (state.goalWorkDoneAt === 0) {
-      // Start grace period
-      effects.push({
-        type: "emit_protocol",
-        action: "os_halt_grace_period",
-        message: `only daemons remain — starting ${gracePeriodMs}ms grace period`,
-      });
-      return [{ ...state, goalWorkDoneAt: now }, assignEffectSeqs(effects)];
-    }
-
-    if (now - state.goalWorkDoneAt >= gracePeriodMs) {
-      return haltWith(state, "goal_work_complete", effects);
-    }
-
-    // Still within grace period
-    return [state, []];
-  } else {
-    // Lifecycle processes exist — reset grace period if it was active
-    if (state.goalWorkDoneAt > 0) {
-      effects.push({
-        type: "emit_protocol",
-        action: "os_halt_grace_period",
-        message: "grace period canceled — lifecycle processes respawned",
-      });
-      return [{ ...state, goalWorkDoneAt: 0 }, assignEffectSeqs(effects)];
-    }
-  }
+  // 6. All living processes are accounted for — no special daemon grace period needed.
+  // If metacog needs to spawn more work, it will do so on its next timer tick.
 
   return [state, []];
 }
@@ -357,83 +250,9 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
     ];
   }
 
-  // --- Hard Spawn Enforcement ---
-  // Top-level orchestrator's first tick must spawn children.
-  if (
-    !updatedProc.parentPid &&
-    updatedProc.type === "lifecycle" &&
-    updatedProc.tickCount === 1
-  ) {
-    const hasSpawnCommand = event.commands.some(c =>
-      c.kind === "spawn_child" || c.kind === "spawn_system" || c.kind === "spawn_kernel" || c.kind === "spawn_ephemeral" || c.kind === "spawn_graph"
-    );
-    if (!hasSpawnCommand) {
-      // Preserve bb_write commands before rejecting
-      const bbWrites = event.commands.filter(c => c.kind === "bb_write");
-      for (const cmd of bbWrites) {
-        if (cmd.kind === "bb_write") {
-          processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
-        }
-      }
-      effects.push({
-        type: "emit_protocol",
-        action: "os_command_rejected",
-        message: `tick 0 rejected: orchestrator produced zero spawn commands — must design topology and spawn child processes (preserved ${bbWrites.length} bb_write commands)`,
-      });
-      processes.set(event.pid, updatedProc);
-      return [
-        { ...state, processes, blackboard, pendingTriggers, lastProcessCompletionTime: Date.now() },
-        assignEffectSeqs(effects),
-      ];
-    }
-  }
-
-  // --- Architect-Phase Deadlock Enforcement ---
-  if (
-    !updatedProc.parentPid &&
-    updatedProc.type === "lifecycle" &&
-    updatedProc.tickCount >= 1
-  ) {
-    const hasLifecycleChildren = [...processes.values()].some(
-      p => p.parentPid === updatedProc.pid && p.type === "lifecycle"
-    );
-    const hasScoutResults = [...blackboard.keys()].some(
-      key => key.startsWith("ephemeral:") || key.startsWith("scout:")
-    );
-    const spawnsLifecycle = event.commands.some(c =>
-      c.kind === "spawn_child" || c.kind === "spawn_graph"
-    );
-
-    if (!hasLifecycleChildren && hasScoutResults && !spawnsLifecycle) {
-      // Preserve bb_write and ephemeral commands
-      const preservable = event.commands.filter(c => c.kind === "bb_write" || c.kind === "spawn_ephemeral");
-      for (const cmd of preservable) {
-        if (cmd.kind === "bb_write") {
-          processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
-        }
-      }
-      // Ephemeral spawn effects from preservable commands
-      for (const cmd of preservable) {
-        if (cmd.kind === "spawn_ephemeral") {
-          const [ephProc, ephEffects] = processSpawnEphemeral(state, processes, updatedProc, cmd);
-          if (ephProc) {
-            processes.set(ephProc.pid, ephProc);
-            effects.push(...ephEffects);
-          }
-        }
-      }
-      effects.push({
-        type: "emit_protocol",
-        action: "os_command_rejected",
-        message: `architect-phase deadlock: scout data available but no lifecycle children spawned (preserved ${preservable.length} commands)`,
-      });
-      processes.set(event.pid, updatedProc);
-      return [
-        { ...state, processes, blackboard, deferrals, pendingTriggers, lastProcessCompletionTime: Date.now() },
-        assignEffectSeqs(effects),
-      ];
-    }
-  }
+  // NOTE: Hard spawn enforcement removed — in the pure kernel, the metacog
+  // handles topology (spawning workers). Worker processes spawned via topology
+  // are lifecycle processes that do work directly, not orchestrators.
 
   // --- Execute commands ---
   // Reorder: exit LAST so bb_write/signals run before death
@@ -580,117 +399,6 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         break;
       }
 
-      case "spawn_child": {
-        const [childProc, spawnEffects, deferEntry] = processSpawnChild(state, processes, deferrals, updatedProc, cmd);
-        if (deferEntry) {
-          deferrals.set(deferEntry.id, deferEntry);
-          effects.push(...spawnEffects);
-        } else if (childProc) {
-          processes.set(childProc.pid, childProc);
-          // Register as child
-          updatedProc.children = [...(updatedProc.children ?? []), childProc.pid];
-          effects.push(...spawnEffects);
-        }
-        break;
-      }
-
-      case "spawn_graph": {
-        let immediateCount = 0;
-        let deferredCount = 0;
-        for (const node of cmd.nodes) {
-          const nodeDescriptor = {
-            type: node.type as "daemon" | "lifecycle" | "event",
-            name: node.name,
-            objective: node.objective,
-            priority: node.priority ?? 50,
-            completionCriteria: node.completionCriteria,
-            capabilities: node.capabilities,
-            parentPid: event.pid,
-            model: state.config.kernel.processModel,
-            workingDir: updatedProc.workingDir,
-          };
-
-          if (!node.after || node.after.length === 0) {
-            // Immediate spawn
-            const childPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-            const child: OsProcess = {
-              pid: childPid,
-              ...nodeDescriptor,
-              state: "running",
-              spawnedAt: now,
-              lastActiveAt: now,
-              tickCount: 0,
-              tokensUsed: 0,
-              children: [],
-              onParentDeath: "orphan",
-              restartPolicy: "never",
-            };
-            processes.set(childPid, child);
-            updatedProc.children = [...(updatedProc.children ?? []), childPid];
-            immediateCount++;
-            effects.push({
-              type: "emit_protocol",
-              action: "os_process_spawn",
-              message: `parent=${event.pid} (graph immediate: "${node.name}")`,
-            });
-            effects.push({
-              type: "submit_llm",
-              pid: childPid,
-              name: node.name,
-              model: state.config.kernel.processModel,
-            });
-          } else {
-            // Parse after strings into DeferCondition
-            const conditions: DeferCondition[] = node.after.map(dep => {
-              if (dep.includes(":")) {
-                return { type: "blackboard_key_exists" as const, key: dep };
-              }
-              return { type: "process_dead_by_name" as const, name: dep };
-            });
-            const condition: DeferCondition = conditions.length === 1
-              ? conditions[0]!
-              : { type: "all_of", conditions };
-
-            // Dedup check
-            const hasDup = [...deferrals.values()].some(
-              d => d.descriptor.name === node.name && d.registeredByPid === event.pid
-            );
-            if (hasDup) {
-              effects.push({
-                type: "emit_protocol",
-                action: "os_command_rejected",
-                message: `defer dedup: graph node "${node.name}" already has pending deferral`,
-              });
-              continue;
-            }
-
-            const ds: DeferEntry = {
-              id: randomUUID(),
-              descriptor: nodeDescriptor,
-              condition,
-              registeredAt: now,
-              registeredAtMs: Date.now(),
-              registeredByTick: state.tickCount,
-              registeredByPid: event.pid,
-              reason: `graph node "${node.name}" after=[${node.after.join(", ")}]`,
-            };
-            deferrals.set(ds.id, ds);
-            deferredCount++;
-            effects.push({
-              type: "emit_protocol",
-              action: "os_defer",
-              message: `graph deferred: "${node.name}" after=[${node.after.join(", ")}]`,
-            });
-          }
-        }
-        effects.push({
-          type: "emit_protocol",
-          action: "os_defer",
-          message: `spawn_graph: ${immediateCount} immediate, ${deferredCount} deferred (${cmd.nodes.length} total nodes)`,
-        });
-        break;
-      }
-
       case "spawn_ephemeral": {
         const [ephProc, ephEffects] = processSpawnEphemeral(state, processes, updatedProc, cmd);
         if (ephProc) {
@@ -703,156 +411,7 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         break;
       }
 
-      case "spawn_system": {
-        if (!state.config.systemProcess?.enabled) {
-          effects.push({
-            type: "emit_protocol",
-            action: "os_command_rejected",
-            message: "spawn_system rejected: systemProcess.enabled is false",
-          });
-          break;
-        }
-        const systemCount = [...processes.values()].filter(
-          p => p.backend?.kind === "system" && p.state !== "dead"
-        ).length;
-        if (systemCount >= state.config.systemProcess.maxSystemProcesses) {
-          effects.push({
-            type: "emit_protocol",
-            action: "os_command_rejected",
-            message: `spawn_system rejected: max system processes (${state.config.systemProcess.maxSystemProcesses}) reached`,
-          });
-          break;
-        }
-        const sysPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-        const sysChild: OsProcess = {
-          pid: sysPid,
-          type: "lifecycle",
-          state: "running",
-          name: cmd.name,
-          parentPid: event.pid,
-          objective: `System process: ${cmd.command} ${(cmd.args ?? []).join(" ")}`,
-          priority: 50,
-          spawnedAt: now,
-          lastActiveAt: now,
-          tickCount: 0,
-          tokensUsed: 0,
-          model: state.config.kernel.processModel,
-          workingDir: updatedProc.workingDir,
-          children: [],
-          onParentDeath: "orphan",
-          restartPolicy: "never",
-          backend: { kind: "system", command: cmd.command, args: cmd.args, env: cmd.env },
-        };
-        processes.set(sysPid, sysChild);
-        updatedProc.children = [...(updatedProc.children ?? []), sysPid];
-        effects.push({
-          type: "start_shell",
-          pid: sysPid,
-          name: cmd.name,
-          command: cmd.command,
-          args: cmd.args ?? [],
-        });
-        effects.push({
-          type: "emit_protocol",
-          action: "os_system_spawn",
-          message: `command=${cmd.command} parent=${event.pid}`,
-        });
-        break;
-      }
-
-      case "spawn_kernel": {
-        if (!state.config.childKernel?.enabled) {
-          effects.push({
-            type: "emit_protocol",
-            action: "os_command_rejected",
-            message: "spawn_kernel rejected: childKernel.enabled is false",
-          });
-          break;
-        }
-        if (state.config.kernel.parentKernelId) {
-          effects.push({
-            type: "emit_protocol",
-            action: "os_command_rejected",
-            message: "spawn_kernel rejected: this kernel is already a child (depth limit)",
-          });
-          break;
-        }
-        const kernelCount = [...processes.values()].filter(
-          p => p.backend?.kind === "kernel" && p.state !== "dead"
-        ).length;
-        if (kernelCount >= state.config.childKernel.maxChildKernels) {
-          effects.push({
-            type: "emit_protocol",
-            action: "os_command_rejected",
-            message: `spawn_kernel rejected: max child kernels (${state.config.childKernel.maxChildKernels}) reached`,
-          });
-          break;
-        }
-        const kPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-        const kernelChild: OsProcess = {
-          pid: kPid,
-          type: "lifecycle",
-          state: "running",
-          name: cmd.name,
-          parentPid: event.pid,
-          objective: `Sub-kernel: ${cmd.goal}`,
-          priority: 50,
-          spawnedAt: now,
-          lastActiveAt: now,
-          tickCount: 0,
-          tokensUsed: 0,
-          model: state.config.kernel.processModel,
-          workingDir: updatedProc.workingDir,
-          children: [],
-          onParentDeath: "orphan",
-          restartPolicy: "never",
-          backend: { kind: "kernel", goal: cmd.goal, maxTicks: cmd.maxTicks },
-        };
-        processes.set(kPid, kernelChild);
-        updatedProc.children = [...(updatedProc.children ?? []), kPid];
-        effects.push({
-          type: "start_subkernel",
-          pid: kPid,
-          name: cmd.name,
-          goal: cmd.goal,
-        });
-        effects.push({
-          type: "emit_protocol",
-          action: "os_subkernel_spawn",
-          message: `goal=${cmd.goal} parent=${event.pid}`,
-        });
-        break;
-      }
-
       case "exit": {
-        // Executive Exit Prevention — root lifecycle process must not exit while topology is active
-        if (
-          !updatedProc.parentPid &&
-          updatedProc.type === "lifecycle"
-        ) {
-          const livingChildren = [...processes.values()].filter(
-            p => p.parentPid === event.pid && p.state !== "dead"
-          );
-          if (livingChildren.length > 0 || deferrals.size > 0) {
-            updatedProc.state = "idle";
-            updatedProc.wakeOnSignals = livingChildren.length > 0
-              ? ["child:done"]
-              : ["tick:1", "child:done"];
-            effects.push({
-              type: "idle_process",
-              pid: updatedProc.pid,
-              wakeOnSignals: updatedProc.wakeOnSignals,
-            });
-            effects.push({
-              type: "emit_protocol",
-              action: "os_command_rejected",
-              message: `executive exit prevented: ${livingChildren.length} living children, ${deferrals.size} pending deferrals`,
-            });
-            pendingTriggers.push("goal_drift");
-            break;
-          }
-        }
-
         // Kill the process
         updatedProc.state = "dead";
         updatedProc.exitCode = cmd.code;
@@ -895,21 +454,6 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         break;
       }
     }
-  }
-
-  // --- Auto-exit daemons ---
-  // Daemons that complete a turn without issuing exit/idle/sleep/checkpoint are done
-  const hasLifecycleCmd = event.commands.some(
-    c => c.kind === "exit" || c.kind === "idle" || c.kind === "sleep" || c.kind === "checkpoint"
-  );
-  if (!hasLifecycleCmd && updatedProc.type === "daemon" && updatedProc.state === "running") {
-    updatedProc.state = "dead";
-    updatedProc.exitReason = "auto-exit: daemon completed turn without lifecycle command";
-    effects.push({
-      type: "emit_protocol",
-      action: "os_process_exit",
-      message: "auto-exit: daemon completed turn without lifecycle command",
-    });
   }
 
   // Emit turn summary
@@ -1111,10 +655,10 @@ function processSpawnEphemeral(
     message: `parent=${parent.name} type=ephemeral model=${ephModel}`,
   });
   effects.push({
-    type: "submit_ephemeral",
+    type: "run_ephemeral",
     pid: ephPid,
-    ephemeralId: `eph-${randomUUID().slice(0, 12)}`,
-    name: ephName,
+    parentPid: parent.pid,
+    objective: cmd.objective,
     model: ephModel,
   });
 
@@ -1237,6 +781,19 @@ function handleEphemeralCompleted(state: KernelState, event: EphemeralCompletedE
       },
     });
     effects.push({ type: "flush_ipc" });
+
+    // Wake parent directly so it can process ephemeral results
+    if (event.parentPid) {
+      const parentProc = processes.get(event.parentPid);
+      if (parentProc && (parentProc.state === "idle" || parentProc.state === "sleeping")) {
+        const wokenParent = { ...parentProc, state: "running" as const, lastActiveAt: new Date().toISOString() };
+        processes.set(event.parentPid, wokenParent);
+        effects.push({
+          type: "activate_process",
+          pid: event.parentPid,
+        });
+      }
+    }
   }
 
   return [
@@ -1285,13 +842,11 @@ function handleMetacogTimer(state: KernelState): TransitionResult {
   const effects: KernelEffectInput[] = [];
   const pendingTriggers = [...state.pendingTriggers];
 
-  // Goal drift safety net — if metacog hasn't evaluated in too long with living goal work
+  // Goal drift safety net — if metacog hasn't evaluated in too long with living processes
   const ticksSinceMetacog = state.tickCount - state.lastMetacogTick;
   if (ticksSinceMetacog > 5 && state.tickCount > 0) {
-    const hasLivingGoalWork = [...state.processes.values()].some(
-      p => p.state !== "dead" && p.type !== "daemon"
-    );
-    if (hasLivingGoalWork && !pendingTriggers.includes("goal_drift")) {
+    const hasLivingWork = [...state.processes.values()].some(p => p.state !== "dead");
+    if (hasLivingWork && !pendingTriggers.includes("goal_drift")) {
       pendingTriggers.push("goal_drift");
     }
   }
@@ -1393,77 +948,7 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     }
   }
 
-  // 3. Stall detection
-  const liveEphemeralCount = [...processes.values()].filter(
-    p => p.type === "event" && p.state !== "dead"
-  ).length;
-  const pendingEphemeralCount = event.pendingEphemeralCount ?? 0;
-
-  let consecutiveIdleTicks = state.consecutiveIdleTicks;
-  if (state.inflight.size === 0 && liveEphemeralCount === 0) {
-    consecutiveIdleTicks += 1;
-
-    // Wall-clock stall: 5s with no inflight work
-    const wallStall = state.lastProcessCompletionTime > 0 &&
-      (nowMs - state.lastProcessCompletionTime) > 5_000;
-
-    if (consecutiveIdleTicks >= 3 || wallStall) {
-      const idleProcs = [...processes.values()].filter(p => p.state === "idle");
-      if (idleProcs.length > 0) {
-        // Force-wake all idle processes
-        for (const proc of idleProcs) {
-          const updated = { ...proc, state: "running" as const, lastActiveAt: now };
-          processes.set(proc.pid, updated);
-          effects.push({
-            type: "activate_process",
-            pid: proc.pid,
-          });
-        }
-        effects.push({
-          type: "emit_protocol",
-          action: "os_process_event",
-          message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${consecutiveIdleTicks} housekeep cycles (${state.lastProcessCompletionTime ? Math.round((nowMs - state.lastProcessCompletionTime) / 1000) + 's' : '?'} since last completion)`,
-        });
-        consecutiveIdleTicks = 0;
-      }
-    }
-  } else {
-    consecutiveIdleTicks = 0;
-  }
-
-  // 4. Phase-transition deadlock detection
-  const orchestrator = [...processes.values()].find(p => !p.parentPid && p.type === "lifecycle");
-  if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
-    const allLivingWork = [...processes.values()].filter(
-      p => p.pid !== orchestrator.pid && p.state !== "dead" && p.type !== "daemon"
-    );
-    const totalPendingEphemerals = pendingEphemeralCount + liveEphemeralCount;
-    if (allLivingWork.length === 0 && totalPendingEphemerals === 0) {
-      const pendingDeferrals = deferrals.size;
-      const bbKeyCount = event.bbKeyCount ?? 0;
-      const bbKeysAtLastForceWake = event.bbKeysAtLastForceWake ?? 0;
-      const lastForceWakeTime = event.lastForceWakeTime ?? 0;
-      const bbChanged = bbKeyCount !== bbKeysAtLastForceWake;
-      const wallCooldownExpired = (nowMs - lastForceWakeTime) > 10_000;
-      const nothingLeft = pendingDeferrals === 0 && allLivingWork.length === 0;
-
-      if (nothingLeft || bbChanged || wallCooldownExpired) {
-        const updated = { ...orchestrator, state: "running" as const, lastActiveAt: now };
-        processes.set(orchestrator.pid, updated);
-        effects.push({
-          type: "activate_process",
-          pid: orchestrator.pid,
-        });
-        effects.push({
-          type: "emit_protocol",
-          action: "os_process_event",
-          message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, wallCooldown=${wallCooldownExpired})`,
-        });
-      }
-    }
-  }
-
-  // 5. Zombie reaping — reparent orphaned children of dead processes to root
+  // 3. Zombie reaping — reparent orphaned children of dead processes to root
   const rootPid = [...processes.values()].find(p => !p.parentPid && p.type === "lifecycle")?.pid;
   for (const [pid, proc] of processes) {
     if (proc.state === "dead" && proc.children.length > 0) {
@@ -1506,102 +991,34 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     }
   }
 
-  // 7. Daemon restart — dead daemons with restartPolicy get respawned
-  for (const [pid, proc] of [...processes.entries()]) {
-    if (proc.state !== "dead") continue;
-    const shouldRestart =
-      proc.restartPolicy === "always" ||
-      (proc.restartPolicy === "on-failure" && proc.exitCode !== 0);
-    if (!shouldRestart) continue;
-
-    // Mark the dead process so it won't trigger another restart next tick
-    processes.set(pid, { ...proc, restartPolicy: "never" });
-
-    const newPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-    const now = new Date().toISOString();
-    const newProc: OsProcess = {
-      pid: newPid,
-      type: proc.type,
-      state: "running",
-      name: proc.name,
-      parentPid: proc.parentPid,
-      objective: proc.objective,
-      priority: proc.priority,
-      spawnedAt: now,
-      lastActiveAt: now,
-      tickCount: 0,
-      tokensUsed: 0,
-      model: proc.model,
-      workingDir: proc.workingDir,
-      children: [],
-      onParentDeath: proc.onParentDeath,
-      restartPolicy: proc.type === "daemon" ? "on-failure" : "never",
-      tokenBudget: proc.tokenBudget,
-    };
-
-    // Copy checkpoint from dead process if it had one
-    if (proc.checkpoint) {
-      newProc.checkpoint = JSON.parse(JSON.stringify(proc.checkpoint));
-    }
-
-    processes.set(newPid, newProc);
-
-    // Register as child of parent
-    if (newProc.parentPid) {
-      const parent = processes.get(newProc.parentPid);
-      if (parent && !parent.children.includes(newPid)) {
-        processes.set(newProc.parentPid, { ...parent, children: [...parent.children, newPid] });
-      }
-    }
-
-    effects.push({
-      type: "activate_process",
-      pid: newPid,
-    });
-    effects.push({
-      type: "submit_llm",
-      pid: newPid,
-      name: newProc.name,
-      model: newProc.model,
-    });
-    effects.push({
-      type: "emit_protocol",
-      action: "os_process_event",
-      message: `daemon_restart: restarted ${proc.name} as ${newPid} (policy=${proc.restartPolicy}, original=${pid})`,
-    });
-  }
-
-  // 7b. Goal drift trigger — if metacog hasn't evaluated in too long with living goal work,
+  // 4. Goal drift trigger — if metacog hasn't evaluated in too long with living processes,
   //     add goal_drift trigger so the kernel's metacog check will fire.
   const ticksSinceMetacog = state.tickCount - state.lastMetacogTick;
   if (ticksSinceMetacog > 5 && state.tickCount > 0) {
-    const hasLivingGoalWork = [...processes.values()].some(
-      p => p.state !== "dead" && p.type !== "daemon"
-    );
-    if (hasLivingGoalWork && !pendingTriggers.includes("goal_drift")) {
+    const hasLivingWork = [...processes.values()].some(p => p.state !== "dead");
+    if (hasLivingWork && !pendingTriggers.includes("goal_drift")) {
       pendingTriggers.push("goal_drift");
     }
   }
 
-  // 8. Strategy application — set activeStrategyId from boot-matched strategies
-  let activeStrategyId = state.activeStrategyId;
-  if (state.matchedStrategyIds.size > 0) {
-    // Pick the first matched strategy as active (consistent with prior behavior)
-    const firstId = [...state.matchedStrategyIds][0]!;
-    activeStrategyId = firstId;
+  // 4b. Reactive metacog — if pending triggers exist and metacog isn't inflight,
+  //     fire metacog immediately instead of waiting for the 60s timer.
+  //     This makes metacog event-driven (responds within 500ms of a trigger).
+  let metacogInflight = state.metacogInflight;
+  if (pendingTriggers.length > 0 && !metacogInflight) {
+    const stateForContext = { ...state, processes, pendingTriggers };
+    const context = buildMetacogContextPure(stateForContext);
     effects.push({
-      type: "apply_strategies",
-      strategyIds: [...state.matchedStrategyIds],
+      type: "run_metacog",
+      context,
     });
+    metacogInflight = true;
   }
 
-  // 9. Process deferrals — conditions may be met after sleeper/checkpoint/stall changes
+  // 5. Process deferrals
   processPureDeferrals(state, processes, deferrals, effects);
 
-  // 10. Rebuild DAG after all process changes
-  effects.push({ type: "rebuild_dag" });
-
-  // 11. Scheduling pass — select runnable processes and emit submit_llm effects (Wave 4)
+  // 6. Scheduling pass — select runnable processes and emit submit_llm effects
   const allProcs = [...processes.values()];
   const schedulerInput = {
     strategy: state.schedulerStrategy,
@@ -1614,7 +1031,7 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
   const { selected, roundRobinIndex: newRoundRobinIndex } = selectRunnable(allProcs, allProcs, schedulerInput);
 
   // Collect PIDs that already have a submit_llm effect from earlier steps
-  // (e.g., daemon restart, dead executive recovery) to avoid duplicates
+  // (e.g., topology reconciliation) to avoid duplicates
   const alreadySubmitted = new Set<string>();
   for (const eff of effects) {
     if (eff.type === "submit_llm") {
@@ -1634,6 +1051,14 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     });
   }
 
+  // Track all submit_llm PIDs in inflight set
+  const inflight = new Set(state.inflight);
+  for (const eff of effects) {
+    if (eff.type === "submit_llm") {
+      inflight.add(eff.pid);
+    }
+  }
+
   return [
     {
       ...state,
@@ -1641,8 +1066,8 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
       pendingTriggers,
       deferrals,
       housekeepCount,
-      consecutiveIdleTicks,
-      activeStrategyId,
+      inflight,
+      metacogInflight,
       schedulerRoundRobinIndex: newRoundRobinIndex,
     },
     assignEffectSeqs(effects),
@@ -2232,10 +1657,41 @@ function reconcileTopologyInto(
     state.inflight,
   );
 
-  // Convert reconcile effects to kernel effects
+  // Apply reconcile effects: create/kill/drain processes in state AND emit kernel effects
+  const processes = new Map(state.processes);
+  const drainingPids = new Set(state.drainingPids);
+  const now = new Date().toISOString();
+
   for (const re of reconcileEffects) {
     switch (re.type) {
-      case "spawn_process":
+      case "spawn_process": {
+        const pid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const newProc: OsProcess = {
+          pid,
+          type: "lifecycle",
+          state: "running",
+          name: re.name,
+          parentPid: null,
+          objective: re.objective,
+          priority: re.priority ?? 50,
+          spawnedAt: now,
+          lastActiveAt: now,
+          tickCount: 0,
+          tokensUsed: 0,
+          model: re.model ?? state.config.kernel.processModel,
+          workingDir: state.processes.values().next().value?.workingDir ?? "/tmp",
+          children: [],
+          onParentDeath: "orphan",
+          restartPolicy: "never",
+        };
+
+        // Handle non-LLM backends
+        if (re.backend) {
+          (newProc as any).backend = re.backend;
+        }
+
+        processes.set(pid, newProc);
+
         effects.push({
           type: "spawn_topology_process",
           name: re.name,
@@ -2244,15 +1700,47 @@ function reconcileTopologyInto(
           priority: re.priority,
           backend: re.backend,
         });
+        // Submit to LLM for execution
+        effects.push({
+          type: "submit_llm",
+          pid,
+          name: re.name,
+          model: newProc.model,
+        });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_spawn",
+          message: `topology: spawned ${re.name} as ${pid}`,
+          detail: {
+            pid,
+            name: re.name,
+            objective: re.objective,
+            model: newProc.model,
+            priority: re.priority,
+            backend: re.backend,
+          },
+        });
         break;
-      case "kill_process":
+      }
+      case "kill_process": {
+        const proc = processes.get(re.pid);
+        if (proc) {
+          processes.set(re.pid, { ...proc, state: "dead", exitReason: "killed by topology" });
+        }
         effects.push({ type: "kill_process", pid: re.pid, name: re.name });
         break;
-      case "drain_process":
+      }
+      case "drain_process": {
+        drainingPids.add(re.pid);
         effects.push({ type: "drain_process", pid: re.pid, name: re.name });
         break;
+      }
       case "activate_process":
         if (re.pid) {
+          const proc = processes.get(re.pid);
+          if (proc) {
+            processes.set(re.pid, { ...proc, state: "running", lastActiveAt: now });
+          }
           effects.push({ type: "activate_process", pid: re.pid });
         }
         break;
@@ -2262,7 +1750,34 @@ function reconcileTopologyInto(
     }
   }
 
-  return { state, effects };
+  // Track all submit_llm PIDs in inflight set
+  const inflight = new Set(state.inflight);
+  for (const eff of effects) {
+    if (eff.type === "submit_llm") {
+      inflight.add(eff.pid);
+    }
+  }
+
+  // Rebuild DAG topology from updated process table
+  const dagNodes: OsDagTopology["nodes"] = [];
+  const dagEdges: OsDagTopology["edges"] = [];
+  for (const [pid, proc] of processes) {
+    dagNodes.push({
+      pid,
+      name: proc.name,
+      type: proc.type,
+      state: proc.state,
+      priority: proc.priority,
+      parentPid: proc.parentPid,
+    });
+    if (proc.parentPid && processes.has(proc.parentPid)) {
+      dagEdges.push({ from: proc.parentPid, to: pid, relation: "parent-child" });
+    }
+  }
+  const dagTopology: OsDagTopology = { nodes: dagNodes, edges: dagEdges };
+
+  const newState: KernelState = { ...state, processes, drainingPids, inflight, dagTopology };
+  return { state: newState, effects };
 }
 
 // ---------------------------------------------------------------------------
@@ -2375,7 +1890,15 @@ function handleMetacogResponseReceived(
   }
 
   // ── Topology format: { assessment, topology, memory, halt, citedHeuristicIds } ──
-  const topology: TopologyExpr | null = parsed.topology ?? null;
+  // Topology can be an object (Claude) or a JSON string (Codex structured output)
+  let topology: TopologyExpr | null = null;
+  if (parsed.topology !== null && parsed.topology !== undefined) {
+    if (typeof parsed.topology === "string") {
+      try { topology = JSON.parse(parsed.topology); } catch { /* invalid JSON — treat as null */ }
+    } else {
+      topology = parsed.topology;
+    }
+  }
   const memory: MetacogMemoryCommand[] = Array.isArray(parsed.memory) ? parsed.memory : [];
   const halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null = parsed.halt ?? null;
   const assessment: string = parsed.assessment ?? "";
@@ -2407,21 +1930,49 @@ function handleMetacogResponseReceived(
     ? metacogHistory.slice(-historyWindow)
     : metacogHistory;
 
-  // Emit observability protocol event
+  // Emit observability protocol event with full structured detail
   effects.push({
     type: "emit_protocol",
     action: "os_metacog",
     message: `assessment=${assessment.slice(0, 100)} topology=${topology !== null ? "declared" : "null"} memory=${memory.length} halt=${halt?.status ?? "none"}`,
+    detail: {
+      assessment,
+      topology,
+      memory,
+      halt,
+    },
   });
+
+  // Clear triggers that the metacog consumed. But preserve any triggers that
+  // arrived AFTER the metacog started evaluating (e.g. a process_completed that
+  // came in while the LLM call was in-flight). We detect this by checking if
+  // all processes are dead — if so, the metacog needs another evaluation pass
+  // before the kernel can halt, since it hasn't seen the final completions.
+  const allDead = [...newState.processes.values()].every(p => p.state === "dead");
+  const preservedTriggers = allDead && newState.pendingTriggers.length > 0
+    ? [...newState.pendingTriggers]  // preserve — metacog hasn't seen these yet
+    : [];
 
   // Update state with history, cleared triggers, incremented eval count
   newState = {
     ...newState,
     metacogHistory: cappedHistory,
-    pendingTriggers: [],
+    pendingTriggers: preservedTriggers,
     metacogEvalCount: newState.metacogEvalCount + 1,
     lastMetacogTick: newState.tickCount,
   };
+
+  // Handle metacog self-scheduling: reschedule metacog timer if nextEvalDelayMs provided
+  const nextEvalDelayMs: number | null = parsed.nextEvalDelayMs ?? null;
+  if (nextEvalDelayMs !== null && nextEvalDelayMs > 0) {
+    const maxInterval = newState.config.kernel.metacogIntervalMs ?? 60_000;
+    const clampedDelay = Math.min(nextEvalDelayMs, maxInterval);
+    effects.push({
+      type: "schedule_timer",
+      timer: "metacog",
+      delayMs: clampedDelay,
+    });
+  }
 
   // Handle halt
   if (halt) {
@@ -2450,9 +2001,7 @@ function handleMetacogResponseReceived(
 }
 
 /**
- * Absorbs kernel.ts applyAwarenessAdjustment() + awareness notes/blindSpots/focus.
- * Processes parsed awareness daemon response: stores notes (replace semantics),
- * applies adjustments (kill threshold, focus, oscillation), stores blind spots.
+ * Handles awareness daemon response: stores notes for next metacog context.
  */
 function handleAwarenessResponseReceived(
   state: KernelState,
@@ -2460,51 +2009,12 @@ function handleAwarenessResponseReceived(
 ): TransitionResult {
   const effects: KernelEffectInput[] = [];
 
-  // 1. Store notes — replace semantics (consumed once by next metacog)
-  let newState: KernelState = {
+  // Store notes — replace semantics (consumed once by next metacog)
+  const newState: KernelState = {
     ...state,
     awarenessNotes: [...event.notes],
   };
 
-  // 2. Process adjustments
-  let killThresholdAdjustment = newState.killThresholdAdjustment;
-  let metacogFocus = newState.metacogFocus;
-  const oscillationWarnings = [...newState.oscillationWarnings];
-
-  for (const adj of event.adjustments) {
-    switch (adj.kind) {
-      case "adjust_kill_threshold":
-        killThresholdAdjustment += adj.delta;
-        break;
-      case "suggest_metacog_focus":
-        metacogFocus = adj.area;
-        break;
-      case "detect_oscillation":
-        oscillationWarnings.push({
-          processType: adj.processType,
-          killCount: adj.killCount,
-          respawnCount: adj.respawnCount,
-          windowTicks: adj.windowTicks,
-        });
-        break;
-      case "noop":
-        break;
-      // flag_overconfident_heuristic and detect_blind_spot are handled
-      // via flaggedHeuristics → blindSpots below (or by the interpreter for
-      // heuristic confidence adjustments that need the memory store).
-    }
-  }
-
-  // 3. Store flagged heuristics as blind spots
-  newState = {
-    ...newState,
-    killThresholdAdjustment,
-    metacogFocus,
-    oscillationWarnings,
-    blindSpots: [...event.flaggedHeuristics],
-  };
-
-  // 4. Emit protocol event for observability
   effects.push({
     type: "emit_protocol",
     action: "os_awareness_eval",
@@ -2565,6 +2075,16 @@ function handleLlmTurnCompleted(
     const inflight = new Set(newState.inflight);
     inflight.delete(event.pid);
     newState = { ...newState, inflight };
+  }
+
+  // If process exited (went dead), add trigger so metacog re-evaluates
+  const proc = newState.processes.get(event.pid);
+  if (proc && proc.state === "dead") {
+    const pendingTriggers = [...newState.pendingTriggers];
+    if (!pendingTriggers.includes("process_completed")) {
+      pendingTriggers.push("process_completed");
+    }
+    newState = { ...newState, pendingTriggers };
   }
 
   return [newState, effects];

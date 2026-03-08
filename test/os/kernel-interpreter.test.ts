@@ -60,7 +60,6 @@ function makeState(overrides?: Partial<KernelState>): KernelState {
     haltReason: null,
     goalWorkDoneAt: 0,
     startTime: Date.now(),
-    consecutiveIdleTicks: 0,
     lastProcessCompletionTime: 0,
     housekeepCount: 0,
     ...overrides,

@@ -34,9 +34,20 @@ const topologyArb: fc.Arbitrary<TopologyExpr> = fc.letrec(tie => ({
   ),
 })).expr;
 
+/** Post-process a topology expression to assign unique names to all tasks. */
+function deduplicateNames(expr: TopologyExpr): TopologyExpr {
+  let counter = 0;
+  function walk(e: TopologyExpr): TopologyExpr {
+    if (e.type === "task") return { ...e, name: `t-${counter++}` };
+    if (e.type === "gate") return { ...e, child: walk(e.child) };
+    return { ...e, children: e.children.map(walk) };
+  }
+  return walk(expr);
+}
+
 describe("topology invariants (property-based)", () => {
   test("flatten always produces a valid DAG (no cycles)", () => {
-    fc.assert(fc.property(topologyArb, (expr) => {
+    fc.assert(fc.property(topologyArb.map(deduplicateNames), (expr) => {
       const graph = flatten(expr);
       // Topological sort — if it succeeds, no cycles
       const visited = new Set<string>();
@@ -61,7 +72,7 @@ describe("topology invariants (property-based)", () => {
   });
 
   test("reconcile(empty, T) then reconcile(result, T) produces no spawns on second call", () => {
-    fc.assert(fc.property(topologyArb, (expr) => {
+    fc.assert(fc.property(topologyArb.map(deduplicateNames), (expr) => {
       // First reconcile: empty → topology
       const effects1 = reconcile(new Map(), expr, new Map(), new Set());
       const spawns1 = effects1.filter(e => e.type === "spawn_process");
