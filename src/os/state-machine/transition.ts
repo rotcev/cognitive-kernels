@@ -13,7 +13,7 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent, LlmTurnCompletedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology, MetacogHistoryEntry, MetacogCommand } from "../types.js";
 import { reconcile } from "../topology/reconcile.js";
@@ -58,6 +58,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleMetacogResponseReceived(state, event);
     case "awareness_response_received":
       return handleAwarenessResponseReceived(state, event);
+    case "llm_turn_completed":
+      return handleLlmTurnCompleted(state, event);
     default:
       return [state, []];
   }
@@ -2514,6 +2516,62 @@ function handleAwarenessResponseReceived(
   });
 
   return [newState, assignEffectSeqs(effects)];
+}
+
+// ---------------------------------------------------------------------------
+// LLM Turn Completed Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Handles LLM worker process turn completion.
+ * Delegates command processing to handleProcessCompleted, then adds:
+ * - Tick count increment
+ * - Drain check (if pid is in drainingPids, kill after processing)
+ * - Remove pid from inflight
+ */
+function handleLlmTurnCompleted(
+  state: KernelState,
+  event: LlmTurnCompletedEvent,
+): TransitionResult {
+  // Delegate to existing command processing by converting to ProcessCompletedEvent
+  const processCompletedEvent: ProcessCompletedEvent = {
+    type: "process_completed",
+    pid: event.pid,
+    name: state.processes.get(event.pid)?.name ?? "unknown",
+    success: event.success,
+    commandCount: event.commands.length,
+    response: event.response,
+    tokensUsed: event.tokensUsed,
+    commands: event.commands,
+    timestamp: event.timestamp,
+    seq: event.seq,
+  };
+
+  let [newState, effects] = handleProcessCompleted(state, processCompletedEvent);
+
+  // Additional: increment tickCount
+  newState = { ...newState, tickCount: newState.tickCount + 1 };
+
+  // Additional: drain check
+  if (newState.drainingPids.has(event.pid)) {
+    const proc = newState.processes.get(event.pid);
+    if (proc) {
+      const processes = new Map(newState.processes);
+      processes.set(event.pid, { ...proc, state: "dead", exitReason: "drained" });
+      const drainingPids = new Set(newState.drainingPids);
+      drainingPids.delete(event.pid);
+      newState = { ...newState, processes, drainingPids };
+    }
+  }
+
+  // Remove from inflight
+  if (newState.inflight.has(event.pid)) {
+    const inflight = new Set(newState.inflight);
+    inflight.delete(event.pid);
+    newState = { ...newState, inflight };
+  }
+
+  return [newState, effects];
 }
 
 function assignEffectSeqs(inputs: KernelEffectInput[]): KernelEffect[] {

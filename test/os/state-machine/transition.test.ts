@@ -4063,3 +4063,127 @@ describe("transition — awareness_response_received", () => {
     expect(newState.oscillationWarnings).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// llm_turn_completed
+// ---------------------------------------------------------------------------
+
+function llmTurnCompletedEvent(
+  pid: string,
+  opts: {
+    commands?: import("../../../src/os/types.js").OsProcessCommand[];
+    success?: boolean;
+    tokensUsed?: number;
+    response?: string;
+  } = {},
+): KernelEvent {
+  const commands = opts.commands ?? [];
+  return {
+    type: "llm_turn_completed",
+    pid,
+    success: opts.success ?? true,
+    tokensUsed: opts.tokensUsed ?? 100,
+    commands,
+    response: opts.response ?? "",
+    timestamp: Date.now(),
+    seq: 0,
+  } as KernelEvent;
+}
+
+describe("transition — llm_turn_completed", () => {
+  test("processes commands like process_completed (bb_write)", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const [newState] = transition(state, llmTurnCompletedEvent(orchestratorPid, {
+      commands: [
+        { kind: "bb_write", key: "result:test", value: { data: "hello" } },
+        { kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } },
+      ],
+    }));
+
+    const entry = newState.blackboard.get("result:test");
+    expect(entry).toBeDefined();
+    expect(entry!.value).toEqual({ data: "hello" });
+    expect(entry!.writtenBy).toBe(orchestratorPid);
+  });
+
+  test("drain check — kills process if pid in drainingPids", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+
+    // Add a worker that is being drained
+    const workerState = addProcess(state, "drain-worker", { parentPid: orchestratorPid });
+    const workerPid = `os-proc-test-drain-worker`;
+
+    // Mark pid as draining
+    const drainingPids = new Set(workerState.drainingPids);
+    drainingPids.add(workerPid);
+    const stateWithDrain = { ...workerState, drainingPids };
+
+    const [newState] = transition(stateWithDrain, llmTurnCompletedEvent(workerPid, {
+      commands: [{ kind: "idle" }],
+    }));
+
+    const proc = newState.processes.get(workerPid)!;
+    expect(proc.state).toBe("dead");
+    expect(proc.exitReason).toBe("drained");
+    expect(newState.drainingPids.has(workerPid)).toBe(false);
+  });
+
+  test("increments tickCount", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    const initialTickCount = state.tickCount;
+
+    const [newState] = transition(state, llmTurnCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    expect(newState.tickCount).toBe(initialTickCount + 1);
+  });
+
+  test("removes pid from inflight", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+
+    // Mark pid as inflight
+    const inflight = new Set(state.inflight);
+    inflight.add(orchestratorPid);
+    const stateWithInflight = { ...state, inflight };
+
+    const [newState] = transition(stateWithInflight, llmTurnCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+
+    expect(newState.inflight.has(orchestratorPid)).toBe(false);
+  });
+
+  test("handles failure (success=false)", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+
+    const [newState, effects] = transition(state, llmTurnCompletedEvent(orchestratorPid, {
+      success: false,
+      response: "LLM error",
+    }));
+
+    const proc = newState.processes.get(orchestratorPid)!;
+    expect(proc.state).toBe("dead");
+    expect(proc.exitReason).toContain("execution_failed");
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).action === "os_process_kill")).toBe(true);
+    expect(newState.pendingTriggers).toContain("process_failed");
+  });
+
+  test("idle command keeps process alive", () => {
+    const { state, orchestratorPid } = bootAndGetOrchestrator();
+    // First: satisfy hard spawn enforcement with a spawn, then do idle on second tick
+    const [s1] = transition(state, llmTurnCompletedEvent(orchestratorPid, {
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+    }));
+    // Find the worker we spawned
+    const worker = [...s1.processes.values()].find(p => p.name === "w1")!;
+    // Worker goes idle
+    const [s2] = transition(s1, llmTurnCompletedEvent(worker.pid, {
+      commands: [{ kind: "idle", wakeOnSignals: ["tick:1"] }],
+    }));
+
+    const updatedWorker = s2.processes.get(worker.pid)!;
+    expect(updatedWorker.state).toBe("idle");
+    expect(updatedWorker.wakeOnSignals).toEqual(["tick:1"]);
+  });
+});
