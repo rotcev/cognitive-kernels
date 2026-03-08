@@ -139,6 +139,55 @@ export type TopologyDeclaredEvent = BaseEvent & {
   halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null;
 };
 
+/** Raw metacog LLM response received (before parsing into topology/commands). */
+export type MetacogResponseReceivedEvent = BaseEvent & {
+  type: "metacog_response_received";
+  /** Raw JSON from metacog LLM. */
+  response: string;
+};
+
+/** Awareness daemon LLM response received with parsed adjustments. */
+export type AwarenessResponseReceivedEvent = BaseEvent & {
+  type: "awareness_response_received";
+  adjustments: any[];
+  notes: string[];
+  flaggedHeuristics: { id: string; reason: string }[];
+};
+
+/** An LLM worker process completed a turn with full payload. */
+export type LlmTurnCompletedEvent = BaseEvent & {
+  type: "llm_turn_completed";
+  pid: string;
+  success: boolean;
+  response: string;
+  tokensUsed: number;
+  commands: any[];
+  usage?: { inputTokens?: number; outputTokens?: number };
+};
+
+/** A sub-kernel completed its run. */
+export type SubkernelCompletedEvent = BaseEvent & {
+  type: "subkernel_completed";
+  pid: string;
+  success: boolean;
+  response: string;
+  tokensUsed: number;
+};
+
+/** Shell process produced output and exited. */
+export type ShellOutputReceivedEvent = BaseEvent & {
+  type: "shell_output_received";
+  pid: string;
+  output: string;
+  exitCode: number;
+};
+
+/** IPC queue was flushed, waking blocked processes. */
+export type IpcFlushedEvent = BaseEvent & {
+  type: "ipc_flushed";
+  wokenPids: string[];
+};
+
 /** The discriminated union of all kernel events. */
 export type KernelEvent =
   | BootEvent
@@ -152,6 +201,12 @@ export type KernelEvent =
   | ExternalCommandEvent
   | HaltCheckEvent
   | TopologyDeclaredEvent
+  | MetacogResponseReceivedEvent
+  | AwarenessResponseReceivedEvent
+  | LlmTurnCompletedEvent
+  | SubkernelCompletedEvent
+  | ShellOutputReceivedEvent
+  | IpcFlushedEvent
   ;
 
 /**
