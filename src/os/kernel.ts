@@ -336,7 +336,7 @@ export class OsKernel {
     const [newState, effects] = transition(state, bootEvent);
 
     // Apply state changes: processes, blackboard
-    this.applyStateChanges(newState, { syncProcesses: true });
+    this.applyStateChanges(newState);
 
     // Interpret effects (submit_llm, emit_protocol)
     this.interpretTransitionEffects(effects);
@@ -1651,7 +1651,7 @@ export class OsKernel {
       seq: this.nextSeq(),
     };
     const [newState, effects] = transition(state, timerEvent);
-    this.applyStateChanges(newState, { syncProcesses: true });
+    this.applyStateChanges(newState);
     this.interpretTransitionEffects(effects);
 
     // Track force-wake state for deadlock detection across housekeep cycles
@@ -1674,17 +1674,17 @@ export class OsKernel {
    * and strategy application are now handled by transition effects (signal_emit, flush_ipc,
    * activate_process, submit_llm, rebuild_dag, apply_strategies).
    *
-   * Remaining here: deferral processing (Wave 5), telemetry (observability, not decisions).
+   * Wave 5 migration: deferral processing now handled by transition's processPureDeferrals().
+   *
+   * Remaining here: telemetry (observability, not decisions).
    */
   private housekeepIO(): void {
     // 0. Reset per-tick state
     this.tickSignals = [];
 
-    // 1. Check deferral conditions (runtime: evaluates bb state, spawns processes)
-    // TODO(Wave 5): Complete deferral migration — transition already handles pure deferrals
-    // via processPureDeferrals(), but the kernel's processDeferrals() uses runtime I/O
-    // (supervisor.spawn, supervisor.activate). Remove when fully migrated.
-    this.processDeferrals();
+    // 1. Deferral processing — fully migrated to transition's processPureDeferrals() (Wave 5).
+    // Transition evaluates conditions, spawns processes, emits submit_llm effects.
+    // applyStateChanges syncs new processes + deferrals; interpretTransitionEffects submits them.
 
     // 2. Telemetry collection + perf analysis (observability, not decision-making — OK to keep)
     if (this.config.kernel.telemetryEnabled) {
@@ -1805,17 +1805,14 @@ export class OsKernel {
       // the timescale of real scheduling cycles, not 500ms timer fires.
       this.scheduler.tick();
 
-      // NOTE: Pure deferral processing (bb_key_exists, process_dead, etc.) is now
-      // handled by transition in handleProcessCompleted. This call handles I/O-based
-      // deferred conditions that transition can't evaluate (runtime state).
-      this.processDeferrals();
+      // NOTE: Deferral processing fully migrated to transition's processPureDeferrals() (Wave 5).
+      // Transition evaluates all conditions purely and emits submit_llm effects.
 
       // Fire-and-forget ephemerals spawned by this process's commands
       void this.drainPendingEphemerals();
 
       // Flush IPC — wake processes unblocked by bb writes / signals
-      // TODO(Wave 3): Transition already emits flush_ipc effects for its own signals;
-      // this flush catches I/O-side signals from processDeferrals() and drainPendingEphemerals().
+      // This flush catches I/O-side signals from drainPendingEphemerals().
       const { wokenPids } = this.ipcBus.flush();
       for (const pid of wokenPids) {
         const p = this.table.get(pid);
@@ -1860,6 +1857,12 @@ export class OsKernel {
   /**
    * Evaluate what's runnable and submit up to maxConcurrent processes.
    * Non-blocking — returns immediately after submitting.
+   *
+   * TODO(Wave 7): This method is now redundant for the transition-driven path.
+   * handleHousekeep in transition.ts calls selectRunnable() and emits submit_llm
+   * effects directly. This imperative version remains because it's called from
+   * multiple event-driven loop handlers (process_completed, timer handlers, etc.).
+   * Wave 7 should migrate all callers to the transition path and remove this method.
    */
   private doSchedulingPass(): void {
     if (this.halted) return;
@@ -2115,7 +2118,7 @@ export class OsKernel {
     const [newState, effects] = transition(state, event);
 
     // Apply all state changes (processes, blackboard, deferrals, triggers)
-    this.applyStateChanges(newState, { syncProcesses: true });
+    this.applyStateChanges(newState);
 
     // Interpret effects (submit_llm, emit_protocol, start_shell, etc.)
     this.interpretTransitionEffects(effects);
@@ -2269,7 +2272,7 @@ export class OsKernel {
           };
 
           const [newState, effects] = transition(state, event);
-          this.applyStateChanges(newState, { syncProcesses: true });
+          this.applyStateChanges(newState);
           this.interpretTransitionEffects(effects);
 
           // Post-transition I/O
@@ -2341,7 +2344,7 @@ export class OsKernel {
           };
 
           const [newState, effects] = transition(state, event);
-          this.applyStateChanges(newState, { syncProcesses: true });
+          this.applyStateChanges(newState);
           this.interpretTransitionEffects(effects);
 
           // Post-transition I/O
@@ -3330,6 +3333,11 @@ export class OsKernel {
       activeEphemeralCount: this.activeEphemeralCount,
       blackboard,
       tickCount: this.scheduler.tickCount,
+      schedulerStrategy: this.config.scheduler.strategy,
+      schedulerMaxConcurrent: this.config.scheduler.maxConcurrentProcesses,
+      schedulerRoundRobinIndex: this.scheduler.getRoundRobinIndex(),
+      schedulerHeuristics: this.memoryStore.query(this.goal),
+      currentStrategies: this.scheduler.getCurrentStrategies(),
       dagTopology: this.dagEngine.currentTopology(),
       deferrals: new Map(this.deferrals),
       pendingTriggers: [...this.pendingTriggers],
@@ -3349,41 +3357,30 @@ export class OsKernel {
    * Apply state changes from a transition result back to kernel fields.
    * Only applies fields that the transition function can modify.
    */
-  private applyStateChanges(newState: KernelState, opts?: { syncProcesses?: boolean }): void {
+  private applyStateChanges(newState: KernelState): void {
     // NOTE: Do NOT set this.halted here — haltResolve() sets it and must
     // not see it as already true (it uses the flag to prevent duplicate halts).
     // The caller checks newState.halted and calls haltResolve() if needed.
+
+    // ── Scalar fields ──
     this.goal = newState.goal;
     this.haltReason = newState.haltReason ?? "";
     this.goalWorkDoneAt = newState.goalWorkDoneAt;
-    if (newState.activeStrategyId !== null) {
-      this.activeStrategyId = newState.activeStrategyId;
-    }
+    this.activeStrategyId = newState.activeStrategyId ?? undefined;
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
     this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
     this.housekeepCount = newState.housekeepCount;
+    this.scheduler.setRoundRobinIndex(newState.schedulerRoundRobinIndex);
 
-    if (!opts?.syncProcesses) return;
-
-    // ── Sync process table ──
-    // The transition function produces a new process map. We reconcile:
-    // - New processes → add to table via supervisor.spawn or direct table add
-    // - State changes on existing processes → apply to table
-    // - Dead processes → kill via supervisor (disposes threads)
+    // ── Process table — trivial sync ──
     const existingPids = new Set(this.table.getAll().map(p => p.pid));
 
     for (const [pid, proc] of newState.processes) {
       if (!existingPids.has(pid)) {
-        // New process created by transition — add directly to table
-        // (supervisor.spawn generates a new PID, but transition already assigned one)
         this.table.addDirect(proc);
       } else {
-        // Existing process — sync state changes
         const existing = this.table.get(pid)!;
-
-        // Sync all mutable fields from transition state — trivial field copy, NO decisions.
-        // Process lifecycle activation is driven by activate_process / idle_process effects
-        // emitted by the transition function and interpreted by interpretTransitionEffects().
+        // Copy all mutable fields — NO decisions
         existing.state = proc.state;
         existing.tickCount = proc.tickCount;
         existing.tokensUsed = proc.tokensUsed;
@@ -3400,20 +3397,15 @@ export class OsKernel {
       }
     }
 
-    // ── Sync blackboard ──
-    // Write new/updated entries back to IPC bus
+    // ── Blackboard — write new/updated entries ──
     for (const [key, entry] of newState.blackboard) {
-      const existing = this.ipcBus.bbRead(key);
-      if (!existing || existing.version < entry.version) {
-        this.ipcBus.bbWrite(key, entry.value, entry.writtenBy ?? "kernel");
-      }
+      this.ipcBus.bbWrite(key, entry.value, entry.writtenBy ?? "kernel");
     }
 
-    // ── Sync deferrals ──
+    // ── Deferrals ──
     this.deferrals = new Map(newState.deferrals);
 
-    // ── Sync pending triggers ──
-    // Replace with transition's authoritative list (transition may have cleared them)
+    // ── Triggers ──
     this.pendingTriggers = [...newState.pendingTriggers];
     this.metacog.setTriggers(newState.pendingTriggers);
   }
@@ -3985,6 +3977,9 @@ Example: ["strategy-123", "strategy-456"]`;
 
   /**
    * Evaluate a deferral condition against current system state.
+   * @deprecated Legacy — used only by tick() for sub-kernel compat.
+   * Event-driven path uses evaluateDeferConditionPure() in transition.ts.
+   * Remove when sub-kernels migrate to eventLoop() (Wave 7).
    */
   private evaluateDeferCondition(cond: DeferCondition): boolean {
     switch (cond.type) {
@@ -4017,9 +4012,9 @@ Example: ["strategy-123", "strategy-456"]`;
 
   /**
    * Check all deferral conditions and spawn processes whose conditions are met.
-   * Called once per tick (step 2c).
-   * TODO(Wave 5): I/O-based deferral processing — supervisor.activate calls here should
-   * be migrated to transition effects once deferral processing is fully pure.
+   * @deprecated Legacy — used only by tick() for sub-kernel compat.
+   * Event-driven path uses processPureDeferrals() in transition.ts (Wave 5 complete).
+   * Remove when sub-kernels migrate to eventLoop() (Wave 7).
    */
   private processDeferrals(): void {
     if (this.deferrals.size === 0) return;

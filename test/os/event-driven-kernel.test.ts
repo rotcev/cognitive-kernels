@@ -822,4 +822,58 @@ describe("Event-driven kernel: Wave 2 — parent wake via effects (haiku bug)", 
 
     kernel.halt("test_complete");
   });
+
+  test("applyStateChanges is a trivial field copier with no decision logic", () => {
+    // Wave 6: verify applyStateChanges has no conditionals beyond null coalescing,
+    // no supervisor calls, no syncProcesses option, and always syncs processes.
+    const kernel = bootKernel();
+    const applyFn = priv(kernel).applyStateChanges.toString();
+
+    // No supervisor calls at all
+    expect(applyFn).not.toContain("supervisor.");
+
+    // No syncProcesses option (removed in Wave 6)
+    expect(applyFn).not.toContain("syncProcesses");
+
+    // No bridge diffing (if/else decisions on state transitions)
+    expect(applyFn).not.toContain("prevState");
+
+    // Always syncs process table (no early return guard)
+    expect(applyFn).toContain("table.addDirect");
+    expect(applyFn).toContain("table.get");
+
+    // Always syncs blackboard, deferrals, triggers
+    expect(applyFn).toContain("bbWrite");
+    expect(applyFn).toContain("deferrals");
+    expect(applyFn).toContain("setTriggers");
+
+    kernel.halt("test_complete");
+  });
+
+  test("applyStateChanges copies scalar fields from transition state", () => {
+    // Wave 6: integration test — verify that calling applyStateChanges
+    // with a modified KernelState correctly updates kernel fields.
+    const kernel = bootKernel();
+
+    // Extract current state, modify it, then apply
+    const state = priv(kernel).extractState();
+    state.goal = "updated-goal-from-transition";
+    state.haltReason = "test-halt-reason";
+    state.goalWorkDoneAt = 12345;
+    state.consecutiveIdleTicks = 42;
+    state.lastProcessCompletionTime = 99999;
+    state.housekeepCount = 7;
+
+    priv(kernel).applyStateChanges(state);
+
+    // Verify all scalar fields were copied
+    expect(priv(kernel).goal).toBe("updated-goal-from-transition");
+    expect(priv(kernel).haltReason).toBe("test-halt-reason");
+    expect(priv(kernel).goalWorkDoneAt).toBe(12345);
+    expect(priv(kernel).consecutiveIdleTicks).toBe(42);
+    expect(priv(kernel).lastProcessCompletionTime).toBe(99999);
+    expect(priv(kernel).housekeepCount).toBe(7);
+
+    kernel.halt("test_complete");
+  });
 });
