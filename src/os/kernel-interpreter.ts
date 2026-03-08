@@ -73,11 +73,12 @@ export class KernelInterpreter {
         // Clear existing timer with same name (replace semantics)
         const existing = this.timers.get(effect.timer);
         if (existing) {
-          clearTimeout(existing);
+          clearInterval(existing);
         }
 
-        const timer = setTimeout(() => {
-          this.timers.delete(effect.timer);
+        // Use setInterval so timers recur (housekeep, metacog, snapshot, watchdog).
+        // The transition decides what to do each time — the interpreter just delivers events.
+        const timer = setInterval(() => {
           this.queue.enqueue({
             type: "timer_fired",
             timer: effect.timer as "housekeep" | "metacog" | "watchdog" | "snapshot",
@@ -86,11 +87,6 @@ export class KernelInterpreter {
           });
         }, effect.delayMs);
 
-        // Don't prevent Node from exiting
-        if (typeof timer.unref === "function") {
-          timer.unref();
-        }
-
         this.timers.set(effect.timer, timer);
         break;
       }
@@ -98,7 +94,7 @@ export class KernelInterpreter {
       case "cancel_timer": {
         const timer = this.timers.get(effect.timer);
         if (timer) {
-          clearTimeout(timer);
+          clearInterval(timer);
           this.timers.delete(effect.timer);
         }
         break;
@@ -273,10 +269,48 @@ export class KernelInterpreter {
       }
 
       // ── Legacy effects ────────────────────────────────────────
-      // These are state changes now handled inside the transition function,
-      // or legacy effects from the old kernel. The new interpreter doesn't
-      // need to execute them — transition modifies state directly.
-      case "submit_llm":
+      // submit_llm is emitted by the transition's scheduling pass.
+      // Treat it the same as run_llm — start an LLM thread for the process.
+      // Skip daemons — they use specialized execution paths (run_metacog, run_awareness).
+      case "submit_llm": {
+        const proc = state.processes.get(effect.pid);
+        if (!proc) break;
+        if (proc.type === "daemon") break;
+
+        const thread = this.getOrCreateThread(effect.pid, proc.model ?? state.config.kernel.processModel);
+
+        void thread
+          .run(proc.objective)
+          .then((result) => {
+            this.queue.enqueue({
+              type: "llm_turn_completed",
+              pid: effect.pid,
+              success: true,
+              response: result.finalResponse,
+              tokensUsed: 0,
+              commands: [],
+              usage: result.usage as any,
+              timestamp: Date.now(),
+              seq: 0,
+            });
+          })
+          .catch((err) => {
+            this.queue.enqueue({
+              type: "llm_turn_completed",
+              pid: effect.pid,
+              success: false,
+              response: err instanceof Error ? err.message : String(err),
+              tokensUsed: 0,
+              commands: [],
+              timestamp: Date.now(),
+              seq: 0,
+            });
+          });
+        break;
+      }
+
+      // These are state changes handled inside the transition function,
+      // or legacy effects that are no longer needed.
       case "submit_ephemeral":
       case "submit_metacog":
       case "submit_awareness":
@@ -301,7 +335,7 @@ export class KernelInterpreter {
   /** Clear all timers and abort all threads. */
   cleanup(): void {
     for (const timer of this.timers.values()) {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
     this.timers.clear();
 

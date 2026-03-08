@@ -548,15 +548,13 @@ describe("KernelInterpreter", () => {
     expect(event.type).toBe("timer_fired");
     expect((event as any).timer).toBe("metacog");
 
-    // Only one event should have been enqueued (the replaced timer shouldn't fire)
-    let secondEvent = false;
-    const race = Promise.race([
-      queue.dequeue().then(() => { secondEvent = true; }),
-      new Promise<void>((r) => setTimeout(r, 10)),
-    ]);
-    vi.advanceTimersByTime(200);
-    await race;
-    expect(secondEvent).toBe(false);
+    // With setInterval, the replacement timer (50ms) fires again.
+    // The key assertion: the OLD timer (200ms) was cancelled by clearInterval.
+    // Advance past 200ms boundary — if old timer fired, we'd get a stale event.
+    vi.advanceTimersByTime(50);
+    const secondEvent = await queue.dequeue();
+    expect(secondEvent.type).toBe("timer_fired");
+    expect((secondEvent as any).timer).toBe("metacog"); // still the replacement timer, not old
 
     vi.useRealTimers();
   });

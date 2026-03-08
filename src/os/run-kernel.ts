@@ -63,7 +63,7 @@ export async function runKernel(
 
   // Schedule initial wall-clock timers
   await interpreter.interpret(
-    { type: "schedule_timer", timer: "metacog", delayMs: config.kernel.metacogIntervalMs ?? 15_000, seq: 0 },
+    { type: "schedule_timer", timer: "metacog", delayMs: 5_000, seq: 0 },
     state,
   );
   await interpreter.interpret(
