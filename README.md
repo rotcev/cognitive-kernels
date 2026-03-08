@@ -5,6 +5,12 @@ Standalone cognitive kernel runtime for reusable AI process substrates.
 This repo keeps the kernel, scheduler, memory, and execution substrate, while
 dropping older product-specific orchestration layers.
 
+## Architecture
+
+- The state machine is implemented as a pure transition core (`events` -> `transition` -> new `state`) with side effects emitted as declarative effect records, which separates deterministic orchestration logic from IO execution.
+- The interpreter is the imperative adapter layer that consumes emitted effects, invokes executors/IPC/timers, and re-feeds completion events into the state machine, creating a closed event loop with clear boundaries between policy and runtime mechanics.
+- The Lens observability layer is a contract-first projection pipeline that transforms kernel snapshots/events into typed view models and deltas (process graph, blackboard IO, narratives) for streaming to clients, so UIs consume stable telemetry without coupling to kernel internals.
+
 ## Core ideas
 
 - `Brain` is the provider-agnostic abstraction over Claude or Codex/OpenAI.
