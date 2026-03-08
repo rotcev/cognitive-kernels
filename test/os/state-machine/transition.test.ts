@@ -383,7 +383,7 @@ describe("transition — determinism", () => {
 });
 
 describe("transition — integration roundtrip", () => {
-  test("boot → multiple halt_checks → eventual halt produces correct final state", () => {
+  test("boot → process_completed → halt_check → eventual halt (full lifecycle)", () => {
     const state = makeState({ tokenBudget: 200 });
     let seq = 0;
 
@@ -393,31 +393,40 @@ describe("transition — integration roundtrip", () => {
     expect(s1.processes.size).toBe(2);
     expect(e1.some(e => e.type === "submit_llm")).toBe(true);
 
-    // 2. Simulate process completion by manually updating tokens
-    //    (process_completed isn't handled by transition yet — strangler pattern)
-    for (const proc of s1.processes.values()) {
-      if (proc.type === "lifecycle") proc.tokensUsed = 50;
-    }
+    // 2. Orchestrator completes first turn with spawn (50 tokens used)
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+    const [s2] = transition(s1, {
+      type: "process_completed", pid: orch.pid, name: orch.name,
+      success: true, commandCount: 1, tokensUsed: 50,
+      commands: [{ kind: "spawn_child", descriptor: { type: "lifecycle", name: "w1", objective: "work" } }],
+      response: "", timestamp: Date.now(), seq: seq++,
+    });
+    expect(s2.processes.size).toBe(3); // orch + metacog + w1
+    expect(s2.processes.get(orch.pid)!.tokensUsed).toBe(50);
 
-    // 3. Halt check — should not halt (tokens under budget)
-    const [s2] = transition(s1, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
-    expect(s2.halted).toBe(false);
+    // 3. Halt check — should not halt (50 < 200 budget)
+    const [s3] = transition(s2, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s3.halted).toBe(false);
 
-    // 4. More tokens used
-    for (const proc of s2.processes.values()) {
-      if (proc.type === "lifecycle") proc.tokensUsed = 250;
-    }
+    // 4. Worker completes with 250 tokens → total now 300 > 200 budget
+    const worker = [...s2.processes.values()].find(p => p.name === "w1")!;
+    const [s4] = transition(s3, {
+      type: "process_completed", pid: worker.pid, name: worker.name,
+      success: true, commandCount: 1, tokensUsed: 250,
+      commands: [{ kind: "exit", code: 0, reason: "done" }],
+      response: "", timestamp: Date.now(), seq: seq++,
+    });
 
     // 5. Halt check — should halt now (tokens exceed 200 budget)
-    const [s3, e3] = transition(s2, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
-    expect(s3.halted).toBe(true);
-    expect(s3.haltReason).toBe("token_budget_exceeded");
-    expect(e3.some(e => e.type === "halt")).toBe(true);
+    const [s5, e5] = transition(s4, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s5.halted).toBe(true);
+    expect(s5.haltReason).toBe("token_budget_exceeded");
+    expect(e5.some(e => e.type === "halt")).toBe(true);
 
     // 6. Further halt checks are no-ops
-    const [s4, e4] = transition(s3, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
-    expect(s4.halted).toBe(true);
-    expect(e4).toHaveLength(0);
+    const [s6, e6] = transition(s5, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s6.halted).toBe(true);
+    expect(e6).toHaveLength(0);
   });
 
   test("boot → external halt → halt_check is no-op", () => {
