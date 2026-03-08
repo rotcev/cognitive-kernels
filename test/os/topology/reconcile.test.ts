@@ -145,4 +145,14 @@ describe("reconcile", () => {
     const kills = effects.filter(e => e.type === "kill_process" || e.type === "drain_process");
     expect(kills).toHaveLength(0);
   });
+
+  test("priority change on existing task: update effect", () => {
+    const topology: TopologyExpr = { type: "task", name: "A", objective: "do A", priority: 90 };
+    const processes = new Map([["pid-A", { pid: "pid-A", name: "A", state: "running", priority: 70 }]]);
+    const effects = reconcile(processes, topology, new Map(), new Set());
+    const updates = effects.filter(e => e.type === "update_process");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].pid).toBe("pid-A");
+    expect(updates[0].priority).toBe(90);
+  });
 });
