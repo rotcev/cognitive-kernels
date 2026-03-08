@@ -23,6 +23,7 @@ export type GateCondition =
 /** The 4 topology primitives. */
 export type TopologyExpr =
   | { type: "task"; name: string; objective: string;
+      reads?: string[]; writes?: string[];
       model?: string; priority?: number; backend?: TaskBackend }
   | { type: "seq"; children: TopologyExpr[] }
   | { type: "par"; children: TopologyExpr[] }

@@ -4,6 +4,7 @@ export { reconcile } from "./reconcile.js";
 export type { ReconcileEffect } from "./reconcile.js";
 export { evaluateGateCondition } from "./gates.js";
 export { optimizeTopology } from "./optimize.js";
+export { autoArrange } from "./auto-arrange.js";
 export type {
   TopologyExpr,
   TaskBackend,

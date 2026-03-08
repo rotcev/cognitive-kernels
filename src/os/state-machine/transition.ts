@@ -19,6 +19,7 @@ import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfRepor
 import { reconcile } from "../topology/reconcile.js";
 import { validateTopology } from "../topology/validate.js";
 import { optimizeTopology } from "../topology/optimize.js";
+import { autoArrange } from "../topology/auto-arrange.js";
 import type { TopologyExpr, MetacogMemoryCommand } from "../topology/types.js";
 import { randomUUID } from "node:crypto";
 import { buildMetacogContextPure } from "./metacog-context.js";
@@ -1620,7 +1621,7 @@ function learnedSelect(
 // ---------------------------------------------------------------------------
 
 /**
- * Shared topology reconciliation: validate → optimize → reconcile → emit effects.
+ * Shared topology reconciliation: autoArrange → validate → optimize → reconcile → emit effects.
  * Used by both handleTopologyDeclared and handleMetacogResponseReceived.
  */
 function reconcileTopologyInto(
@@ -1628,6 +1629,9 @@ function reconcileTopologyInto(
   topology: TopologyExpr,
   effects: KernelEffectInput[],
 ): { state: KernelState; effects: KernelEffectInput[] } {
+  // Auto-arrange: if tasks have reads/writes annotations, compute par/seq from data deps
+  topology = autoArrange(topology);
+
   // Validate
   const validation = validateTopology(topology);
   if (!validation.valid) {
