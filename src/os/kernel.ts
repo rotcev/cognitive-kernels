@@ -1817,7 +1817,7 @@ export class OsKernel {
     const release = await this.mutex.acquire();
     try {
       await this.processOneResult(result);
-      this.lastProcessCompletionTime = Date.now();
+      // NOTE: lastProcessCompletionTime is set by transition via applyStateChanges
 
       // Meaningful tick: actual work just completed. This is the only place
       // tickCount is incremented in the event-driven model, so tick-based
@@ -1825,7 +1825,9 @@ export class OsKernel {
       // the timescale of real scheduling cycles, not 500ms timer fires.
       this.scheduler.tick();
 
-      // Process deferrals — conditions may now be met after this result
+      // NOTE: Pure deferral processing (bb_key_exists, process_dead, etc.) is now
+      // handled by transition in handleProcessCompleted. This call handles I/O-based
+      // deferred conditions that transition can't evaluate (runtime state).
       this.processDeferrals();
 
       // Fire-and-forget ephemerals spawned by this process's commands
@@ -3921,8 +3923,20 @@ Example: ["strategy-123", "strategy-456"]`;
   }
 
   halt(reason: string): void {
-    this.haltReason = reason;
-    this.emitProtocol("os_halt", reason);
+    // Delegate to transition via external_command halt event
+    const state = this.extractState();
+    const haltEvent: KernelEvent = {
+      type: "external_command",
+      command: "halt",
+      reason,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    };
+    const [newState, effects] = transition(state, haltEvent);
+    this.applyStateChanges(newState);
+    this.interpretTransitionEffects(effects);
+    this.logEvent(haltEvent);
+
     if (this.haltResolve) {
       // Event loop is running — haltResolve sets this.halted, clears timers, resolves
       this.haltResolve();

@@ -1078,9 +1078,7 @@ function processSpawnEphemeral(
 function handleExternalCommand(state: KernelState, event: ExternalCommandEvent): TransitionResult {
   switch (event.command) {
     case "halt":
-      return haltWith(state, "external_halt", [
-        { type: "emit_protocol", action: "os_external_command", message: "halt requested" },
-      ]);
+      return haltWith(state, event.reason ?? "external_halt", []);
     case "pause":
       // Pause doesn't halt — it's a runtime concern (timers paused, no new submissions)
       // but it's visible as an effect

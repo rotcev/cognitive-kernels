@@ -118,6 +118,8 @@ export type ShellOutputEvent = BaseEvent & {
 export type ExternalCommandEvent = BaseEvent & {
   type: "external_command";
   command: "halt" | "pause" | "resume";
+  /** Custom halt reason (when command is "halt"). */
+  reason?: string;
 };
 
 /** shouldHalt() was evaluated. */
