@@ -32,17 +32,7 @@ vi.mock("../../src/brain/create-brain.js", () => ({
   }),
 }));
 
-// Mock OsKernel (still imported but no longer used in the main path)
-vi.mock("../../src/os/kernel.js", () => ({
-  OsKernel: class MockOsKernel {
-    constructor() {}
-    run() {
-      return Promise.resolve({});
-    }
-  },
-}));
-
-// Mock runKernel — the new primary path
+// Mock runKernel — the primary path
 vi.mock("../../src/os/run-kernel.js", async (importOriginal) => {
   const original = (await importOriginal()) as any;
   return {

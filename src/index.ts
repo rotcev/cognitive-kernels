@@ -24,7 +24,7 @@ export { createBrain } from "./brain/create-brain.js";
 export { ClaudeBrain, ClaudeBrainThread } from "./brain/claude-brain.js";
 export { CodexBrain, CodexBrainThread } from "./brain/codex-brain.js";
 export { runOsMode } from "./os/entry.js";
-export { OsKernel } from "./os/kernel.js";
+export { runKernel } from "./os/run-kernel.js";
 export { parseOsConfig, DEFAULT_OS_CONFIG } from "./os/config.js";
 export {
   KernelRunManager,

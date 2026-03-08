@@ -3,7 +3,6 @@ import path from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { parse as parseToml } from "smol-toml";
 import { parseOsConfig } from "./config.js";
-import { OsKernel } from "./kernel.js";
 import { OsProtocolEmitter } from "./protocol-emitter.js";
 import { createBrain } from "../brain/create-brain.js";
 import { createDbConnection } from "../db/connection.js";
@@ -121,7 +120,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
     });
   }
 
-  // Initialize memory store (mirrors what OsKernel constructor does)
+  // Initialize memory store
   const memoryStore = new ScopedMemoryStore(osConfig.memory, input.cwd);
   memoryStore.loadHeuristics();
   memoryStore.loadBlueprints();
@@ -180,8 +179,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
 
 /**
  * Build a rich objective for the memory-consolidator daemon.
- * Standalone version of OsKernel.buildConsolidatorObjective() —
- * injects the full heuristic inventory so the LLM can reason about
+ * Injects the full heuristic inventory so the LLM can reason about
  * duplicates, contradictions, gaps, and patterns worth extracting.
  */
 function buildConsolidatorObjective(memoryStore: ScopedMemoryStore, basePath: string): string {

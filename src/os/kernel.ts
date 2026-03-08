@@ -67,6 +67,12 @@ import type { KernelState } from "./state-machine/state.js";
 import type { TopologyExpr, MetacogMemoryCommand } from "./topology/types.js";
 
 
+/**
+ * @deprecated Use `runKernel()` from `./run-kernel.js` instead.
+ * This class is retained only for the sub-kernel executor which still
+ * uses the tick-based approach. It will be removed once sub-kernels
+ * are migrated to runKernel().
+ */
 export class OsKernel {
   readonly runId = randomUUID();
   private readonly config: OsConfig;
