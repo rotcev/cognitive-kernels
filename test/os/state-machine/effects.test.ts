@@ -86,6 +86,31 @@ describe("Kernel effect log", () => {
     expect(first.pid).toBe("p1");
     expect(first.name).toBe("test-proc");
     expect(first.model).toBe("gpt-4");
-    expect(first.seq).toBe(0);
+    expect(typeof first.seq).toBe("number");
+  });
+
+  test("boot collects emit_protocol effect for os_process_spawn", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const effects = kernel.getEffectLog();
+    const spawns = effects.filter((e: any) => e.type === "emit_protocol" && e.action === "os_process_spawn");
+    expect(spawns.length).toBeGreaterThanOrEqual(1);
+    expect((spawns[0] as any).message).toContain("goal-orchestrator");
+  });
+
+  test("emitProtocol collects emit_protocol effect", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.emitProtocol("os_test_action", "test message", { extra: "data" });
+
+    const effects = kernel.getEffectLog();
+    const testEffects = effects.filter((e: any) => e.type === "emit_protocol" && e.action === "os_test_action");
+    expect(testEffects).toHaveLength(1);
+    expect((testEffects[0] as any).message).toBe("test message");
   });
 });

@@ -350,12 +350,9 @@ export class OsKernel {
 
     this.supervisor.activate(goalProc.pid);
 
-    this.emitter?.emit({
-      action: "os_process_spawn",
-      status: "completed",
+    this.emitProtocol("os_process_spawn", "boot goal-orchestrator", {
       agentId: goalProc.pid,
       agentName: goalProc.name,
-      message: `boot goal-orchestrator`,
     });
 
     // Pre-seed design guidelines to blackboard — readable by all processes,
@@ -957,16 +954,10 @@ export class OsKernel {
               if (killCb) {
                 killCb();
               }
-              this.emitter?.emit({
-                action: "os_process_kill",
-                status: "completed",
+              this.emitProtocol("os_process_kill", `watchdog_kill: ${cmd.reason}`, {
                 agentId: cmd.pid,
                 agentName: this.table.get(cmd.pid)?.name ?? cmd.pid,
-                message: `watchdog_kill: ${cmd.reason}`,
-                detail: {
-                  trigger: "watchdog",
-                  reason: cmd.reason,
-                },
+                detail: { trigger: "watchdog", reason: cmd.reason },
               });
             } else {
               try {
@@ -4196,6 +4187,15 @@ export class OsKernel {
     } as KernelEffect);
   }
 
+  /**
+   * Emit a protocol event AND collect it as an emit_protocol effect.
+   * Phase 2 wrapper — progressively replacing direct this.emitter?.emit() calls.
+   */
+  private emitProtocol(action: string, message: string, detail?: Record<string, unknown>): void {
+    this.collectEffect({ type: "emit_protocol", action, message });
+    this.emitter?.emit({ action, status: "completed", message, ...detail });
+  }
+
   /** Get the effect log (for testing and Lens). */
   getEffectLog(): readonly KernelEffect[] {
     return this.effectLog;
@@ -4619,11 +4619,7 @@ Example: ["strategy-123", "strategy-456"]`;
 
   halt(reason: string): void {
     this.haltReason = reason;
-    this.emitter?.emit({
-      action: "os_halt",
-      status: "completed",
-      message: reason,
-    });
+    this.emitProtocol("os_halt", reason);
     if (this.haltResolve) {
       // Event loop is running — haltResolve sets this.halted, clears timers, resolves
       this.haltResolve();
