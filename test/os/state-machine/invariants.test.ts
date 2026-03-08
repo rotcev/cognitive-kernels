@@ -90,6 +90,25 @@ const arbCommand: fc.Arbitrary<OsProcessCommand> = fc.oneof(
   }),
 );
 
+/** Generate a random JSON string for metacog responses. */
+const arbMetacogJsonResponse: fc.Arbitrary<string> = fc.oneof(
+  // Valid topology format
+  fc.record({
+    assessment: fc.string({ minLength: 1, maxLength: 50 }),
+    topology: fc.constant(null),
+    memory: fc.constant([]),
+    halt: fc.constant(null),
+  }).map(obj => JSON.stringify(obj)),
+  // Valid legacy format
+  fc.record({
+    commands: fc.constant([]),
+  }).map(obj => JSON.stringify(obj)),
+  // Invalid JSON
+  fc.string({ minLength: 1, maxLength: 50 }).filter(s => {
+    try { JSON.parse(s); return false; } catch { return true; }
+  }),
+);
+
 /** Generate a KernelEvent that the transition function handles. */
 const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
   fc.record({
@@ -157,6 +176,37 @@ const arbEvent: fc.Arbitrary<KernelEvent> = fc.oneof(
     pid: fc.constantFrom("p0", "p1", "nonexistent"),
     name: fc.string({ minLength: 1, maxLength: 20 }),
     model: fc.constant("gpt-4"),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  // metacog_response_received with random JSON strings
+  fc.record({
+    type: fc.constant("metacog_response_received" as const),
+    response: arbMetacogJsonResponse,
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  // awareness_response_received with random adjustments/notes
+  fc.record({
+    type: fc.constant("awareness_response_received" as const),
+    adjustments: fc.array(fc.record({
+      processName: fc.string({ minLength: 1, maxLength: 20 }),
+      field: fc.constantFrom("priority", "objective"),
+      value: fc.string({ minLength: 1, maxLength: 20 }),
+    }), { minLength: 0, maxLength: 3 }),
+    notes: fc.array(fc.string({ minLength: 1, maxLength: 50 }), { minLength: 0, maxLength: 3 }),
+    flaggedHeuristics: fc.constant([]),
+    timestamp: fc.constant(Date.now()),
+    seq: fc.nat(),
+  }),
+  // llm_turn_completed with random pid/commands
+  fc.record({
+    type: fc.constant("llm_turn_completed" as const),
+    pid: fc.constantFrom("p0", "p1", "p2", "p3", "p4", "nonexistent"),
+    success: fc.boolean(),
+    response: fc.string({ maxLength: 50 }),
+    tokensUsed: fc.nat({ max: 5000 }),
+    commands: fc.array(fc.constant({ kind: "idle" as const }), { minLength: 0, maxLength: 3 }),
     timestamp: fc.constant(Date.now()),
     seq: fc.nat(),
   }),
@@ -351,6 +401,8 @@ describe("Transition effect completeness (property-based)", () => {
           "activate_process", "idle_process",
           "signal_emit", "child_done_signal",
           "flush_ipc", "rebuild_dag", "schedule_pass", "apply_strategies",
+          "run_llm", "run_metacog", "run_awareness", "run_ephemeral", "run_shell", "run_subkernel",
+          "spawn_topology_process", "kill_process", "drain_process",
         ]);
         for (const e of effects) {
           expect(knownEffectTypes.has(e.type)).toBe(true);
@@ -473,6 +525,109 @@ describe("Transition replay determinism", () => {
         },
       ),
       { numRuns: 200 },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure kernel invariants — property-based tests for new event handlers
+// ---------------------------------------------------------------------------
+
+describe("Pure kernel invariants", () => {
+  test("INVARIANT: metacog_response_received always clears metacogInflight", () => {
+    fc.assert(
+      fc.property(arbState, arbMetacogJsonResponse, (state, response) => {
+        // Pre-condition: metacog is inflight
+        state.metacogInflight = true;
+        state.halted = false;
+
+        const [newState] = transition(state, {
+          type: "metacog_response_received",
+          response,
+          timestamp: Date.now(),
+          seq: 0,
+        });
+
+        // Post-condition: metacogInflight is ALWAYS cleared, regardless of response validity
+        expect(newState.metacogInflight).toBe(false);
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  test("INVARIANT: run_metacog never emitted when metacogInflight is true", () => {
+    fc.assert(
+      fc.property(arbState, (state) => {
+        // Pre-condition: metacog is already inflight
+        state.metacogInflight = true;
+        state.halted = false;
+
+        const [, effects] = transition(state, {
+          type: "timer_fired",
+          timer: "metacog",
+          timestamp: Date.now(),
+          seq: 0,
+        });
+
+        // Post-condition: no metacog effect should be emitted
+        const hasRunMetacog = effects.some(e => e.type === "run_metacog");
+        const hasSubmitMetacog = effects.some(e => e.type === "submit_metacog");
+        expect(hasRunMetacog).toBe(false);
+        expect(hasSubmitMetacog).toBe(false);
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  test("INVARIANT: draining pid is killed on llm_turn_completed", () => {
+    fc.assert(
+      fc.property(
+        arbState,
+        fc.string({ minLength: 1, maxLength: 10 }),
+        (state, pidSuffix) => {
+          const pid = `drain-${pidSuffix}`;
+          state.halted = false;
+
+          // Set up: create a running process and add it to drainingPids
+          state.processes.set(pid, {
+            pid,
+            type: "lifecycle",
+            state: "running",
+            name: "draining-worker",
+            parentPid: null,
+            objective: "test objective",
+            priority: 50,
+            spawnedAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+            tickCount: 5,
+            tokensUsed: 1000,
+            model: "gpt-4",
+            workingDir: "/tmp",
+            children: [],
+            onParentDeath: "orphan",
+            restartPolicy: "never",
+          });
+          state.drainingPids.add(pid);
+
+          const [newState] = transition(state, {
+            type: "llm_turn_completed",
+            pid,
+            success: true,
+            response: "done",
+            tokensUsed: 100,
+            commands: [{ kind: "idle" }],
+            timestamp: Date.now(),
+            seq: 0,
+          });
+
+          // Post-conditions: process is dead and removed from drainingPids
+          const proc = newState.processes.get(pid);
+          expect(proc).toBeDefined();
+          expect(proc!.state).toBe("dead");
+          expect(newState.drainingPids.has(pid)).toBe(false);
+        },
+      ),
+      { numRuns: 300 },
     );
   });
 });
