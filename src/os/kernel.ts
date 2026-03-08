@@ -192,6 +192,11 @@ export class OsKernel {
   private ephemeralThreads: Map<string, import("../types.js").BrainThread> = new Map();
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
+  /** Transition-approved metacog evaluation — consumed by doMetacogCheck. */
+  private transitionApprovedMetacog = false;
+  /** Transition-approved awareness evaluation — consumed by doMetacogCheck. */
+  private transitionApprovedAwareness = false;
+
   /** Typed event log — the input side of the state machine. */
   private readonly eventLog: KernelEvent[] = [];
   private readonly nextSeq = createEventSequencer();
@@ -464,22 +469,26 @@ export class OsKernel {
    * Evaluates system state, applies metacog commands, runs awareness daemon.
    */
   private async doMetacogCheck(): Promise<number | undefined> {
-    this.logEvent({ type: "timer_fired", timer: "metacog" });
     if (this.metacogInFlight) return undefined;
 
-    // Metacog overdue safety net — ensure metacog evaluates during critical periods
-    // even if cadence/triggers don't fire naturally.
-    const ticksSinceMetacog = this.scheduler.tickCount - this.lastMetacogTick;
-    if (ticksSinceMetacog > 5 && this.scheduler.tickCount > 0) {
-      const hasLivingGoalWork = this.table.getAll().some(
-        p => p.state !== "dead" && p.type !== "daemon"
-      );
-      if (hasLivingGoalWork) {
-        this.addTrigger("goal_drift");
-      }
+    // Delegate scheduling decision to transition — it checks cadence, triggers, goal drift.
+    this.transitionApprovedMetacog = false;
+    this.transitionApprovedAwareness = false;
+    {
+      const mcTimerEvent: KernelEvent = {
+        type: "timer_fired",
+        timer: "metacog",
+        timestamp: Date.now(),
+        seq: this.nextSeq(),
+      };
+      this.logEvent(mcTimerEvent);
+      const state = this.extractState();
+      const [newState, effects] = transition(state, mcTimerEvent);
+      this.applyStateChanges(newState);
+      this.interpretTransitionEffects(effects);
     }
 
-    if (!this.shouldConsultMetacog()) return undefined;
+    if (!this.transitionApprovedMetacog) return undefined;
 
     const wakeNow = Date.now();
     const sinceLastWakeSec = this.lastMetacogWakeAt > 0
@@ -573,13 +582,12 @@ export class OsKernel {
       // Record progress snapshot for awareness context
       this.recordProgressSnapshot();
 
-      // Run awareness daemon at configured cadence
-      if (this.shouldConsultAwareness() && this.awarenessDaemon) {
+      // Run awareness daemon — transition decides cadence via submit_awareness effect
+      if (this.transitionApprovedAwareness && this.awarenessDaemon) {
         // Activate awareness process in table for observability
         const awarenessProc = this.table.getAll().find(
           (p) => p.name === "awareness-daemon" && p.state !== "dead",
         );
-        // TODO(Wave 7): Move awareness daemon lifecycle to transition effects
         if (awarenessProc) {
           this.supervisor.activate(awarenessProc.pid);
         }
@@ -637,7 +645,7 @@ export class OsKernel {
           // Awareness eval failed — continue without notes
         }
 
-        // TODO(Wave 7): Move awareness daemon idle to transition effects
+        // TODO: Move awareness daemon idle to transition effects
         // Return awareness process to idle
         if (awarenessProc) {
           this.supervisor.idle(awarenessProc.pid, {});
@@ -1345,6 +1353,8 @@ export class OsKernel {
           }
         }
 
+        // TODO(Wave 7): Dead executive recovery is now handled by transition's handleHousekeep.
+        // This tick()-path code is legacy (used by sub-kernels) — keep addTrigger for compatibility.
         this.addTrigger("process_failed");
 
         this.emitter?.emit({
@@ -1381,17 +1391,8 @@ export class OsKernel {
       }
     }
 
-    // 8e. Metacog overdue safety net — ensure metacog evaluates during critical periods
-    //      even if cadence/triggers don't fire naturally.
-    const ticksSinceMetacog = this.scheduler.tickCount - this.lastMetacogTick;
-    if (ticksSinceMetacog > 5 && this.scheduler.tickCount > 0) {
-      const hasLivingGoalWork = this.table.getAll().some(
-        p => p.state !== "dead" && p.type !== "daemon"
-      );
-      if (hasLivingGoalWork) {
-        this.addTrigger("goal_drift");
-      }
-    }
+    // 8e. Goal drift trigger detection is now handled by transition's handleHousekeep.
+    // pendingTriggers will already contain "goal_drift" if conditions are met.
 
     // 9. Consult metacog via daemon process IPC (Gap 5).
     // The metacog-daemon is a first-class daemon in the process table.
@@ -3341,6 +3342,8 @@ export class OsKernel {
       dagTopology: this.dagEngine.currentTopology(),
       deferrals: new Map(this.deferrals),
       pendingTriggers: [...this.pendingTriggers],
+      lastMetacogTick: this.lastMetacogTick,
+      metacogEvalCount: this.metacogEvalCount,
       activeStrategyId: this.activeStrategyId ?? null,
       matchedStrategyIds: this.bootMatchedStrategyIds ?? new Set(),
       halted: this.halted,
@@ -3370,6 +3373,8 @@ export class OsKernel {
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
     this.lastProcessCompletionTime = newState.lastProcessCompletionTime;
     this.housekeepCount = newState.housekeepCount;
+    this.lastMetacogTick = newState.lastMetacogTick;
+    this.metacogEvalCount = newState.metacogEvalCount;
     this.scheduler.setRoundRobinIndex(newState.schedulerRoundRobinIndex);
 
     // ── Process table — trivial sync ──
@@ -3525,14 +3530,6 @@ export class OsKernel {
           break;
         }
 
-        case "wake_process": {
-          const wakeProc = this.table.get(effect.pid);
-          if (wakeProc && (wakeProc.state === "idle" || wakeProc.state === "sleeping")) {
-            this.supervisor.activate(effect.pid);
-          }
-          break;
-        }
-
         case "activate_process": {
           const proc = this.table.get(effect.pid);
           if (proc && (proc.state === "idle" || proc.state === "sleeping")) {
@@ -3592,12 +3589,26 @@ export class OsKernel {
           break;
         }
 
+        case "submit_metacog": {
+          // Transition decided metacog should run — trigger the async metacog evaluation.
+          // The actual LLM call happens in doMetacogCheck; we just signal that transition approved it.
+          // doMetacogCheck already handles all the I/O (reading/writing blackboard, invoking LLM).
+          // Setting a flag here so doMetacogCheck knows transition approved the evaluation.
+          this.transitionApprovedMetacog = true;
+          break;
+        }
+
+        case "submit_awareness": {
+          // Transition decided awareness should run after metacog.
+          // The actual LLM call happens in doMetacogCheck's awareness section.
+          this.transitionApprovedAwareness = true;
+          break;
+        }
+
         case "schedule_timer":
         case "cancel_timer":
         case "persist_snapshot":
-        case "submit_metacog":
-        case "submit_awareness":
-          // These effect types are not yet produced by process_completed transitions
+          // These effect types are handled elsewhere or are observational
           break;
       }
     }

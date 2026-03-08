@@ -45,17 +45,16 @@ describe("KernelEffect types", () => {
       { type: "persist_memory", operation: "save_heuristics", seq: 9 },
       { type: "emit_protocol", action: "os_process_spawn", message: "test", seq: 10 },
       { type: "halt", reason: "goal_work_complete", seq: 11 },
-      { type: "wake_process", pid: "p", seq: 12 },
-      { type: "activate_process", pid: "p", seq: 13 },
-      { type: "idle_process", pid: "p", wakeOnSignals: ["tick:1"], seq: 14 },
-      { type: "signal_emit", signal: "data:ready", sender: "p1", payload: { key: "val" }, seq: 15 },
-      { type: "child_done_signal", childPid: "c1", childName: "worker", parentPid: "p1", exitCode: 0, exitReason: "done", seq: 16 },
-      { type: "flush_ipc", seq: 17 },
-      { type: "rebuild_dag", seq: 18 },
-      { type: "schedule_pass", seq: 19 },
-      { type: "apply_strategies", strategyIds: ["s1", "s2"], seq: 20 },
+      { type: "activate_process", pid: "p", seq: 12 },
+      { type: "idle_process", pid: "p", wakeOnSignals: ["tick:1"], seq: 13 },
+      { type: "signal_emit", signal: "data:ready", sender: "p1", payload: { key: "val" }, seq: 14 },
+      { type: "child_done_signal", childPid: "c1", childName: "worker", parentPid: "p1", exitCode: 0, exitReason: "done", seq: 15 },
+      { type: "flush_ipc", seq: 16 },
+      { type: "rebuild_dag", seq: 17 },
+      { type: "schedule_pass", seq: 18 },
+      { type: "apply_strategies", strategyIds: ["s1", "s2"], seq: 19 },
     ];
-    expect(effects).toHaveLength(21);
+    expect(effects).toHaveLength(20);
     // Verify seq is monotonically increasing
     for (let i = 1; i < effects.length; i++) {
       expect(effects[i].seq).toBeGreaterThan(effects[i - 1].seq);

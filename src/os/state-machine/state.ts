@@ -55,6 +55,10 @@ export type KernelState = {
 
   // --- Metacognition ---
   pendingTriggers: OsMetacogTrigger[];
+  /** Tick count at which metacog last evaluated — used for goal_drift detection. */
+  lastMetacogTick: number;
+  /** Count of metacog evaluations — used for awareness cadence. */
+  metacogEvalCount: number;
 
   // --- Strategy ---
   /** Active scheduling strategy ID (for outcome attribution). */
@@ -105,6 +109,8 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     deferrals: new Map(),
 
     pendingTriggers: [],
+    lastMetacogTick: 0,
+    metacogEvalCount: 0,
 
     activeStrategyId: null,
     matchedStrategyIds: new Set(),

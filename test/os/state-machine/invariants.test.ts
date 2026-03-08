@@ -335,6 +335,102 @@ describe("Transition invariants (property-based)", () => {
   });
 });
 
+describe("Transition effect completeness (property-based)", () => {
+  test("INVARIANT: effects array fully determines all observable side effects", () => {
+    fc.assert(
+      fc.property(arbState, arbEvent, (state, event) => {
+        const [newState, effects] = transition(state, event);
+
+        // All effect types must be from the known set — no unknown side channels.
+        const knownEffectTypes = new Set([
+          "submit_llm", "submit_ephemeral", "submit_metacog", "submit_awareness",
+          "start_shell", "start_subkernel",
+          "schedule_timer", "cancel_timer",
+          "persist_snapshot", "persist_memory",
+          "emit_protocol", "halt",
+          "activate_process", "idle_process",
+          "signal_emit", "child_done_signal",
+          "flush_ipc", "rebuild_dag", "schedule_pass", "apply_strategies",
+        ]);
+        for (const e of effects) {
+          expect(knownEffectTypes.has(e.type)).toBe(true);
+        }
+
+        // If state changed, there must be corresponding effects or state fields changed.
+        // Specifically: if a process was added, there must be a submit_llm or activate_process effect.
+        const newPids = new Set(newState.processes.keys());
+        const oldPids = new Set(state.processes.keys());
+        for (const pid of newPids) {
+          if (!oldPids.has(pid)) {
+            // New process — must have an effect that references it
+            const hasEffect = effects.some(
+              e => ("pid" in e && e.pid === pid)
+            );
+            // Boot creates processes without immediate submission (scheduling loop handles it),
+            // but daemon restart and dead executive recovery do emit submit_llm.
+            // The key invariant: new processes are either submitted or at least referenced in protocol.
+            if (event.type !== "boot") {
+              expect(hasEffect).toBe(true);
+            }
+          }
+        }
+
+        // If halt effect was emitted, it must be the authoritative halt signal.
+        const haltEffects = effects.filter(e => e.type === "halt");
+        if (haltEffects.length > 0) {
+          expect(newState.halted).toBe(true);
+          // At most one halt effect per transition
+          expect(haltEffects.length).toBe(1);
+        }
+
+        // If triggers were added to pendingTriggers, they should be from the known set.
+        const knownTriggers = new Set([
+          "process_failed", "dag_deadlock", "resource_exhaustion",
+          "ipc_timeout", "priority_conflict", "checkpoint_restore",
+          "goal_drift",
+        ]);
+        for (const trigger of newState.pendingTriggers) {
+          expect(knownTriggers.has(trigger)).toBe(true);
+        }
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  test("INVARIANT: submit_metacog emitted only when cadence or triggers warrant it", () => {
+    fc.assert(
+      fc.property(arbState, (state) => {
+        // Ensure non-halted state for this test
+        state.halted = false;
+        state.startTime = Date.now() - 10000;
+        state.tickCount = 10; // past boot phase
+
+        const [, effects] = transition(state, {
+          type: "timer_fired",
+          timer: "metacog",
+          timestamp: Date.now(),
+          seq: 0,
+        });
+
+        const hasSubmitMetacog = effects.some(e => e.type === "submit_metacog");
+
+        // If emitted, there must be a reason: triggers or cadence
+        if (hasSubmitMetacog) {
+          const hasTriggers = state.pendingTriggers.length > 0;
+          const cadenceFires = state.tickCount > 0 &&
+            state.tickCount % state.config.scheduler.metacogCadence === 0;
+          // Goal drift might have been added during the transition itself
+          const goalDriftDetected = state.tickCount - state.lastMetacogTick > 5 &&
+            [...state.processes.values()].some(p => p.state !== "dead" && p.type !== "daemon");
+
+          expect(hasTriggers || cadenceFires || goalDriftDetected).toBe(true);
+        }
+      }),
+      { numRuns: 300 },
+    );
+  });
+});
+
 describe("Transition replay determinism", () => {
   test("same event sequence on same initial state → same final state", () => {
     fc.assert(

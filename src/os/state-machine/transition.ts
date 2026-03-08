@@ -1274,13 +1274,65 @@ function handleTimerFired(state: KernelState, event: TimerFiredEvent): Transitio
         runId: state.runId,
       }])];
     case "metacog":
+      return handleMetacogTimer(state);
     case "watchdog":
-      // Metacog and watchdog are I/O-heavy (LLM calls).
+      // Watchdog is I/O-heavy (LLM calls, process inspection).
       // Transition passes through — kernel handles via existing code paths.
       return [state, []];
     default:
       return [state, []];
   }
+}
+
+/**
+ * Metacog timer handler — decides WHEN to submit metacog/awareness evaluations.
+ * The actual LLM invocation stays in the kernel; transition just emits the effect.
+ */
+function handleMetacogTimer(state: KernelState): TransitionResult {
+  if (state.halted) return [state, []];
+
+  const effects: KernelEffectInput[] = [];
+  const pendingTriggers = [...state.pendingTriggers];
+
+  // Goal drift safety net — if metacog hasn't evaluated in too long with living goal work
+  const ticksSinceMetacog = state.tickCount - state.lastMetacogTick;
+  if (ticksSinceMetacog > 5 && state.tickCount > 0) {
+    const hasLivingGoalWork = [...state.processes.values()].some(
+      p => p.state !== "dead" && p.type !== "daemon"
+    );
+    if (hasLivingGoalWork && !pendingTriggers.includes("goal_drift")) {
+      pendingTriggers.push("goal_drift");
+    }
+  }
+
+  // Cadence check: metacog should run if there are triggers OR tick-based cadence fires
+  const cadenceFires = state.tickCount > 0 &&
+    state.tickCount % state.config.scheduler.metacogCadence === 0;
+  const shouldRunMetacog = pendingTriggers.length > 0 || cadenceFires;
+
+  if (shouldRunMetacog) {
+    effects.push({
+      type: "submit_metacog",
+      triggerCount: pendingTriggers.length,
+    });
+  }
+
+  // Awareness cadence check: runs every N metacog evaluations
+  // Note: awareness will actually run after metacog completes — kernel coordinates this.
+  // We emit the effect here so the kernel knows transition decided awareness should run.
+  if (shouldRunMetacog && state.config.awareness.enabled) {
+    const nextMetacogEvalCount = state.metacogEvalCount + 1;
+    if (nextMetacogEvalCount > 0 && nextMetacogEvalCount % state.config.awareness.cadence === 0) {
+      effects.push({
+        type: "submit_awareness",
+      });
+    }
+  }
+
+  return [
+    { ...state, pendingTriggers },
+    assignEffectSeqs(effects),
+  ];
 }
 
 function handleHousekeep(state: KernelState, event: TimerFiredEvent): TransitionResult {
@@ -1580,6 +1632,18 @@ function handleHousekeep(state: KernelState, event: TimerFiredEvent): Transition
     });
   }
 
+  // 7b. Goal drift trigger — if metacog hasn't evaluated in too long with living goal work,
+  //     add goal_drift trigger so the kernel's metacog check will fire.
+  const ticksSinceMetacog = state.tickCount - state.lastMetacogTick;
+  if (ticksSinceMetacog > 5 && state.tickCount > 0) {
+    const hasLivingGoalWork = [...processes.values()].some(
+      p => p.state !== "dead" && p.type !== "daemon"
+    );
+    if (hasLivingGoalWork && !pendingTriggers.includes("goal_drift")) {
+      pendingTriggers.push("goal_drift");
+    }
+  }
+
   // 8. Strategy application — set activeStrategyId from boot-matched strategies
   let activeStrategyId = state.activeStrategyId;
   if (state.matchedStrategyIds.size > 0) {
@@ -1668,6 +1732,8 @@ function handleMetacogEvaluated(state: KernelState, event: MetacogEvaluatedEvent
     {
       ...state,
       pendingTriggers,
+      lastMetacogTick: state.tickCount,
+      metacogEvalCount: state.metacogEvalCount + 1,
     },
     assignEffectSeqs(effects),
   ];
@@ -1728,7 +1794,7 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
     // Signal parent process
     if (proc.parentPid) {
       effects.push({
-        type: "wake_process",
+        type: "activate_process",
         pid: proc.parentPid,
       });
     }

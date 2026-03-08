@@ -1410,7 +1410,7 @@ describe("transition — shell_output", () => {
     expect(effects).toHaveLength(0);
   });
 
-  test("shell exit emits wake_process for parent", () => {
+  test("shell exit emits activate_process for parent", () => {
     const state = makeState();
     const [s1] = transition(state, bootEvent());
     const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
@@ -1447,9 +1447,9 @@ describe("transition — shell_output", () => {
       seq: 99,
     });
 
-    const wakeEffect = effects.find(e => e.type === "wake_process");
+    const wakeEffect = effects.find(e => e.type === "activate_process");
     expect(wakeEffect).toBeDefined();
-    expect(wakeEffect!.type === "wake_process" && wakeEffect!.pid).toBe(orch.pid);
+    expect(wakeEffect!.type === "activate_process" && wakeEffect!.pid).toBe(orch.pid);
   });
 
   test("no-op when halted", () => {

@@ -97,12 +97,6 @@ export type HaltEffect = BaseEffect & {
   reason: string;
 };
 
-/** Wake a process (set to running if idle/sleeping). */
-export type WakeProcessEffect = BaseEffect & {
-  type: "wake_process";
-  pid: string;
-};
-
 /** Activate a process (idle/sleeping → running in scheduler). */
 export type ActivateProcessEffect = BaseEffect & {
   type: "activate_process";
@@ -169,7 +163,6 @@ export type KernelEffect =
   | PersistMemoryEffect
   | EmitProtocolEffect
   | HaltEffect
-  | WakeProcessEffect
   | ActivateProcessEffect
   | IdleProcessEffect
   | SignalEmitEffect
