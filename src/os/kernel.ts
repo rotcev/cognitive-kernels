@@ -482,6 +482,7 @@ export class OsKernel {
    * equivalent work (flush IPC, rebuild DAG, reschedule).
    */
   private safeHousekeep(): void {
+    this.logEvent({ type: "timer_fired", timer: "housekeep" });
     if (this.halted) return;
     const release = this.mutex.tryAcquire();
     if (!release) return; // mutex busy — skip this cycle
@@ -502,6 +503,7 @@ export class OsKernel {
   }
 
   private safeSnapshotWrite(): void {
+    this.logEvent({ type: "timer_fired", timer: "snapshot" });
     if (this.halted) return;
     try {
       const snap = this.snapshot();
@@ -520,6 +522,7 @@ export class OsKernel {
    * Evaluates system state, applies metacog commands, runs awareness daemon.
    */
   private async doMetacogCheck(): Promise<number | undefined> {
+    this.logEvent({ type: "timer_fired", timer: "metacog" });
     if (this.metacogInFlight) return undefined;
 
     // Metacog overdue safety net — ensure metacog evaluates during critical periods
@@ -816,6 +819,7 @@ export class OsKernel {
    * Invokes metacog with a "tick_stall" trigger, which can kill hung processes.
    */
   private async watchdogCheck(): Promise<void> {
+    this.logEvent({ type: "timer_fired", timer: "watchdog" });
     // Only relevant when a tick is stuck
     if (!this.tickInProgress) return;
     // Don't stack metacog evaluations

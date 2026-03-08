@@ -128,6 +128,20 @@ describe("Kernel event log", () => {
     expect(first.seq).toBeGreaterThan(0);
   });
 
+  test("housekeep records timer_fired event", () => {
+    const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
+    const kernel = new OsKernel(config, new MockBrain(), tmpDir);
+    kernel.boot("Test goal");
+
+    const k = kernel as any;
+    k.doSchedulingPass = () => {};
+    k.safeHousekeep();
+
+    const log = kernel.getEventLog();
+    const timerEvents = log.filter((e: any) => e.type === "timer_fired" && e.timer === "housekeep");
+    expect(timerEvents.length).toBeGreaterThanOrEqual(1);
+  });
+
   test("process completion records process_completed event", async () => {
     const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000, maxConcurrentProcesses: 10 } });
     const kernel = new OsKernel(config, new MockBrain(), tmpDir);
