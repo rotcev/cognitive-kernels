@@ -305,6 +305,41 @@ describe("transition — unhandled events", () => {
   });
 });
 
+describe("transition — external_command", () => {
+  test("halt command halts immediately", () => {
+    const state = makeState();
+    state.startTime = Date.now();
+    const [newState, effects] = transition(state, {
+      type: "external_command", command: "halt", timestamp: Date.now(), seq: 0,
+    });
+
+    expect(newState.halted).toBe(true);
+    expect(newState.haltReason).toBe("external_halt");
+    expect(effects.some(e => e.type === "halt")).toBe(true);
+  });
+
+  test("pause command emits protocol effect but does not halt", () => {
+    const state = makeState();
+    const [newState, effects] = transition(state, {
+      type: "external_command", command: "pause", timestamp: Date.now(), seq: 0,
+    });
+
+    expect(newState.halted).toBe(false);
+    const proto = effects.filter(e => e.type === "emit_protocol") as any[];
+    expect(proto.some(e => e.message.includes("pause"))).toBe(true);
+  });
+
+  test("resume command emits protocol effect", () => {
+    const state = makeState();
+    const [newState, effects] = transition(state, {
+      type: "external_command", command: "resume", timestamp: Date.now(), seq: 0,
+    });
+
+    expect(newState.halted).toBe(false);
+    expect(effects.some(e => e.type === "emit_protocol")).toBe(true);
+  });
+});
+
 describe("transition — determinism", () => {
   test("boot → halt_check sequence is reproducible (except PIDs)", () => {
     const state1 = makeState({ tokenBudget: 50 });
@@ -329,5 +364,83 @@ describe("transition — determinism", () => {
     expect(halted1.halted).toBe(halted2.halted);
     expect(halted1.haltReason).toBe(halted2.haltReason);
     expect(haltEffects1.map(e => e.type)).toEqual(haltEffects2.map(e => e.type));
+  });
+});
+
+describe("transition — integration roundtrip", () => {
+  test("boot → multiple halt_checks → eventual halt produces correct final state", () => {
+    const state = makeState({ tokenBudget: 200 });
+    let seq = 0;
+
+    // 1. Boot
+    const [s1, e1] = transition(state, { type: "boot", goal: "test", timestamp: Date.now(), seq: seq++ });
+    expect(s1.goal).toBe("test");
+    expect(s1.processes.size).toBe(2);
+    expect(e1.some(e => e.type === "submit_llm")).toBe(true);
+
+    // 2. Simulate process completion by manually updating tokens
+    //    (process_completed isn't handled by transition yet — strangler pattern)
+    for (const proc of s1.processes.values()) {
+      if (proc.type === "lifecycle") proc.tokensUsed = 50;
+    }
+
+    // 3. Halt check — should not halt (tokens under budget)
+    const [s2] = transition(s1, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s2.halted).toBe(false);
+
+    // 4. More tokens used
+    for (const proc of s2.processes.values()) {
+      if (proc.type === "lifecycle") proc.tokensUsed = 250;
+    }
+
+    // 5. Halt check — should halt now (tokens exceed 200 budget)
+    const [s3, e3] = transition(s2, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s3.halted).toBe(true);
+    expect(s3.haltReason).toBe("token_budget_exceeded");
+    expect(e3.some(e => e.type === "halt")).toBe(true);
+
+    // 6. Further halt checks are no-ops
+    const [s4, e4] = transition(s3, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s4.halted).toBe(true);
+    expect(e4).toHaveLength(0);
+  });
+
+  test("boot → external halt → halt_check is no-op", () => {
+    const state = makeState();
+    let seq = 0;
+
+    const [s1] = transition(state, { type: "boot", goal: "test", timestamp: Date.now(), seq: seq++ });
+    const [s2, e2] = transition(s1, { type: "external_command", command: "halt", timestamp: Date.now(), seq: seq++ });
+
+    expect(s2.halted).toBe(true);
+    expect(s2.haltReason).toBe("external_halt");
+    expect(e2.some(e => e.type === "halt")).toBe(true);
+
+    // After halt, halt_check is a no-op
+    const [s3, e3] = transition(s2, { type: "halt_check", result: false, reason: null, timestamp: Date.now(), seq: seq++ });
+    expect(s3.halted).toBe(true);
+    expect(e3).toHaveLength(0);
+  });
+
+  test("state is never mutated — immutability invariant", () => {
+    const original = makeState({ tokenBudget: 100 });
+    const frozen = JSON.parse(JSON.stringify({
+      goal: original.goal,
+      halted: original.halted,
+      processCount: original.processes.size,
+    }));
+
+    // Run through several transitions
+    const [s1] = transition(original, bootEvent("test"));
+    const [s2] = transition(s1, haltCheckEvent());
+
+    // Original must be unchanged
+    expect(original.goal).toBe(frozen.goal);
+    expect(original.halted).toBe(frozen.halted);
+    expect(original.processes.size).toBe(frozen.processCount);
+
+    // s1 should differ from original
+    expect(s1.goal).not.toBe(original.goal);
+    expect(s1.processes.size).not.toBe(original.processes.size);
   });
 });

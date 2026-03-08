@@ -11,7 +11,7 @@
  */
 
 import type { KernelState } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess } from "../types.js";
 import { randomUUID } from "node:crypto";
@@ -28,6 +28,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleBoot(state, event);
     case "halt_check":
       return handleHaltCheck(state, event);
+    case "external_command":
+      return handleExternalCommand(state, event);
     default:
       // Unhandled events are no-ops — the kernel class still handles them
       // via its existing code paths (strangler pattern).
@@ -208,6 +210,25 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
   }
 
   return [state, []];
+}
+
+function handleExternalCommand(state: KernelState, event: ExternalCommandEvent): TransitionResult {
+  switch (event.command) {
+    case "halt":
+      return haltWith(state, "external_halt", [
+        { type: "emit_protocol", action: "os_external_command", message: "halt requested" },
+      ]);
+    case "pause":
+      // Pause doesn't halt — it's a runtime concern (timers paused, no new submissions)
+      // but it's visible as an effect
+      return [state, assignEffectSeqs([
+        { type: "emit_protocol", action: "os_external_command", message: "pause requested" },
+      ])];
+    case "resume":
+      return [state, assignEffectSeqs([
+        { type: "emit_protocol", action: "os_external_command", message: "resume requested" },
+      ])];
+  }
 }
 
 // ---------------------------------------------------------------------------
