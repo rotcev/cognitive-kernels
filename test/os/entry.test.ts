@@ -1,8 +1,20 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const { mockReadFile, runMock, capture } = vi.hoisted(() => ({
+const { mockReadFile, runKernelMock, capture } = vi.hoisted(() => ({
   mockReadFile: vi.fn(),
-  runMock: vi.fn(async () => ({ runId: "run-1" })),
+  runKernelMock: vi.fn(async () => ({
+    runId: "run-1",
+    goal: "test goal",
+    halted: true,
+    haltReason: "test",
+    config: { kernel: { tokenBudget: 100000 } },
+    processes: new Map(),
+    blackboard: new Map(),
+    tickCount: 0,
+    dagTopology: { nodes: [], edges: [] },
+    schedulerHeuristics: [],
+    startTime: Date.now(),
+  })),
   capture: {
     osConfig: undefined as any,
     brainConfig: undefined as any,
@@ -20,14 +32,46 @@ vi.mock("../../src/brain/create-brain.js", () => ({
   }),
 }));
 
+// Mock OsKernel (still imported but no longer used in the main path)
 vi.mock("../../src/os/kernel.js", () => ({
   OsKernel: class MockOsKernel {
-    constructor(config: unknown) {
-      capture.osConfig = config;
+    constructor() {}
+    run() {
+      return Promise.resolve({});
     }
+  },
+}));
 
-    run(goal: string) {
-      return runMock(goal);
+// Mock runKernel — the new primary path
+vi.mock("../../src/os/run-kernel.js", async (importOriginal) => {
+  const original = (await importOriginal()) as any;
+  return {
+    ...original,
+    runKernel: vi.fn(
+      async (
+        _goal: string,
+        config: unknown,
+        _brain: unknown,
+        _emitter: unknown,
+        _options: unknown,
+      ) => {
+        capture.osConfig = config;
+        return runKernelMock();
+      },
+    ),
+  };
+});
+
+// Mock ScopedMemoryStore so it doesn't touch the filesystem
+vi.mock("../../src/os/scoped-memory-store.js", () => ({
+  ScopedMemoryStore: class MockScopedMemoryStore {
+    loadHeuristics() {}
+    loadBlueprints() {}
+    hasNewEpisodicData() {
+      return false;
+    }
+    getAll() {
+      return [];
     }
   },
 }));
@@ -39,7 +83,7 @@ describe("runOsMode", () => {
     capture.osConfig = undefined;
     capture.brainConfig = undefined;
     mockReadFile.mockReset();
-    runMock.mockClear();
+    runKernelMock.mockClear();
   });
 
   test("defaults codex provider models to gpt-5.3-codex", async () => {

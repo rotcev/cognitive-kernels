@@ -8,6 +8,8 @@ import { OsProtocolEmitter } from "./protocol-emitter.js";
 import { createBrain } from "../brain/create-brain.js";
 import { createDbConnection } from "../db/connection.js";
 import { NeonStorageBackend } from "../db/storage-backend.js";
+import { ScopedMemoryStore } from "./scoped-memory-store.js";
+import { runKernel, stateToSnapshot } from "./run-kernel.js";
 import type { OsSystemSnapshot } from "./types.js";
 import type { BrainRuntimeConfig } from "../types.js";
 
@@ -119,7 +121,16 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
     });
   }
 
-  const kernel = new OsKernel(osConfig, client, input.cwd, emitter, browserMcpConfig);
+  // Initialize memory store (mirrors what OsKernel constructor does)
+  const memoryStore = new ScopedMemoryStore(osConfig.memory, input.cwd);
+  memoryStore.loadHeuristics();
+  memoryStore.loadBlueprints();
+
+  // Check for episodic data and build consolidator objective
+  const hasNewEpisodicData = memoryStore.hasNewEpisodicData();
+  const consolidatorObjective = hasNewEpisodicData
+    ? buildConsolidatorObjective(memoryStore, osConfig.memory.basePath)
+    : undefined;
 
   // Crash handlers — ensure unhandled errors are captured in the protocol before the process dies
   const emitCrash = (label: string, err: unknown) => {
@@ -146,9 +157,95 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
   });
 
   try {
-    return await kernel.run(input.goal);
+    const finalState = await runKernel(input.goal, osConfig, client, emitter ?? null, {
+      workingDir: input.cwd,
+      memoryStore,
+      hasNewEpisodicData,
+      consolidatorObjective,
+      awarenessModel: osConfig.awareness?.model,
+    });
+
+    const snapshot = stateToSnapshot(finalState);
+
+    // Persist final snapshot and close emitter (mirrors old kernel.run() shutdown)
+    emitter?.saveSnapshot(snapshot);
+    await emitter?.close();
+
+    return snapshot;
   } catch (err) {
     emitCrash("kernel.run", err);
     throw err;
   }
+}
+
+/**
+ * Build a rich objective for the memory-consolidator daemon.
+ * Standalone version of OsKernel.buildConsolidatorObjective() —
+ * injects the full heuristic inventory so the LLM can reason about
+ * duplicates, contradictions, gaps, and patterns worth extracting.
+ */
+function buildConsolidatorObjective(memoryStore: ScopedMemoryStore, basePath: string): string {
+  const allHeuristics = memoryStore.getAll();
+  const lines: string[] = [
+    "You are the memory consolidator — responsible for the quality and coherence",
+    "of this system's learned knowledge. The heuristics below are what the cognitive",
+    "kernel has learned across runs. Your job is to review them and improve the store.",
+    "",
+    "## Current Heuristics",
+  ];
+
+  if (allHeuristics.length === 0) {
+    lines.push("(none yet — the system is fresh)");
+  } else {
+    for (const h of allHeuristics) {
+      const scopeLabel = h.scope ? ` scope=${h.scope}` : "";
+      const superseded = h.supersededBy ? ` SUPERSEDED by ${h.supersededBy}` : "";
+      lines.push(
+        `- [id=${h.id}, conf=${h.confidence.toFixed(2)}, reinforced=${h.reinforcementCount}x${scopeLabel}${superseded}] ${h.heuristic}`,
+        `  context: ${h.context}`,
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    "## Your Tasks",
+    "",
+    "Review the heuristics above and take any of these actions using OS commands:",
+    "",
+    "### 1. Merge duplicates",
+    "If two or more heuristics express the same insight in different words,",
+    "use `learn` to create a single cleaner version, then `supersede` the old ones.",
+    "The merged heuristic should have confidence = max of the originals.",
+    "",
+    "### 2. Flag contradictions",
+    "If two heuristics give opposing advice for the same context, report the",
+    "contradiction via `bb_write` key \"consolidation:contradictions\" so the",
+    "metacog can evaluate which is correct. Do not resolve contradictions yourself",
+    "— the system needs runtime evidence to determine which is right.",
+    "",
+    "### 3. Extract missing patterns",
+    `Read the DAG snapshots at \`${basePath}/snapshots/\``,
+    "using your file tools. Look for recurring topology patterns (process types,",
+    "coordination sequences, failure modes) that are NOT yet captured as heuristics.",
+    "Use `learn` to codify any patterns you find, with confidence 0.5 (tentative).",
+    "",
+    "### 4. Sharpen vague heuristics",
+    "If a heuristic is too vague to be actionable (e.g. \"be careful with dependencies\"),",
+    "either make it specific via `learn` + `supersede`, or flag it for removal.",
+    "",
+    "## Output",
+    "After completing your review, write a summary to the blackboard:",
+    "`bb_write` key \"consolidation:report\" with: merges performed, contradictions found,",
+    "patterns extracted, heuristics sharpened. Then go idle.",
+    "",
+    "## Constraints",
+    "- Do NOT invent heuristics from general knowledge — only from evidence in the",
+    "  snapshot data or from patterns visible in the existing heuristic set.",
+    "- Preserve high-confidence, well-reinforced heuristics. Focus your energy on",
+    "  the low-confidence, low-reinforcement entries and obvious redundancies.",
+    "- This is a single pass — do your best work, write the report, then idle.",
+  );
+
+  return lines.join("\n");
 }

@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Brain } from "../types.js";
-import type { OsConfig } from "./types.js";
+import type { OsConfig, OsSystemSnapshot } from "./types.js";
 import type { OsProtocolEmitter } from "./protocol-emitter.js";
 import type { ScopedMemoryStore } from "./scoped-memory-store.js";
 import type { KernelState } from "./state-machine/state.js";
@@ -107,4 +107,58 @@ export async function runKernel(
   } as any);
 
   return state;
+}
+
+/**
+ * Convert KernelState to OsSystemSnapshot.
+ *
+ * This is the bridge between the pure state machine (which returns KernelState)
+ * and the existing API surface (which expects OsSystemSnapshot). The conversion
+ * is a pure data mapping — no I/O.
+ */
+export function stateToSnapshot(state: KernelState): OsSystemSnapshot {
+  const allProcesses = Array.from(state.processes.values());
+  const totalTokensUsed = allProcesses.reduce((sum, p) => sum + p.tokensUsed, 0);
+  const activeProcessCount = allProcesses.filter((p) => p.state === "running").length;
+  const stalledProcessCount = allProcesses.filter(
+    (p) => p.state === "sleeping" || p.state === "idle",
+  ).length;
+
+  const blackboard: Record<string, unknown> = {};
+  for (const [key, entry] of state.blackboard) {
+    if (!key.startsWith("_inbox:")) {
+      blackboard[key] = entry.value;
+    }
+  }
+
+  return {
+    runId: state.runId,
+    tickCount: state.tickCount,
+    goal: state.goal,
+    processes: allProcesses,
+    dagTopology: state.dagTopology,
+    dagMetrics: {
+      nodeCount: state.dagTopology.nodes.length,
+      edgeCount: state.dagTopology.edges.length,
+      maxDepth: 0,
+      runningCount: activeProcessCount,
+      stalledCount: stalledProcessCount,
+      deadCount: 0,
+    },
+    ipcSummary: {
+      signalCount: 0,
+      blackboardKeyCount: state.blackboard.size,
+    },
+    progressMetrics: {
+      activeProcessCount,
+      stalledProcessCount,
+      totalTokensUsed,
+      tokenBudgetRemaining: state.config.kernel.tokenBudget - totalTokensUsed,
+      wallTimeElapsedMs: Date.now() - state.startTime,
+      tickCount: state.tickCount,
+    },
+    recentEvents: [],
+    recentHeuristics: state.schedulerHeuristics.slice(0, 10),
+    blackboard,
+  };
 }
