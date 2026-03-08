@@ -290,8 +290,10 @@ describe("transition — unhandled events", () => {
   test("unhandled event returns state unchanged with no effects", () => {
     const state = makeState();
     const [newState, effects] = transition(state, {
-      type: "timer_fired",
-      timer: "housekeep",
+      type: "shell_output",
+      pid: "nonexistent",
+      hasStdout: true,
+      hasStderr: false,
       timestamp: Date.now(),
       seq: 0,
     });
@@ -1015,5 +1017,150 @@ describe("transition — ephemeral_completed", () => {
     expect(state.blackboard.size).toBe(beforeBbSize);
     // Original process still running
     expect(state.processes.get(ephPid)?.state).toBe("running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// timer_fired (housekeep)
+// ---------------------------------------------------------------------------
+
+describe("transition — timer_fired (housekeep)", () => {
+  function timerEvent(timer: "housekeep" | "snapshot" | "metacog" | "watchdog", extra?: Partial<import("../../../src/os/state-machine/events.js").TimerFiredEvent>): import("../../../src/os/state-machine/events.js").KernelEvent {
+    return { type: "timer_fired", timer, timestamp: Date.now(), seq: 0, ...extra };
+  }
+
+  test("housekeep increments housekeepCount", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    expect(s1.housekeepCount).toBe(0);
+
+    const [s2] = transition(s1, timerEvent("housekeep"));
+    expect(s2.housekeepCount).toBe(1);
+
+    const [s3] = transition(s2, timerEvent("housekeep"));
+    expect(s3.housekeepCount).toBe(2);
+  });
+
+  test("housekeep wakes expired sleepers", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Put orchestrator to sleep (already expired)
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, {
+      ...orch,
+      state: "sleeping" as const,
+      sleepUntil: new Date(Date.now() - 1000).toISOString(), // expired 1s ago
+    });
+    const sleepState = { ...s1, processes };
+
+    const [s2] = transition(sleepState, timerEvent("housekeep"));
+    expect(s2.processes.get(orch.pid)?.state).toBe("running");
+  });
+
+  test("housekeep restores checkpointed processes", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "checkpoint" as const });
+    const cpState = { ...s1, processes };
+
+    const [s2] = transition(cpState, timerEvent("housekeep"));
+    expect(s2.processes.get(orch.pid)?.state).toBe("running");
+  });
+
+  test("housekeep stall detection force-wakes idle processes", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Set up stall conditions: no inflight, orchestrator idle, 3+ idle ticks
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "idle" as const });
+    const stallState = {
+      ...s1,
+      processes,
+      inflight: new Set<string>(),
+      consecutiveIdleTicks: 3,
+      lastProcessCompletionTime: Date.now() - 10000,
+    };
+
+    const [s2, effects] = transition(stallState, timerEvent("housekeep"));
+    expect(s2.processes.get(orch.pid)?.state).toBe("running");
+    expect(s2.consecutiveIdleTicks).toBe(0);
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("stall_detected"))).toBe(true);
+  });
+
+  test("housekeep dead executive recovery respawns orchestrator", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const orch = [...s1.processes.values()].find(p => p.name === "goal-orchestrator")!;
+
+    // Kill orchestrator, add a living child
+    const processes = new Map(s1.processes);
+    processes.set(orch.pid, { ...orch, state: "dead" as const, exitReason: "test" });
+    const childPid = "child-1";
+    processes.set(childPid, {
+      pid: childPid,
+      type: "lifecycle" as const,
+      state: "running" as const,
+      name: "worker-1",
+      parentPid: null,
+      objective: "work",
+      priority: 50,
+      spawnedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      tickCount: 0,
+      tokensUsed: 0,
+      model: "gpt-4",
+      workingDir: "/tmp",
+      children: [],
+      onParentDeath: "orphan" as const,
+      restartPolicy: "never" as const,
+    });
+
+    const [s2, effects] = transition({ ...s1, processes }, timerEvent("housekeep"));
+
+    // New orchestrator should exist
+    const newOrch = [...s2.processes.values()].find(
+      p => p.name === "goal-orchestrator" && p.state === "running"
+    );
+    expect(newOrch).toBeDefined();
+    expect(newOrch!.pid).not.toBe(orch.pid);
+
+    // submit_llm effect for new orchestrator
+    expect(effects.some(e => e.type === "submit_llm")).toBe(true);
+    expect(effects.some(e => e.type === "emit_protocol" && (e as any).message.includes("dead_executive_recovery"))).toBe(true);
+  });
+
+  test("snapshot timer emits persist_snapshot effect", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const [, effects] = transition(s1, timerEvent("snapshot"));
+    expect(effects.some(e => e.type === "persist_snapshot")).toBe(true);
+  });
+
+  test("metacog and watchdog timers are no-ops in transition", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+
+    const [s2, e2] = transition(s1, timerEvent("metacog"));
+    expect(e2).toHaveLength(0);
+
+    const [s3, e3] = transition(s1, timerEvent("watchdog"));
+    expect(e3).toHaveLength(0);
+  });
+
+  test("housekeep does not mutate input state", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    const beforeCount = s1.housekeepCount;
+
+    transition(s1, timerEvent("housekeep"));
+    expect(s1.housekeepCount).toBe(beforeCount);
   });
 });

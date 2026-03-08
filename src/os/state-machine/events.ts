@@ -82,6 +82,14 @@ export type EphemeralCompletedEvent = BaseEvent & {
 export type TimerFiredEvent = BaseEvent & {
   type: "timer_fired";
   timer: "housekeep" | "metacog" | "watchdog" | "snapshot";
+  /** Number of pending ephemerals (provided by kernel for housekeep decisions). */
+  pendingEphemeralCount?: number;
+  /** Current blackboard key count (for deadlock detection). */
+  bbKeyCount?: number;
+  /** Wall-clock ms when orchestrator was last force-woken. */
+  lastForceWakeTime?: number;
+  /** BB key count at last force-wake (for change detection). */
+  bbKeysAtLastForceWake?: number;
 };
 
 /** Metacog evaluation completed. */

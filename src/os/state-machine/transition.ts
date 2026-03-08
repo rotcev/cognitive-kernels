@@ -11,7 +11,7 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport } from "../types.js";
 import { randomUUID } from "node:crypto";
@@ -34,6 +34,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleProcessCompleted(state, event);
     case "ephemeral_completed":
       return handleEphemeralCompleted(state, event);
+    case "timer_fired":
+      return handleTimerFired(state, event);
     default:
       // Unhandled events are no-ops — the kernel class still handles them
       // via its existing code paths (strangler pattern).
@@ -1172,6 +1174,208 @@ function handleEphemeralCompleted(state: KernelState, event: EphemeralCompletedE
 
   return [
     { ...state, processes, blackboard },
+    assignEffectSeqs(effects),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Timer Fired Handler
+// ---------------------------------------------------------------------------
+
+function handleTimerFired(state: KernelState, event: TimerFiredEvent): TransitionResult {
+  if (state.halted) return [state, []];
+
+  switch (event.timer) {
+    case "housekeep":
+      return handleHousekeep(state, event);
+    case "snapshot":
+      // Snapshot is pure I/O — transition has no state to change
+      return [state, assignEffectSeqs([{
+        type: "persist_snapshot",
+        runId: state.runId,
+      }])];
+    case "metacog":
+    case "watchdog":
+      // Metacog and watchdog are I/O-heavy (LLM calls).
+      // Transition passes through — kernel handles via existing code paths.
+      return [state, []];
+    default:
+      return [state, []];
+  }
+}
+
+function handleHousekeep(state: KernelState, event: TimerFiredEvent): TransitionResult {
+  const effects: KernelEffectInput[] = [];
+  const processes = new Map(state.processes);
+  const pendingTriggers = [...state.pendingTriggers];
+  const deferrals = new Map(state.deferrals);
+
+  // 1. Increment housekeep counter
+  const housekeepCount = state.housekeepCount + 1;
+
+  // 1b. Emit periodic cadence signals
+  const cadences = state.config.kernel.tickSignalCadences ?? [1, 5, 10];
+  for (const cadence of cadences) {
+    if (housekeepCount % cadence === 0) {
+      effects.push({
+        type: "emit_protocol",
+        action: "os_signal_emit",
+        message: `tick:${cadence} pid=kernel cadence=${cadence} tick=${housekeepCount}`,
+      });
+    }
+  }
+
+  // 2. Wake expired sleepers (pure: set state from sleeping to running)
+  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  for (const [pid, proc] of processes) {
+    if (proc.state === "sleeping" && proc.sleepUntil) {
+      const sleepUntilMs = new Date(proc.sleepUntil).getTime();
+      if (nowMs >= sleepUntilMs) {
+        const updated = { ...proc, state: "running" as const, sleepUntil: undefined, lastActiveAt: now };
+        processes.set(pid, updated);
+      }
+    }
+  }
+
+  // 2b. Restore checkpointed processes (pure: set state from checkpoint to running)
+  for (const [pid, proc] of processes) {
+    if (proc.state === "checkpoint") {
+      const updated = { ...proc, state: "running" as const, lastActiveAt: now };
+      processes.set(pid, updated);
+    }
+  }
+
+  // 3. Stall detection
+  const liveEphemeralCount = [...processes.values()].filter(
+    p => p.type === "event" && p.state !== "dead"
+  ).length;
+  const pendingEphemeralCount = event.pendingEphemeralCount ?? 0;
+
+  let consecutiveIdleTicks = state.consecutiveIdleTicks;
+  if (state.inflight.size === 0 && liveEphemeralCount === 0) {
+    consecutiveIdleTicks += 1;
+
+    // Wall-clock stall: 5s with no inflight work
+    const wallStall = state.lastProcessCompletionTime > 0 &&
+      (nowMs - state.lastProcessCompletionTime) > 5_000;
+
+    if (consecutiveIdleTicks >= 3 || wallStall) {
+      const idleProcs = [...processes.values()].filter(p => p.state === "idle");
+      if (idleProcs.length > 0) {
+        // Force-wake all idle processes
+        for (const proc of idleProcs) {
+          const updated = { ...proc, state: "running" as const, lastActiveAt: now };
+          processes.set(proc.pid, updated);
+        }
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_event",
+          message: `stall_detected: force-woke ${idleProcs.length} idle processes after ${consecutiveIdleTicks} housekeep cycles (${state.lastProcessCompletionTime ? Math.round((nowMs - state.lastProcessCompletionTime) / 1000) + 's' : '?'} since last completion)`,
+        });
+        consecutiveIdleTicks = 0;
+      }
+    }
+  } else {
+    consecutiveIdleTicks = 0;
+  }
+
+  // 4. Phase-transition deadlock detection
+  const orchestrator = [...processes.values()].find(p => !p.parentPid && p.type === "lifecycle");
+  if (orchestrator && orchestrator.state === "idle" && orchestrator.tickCount >= 1) {
+    const allLivingWork = [...processes.values()].filter(
+      p => p.pid !== orchestrator.pid && p.state !== "dead" && p.type !== "daemon"
+    );
+    const totalPendingEphemerals = pendingEphemeralCount + liveEphemeralCount;
+    if (allLivingWork.length === 0 && totalPendingEphemerals === 0) {
+      const pendingDeferrals = deferrals.size;
+      const bbKeyCount = event.bbKeyCount ?? 0;
+      const bbKeysAtLastForceWake = event.bbKeysAtLastForceWake ?? 0;
+      const lastForceWakeTime = event.lastForceWakeTime ?? 0;
+      const bbChanged = bbKeyCount !== bbKeysAtLastForceWake;
+      const wallCooldownExpired = (nowMs - lastForceWakeTime) > 10_000;
+      const nothingLeft = pendingDeferrals === 0 && allLivingWork.length === 0;
+
+      if (nothingLeft || bbChanged || wallCooldownExpired) {
+        const updated = { ...orchestrator, state: "running" as const, lastActiveAt: now };
+        processes.set(orchestrator.pid, updated);
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_event",
+          message: `deadlock_detected: orchestrator idle with 0 living work, 0 pending ephemerals, ${pendingDeferrals} deferrals — force-waking (nothingLeft=${nothingLeft}, bbChanged=${bbChanged}, wallCooldown=${wallCooldownExpired})`,
+        });
+      }
+    }
+  }
+
+  // 5. Dead executive recovery
+  const deadOrchestrator = [...processes.values()].find(
+    p => !p.parentPid && p.type === "lifecycle" && p.state === "dead" && p.name === "goal-orchestrator"
+  );
+  if (deadOrchestrator) {
+    const livingGoalProcesses = [...processes.values()].filter(
+      p => p.pid !== deadOrchestrator.pid && p.state !== "dead" && p.type === "lifecycle"
+    );
+    const hasPendingDeferrals = deferrals.size > 0;
+
+    if (livingGoalProcesses.length > 0 || hasPendingDeferrals) {
+      // Respawn orchestrator
+      const newOrchPid = `os-proc-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const newOrch: OsProcess = {
+        pid: newOrchPid,
+        type: "lifecycle",
+        state: "running",
+        name: "goal-orchestrator",
+        parentPid: null,
+        objective: state.goal,
+        priority: deadOrchestrator.priority,
+        spawnedAt: now,
+        lastActiveAt: now,
+        tickCount: 0,
+        tokensUsed: 0,
+        model: deadOrchestrator.model,
+        workingDir: deadOrchestrator.workingDir,
+        children: [],
+        onParentDeath: "orphan",
+        restartPolicy: "never",
+      };
+
+      // Reparent orphaned lifecycle children
+      for (const proc of livingGoalProcesses) {
+        if (!proc.parentPid && proc.type === "lifecycle") {
+          const updated = { ...proc, parentPid: newOrchPid };
+          processes.set(proc.pid, updated);
+          newOrch.children.push(proc.pid);
+        }
+      }
+
+      processes.set(newOrchPid, newOrch);
+      pendingTriggers.push("process_failed");
+
+      effects.push({
+        type: "submit_llm",
+        pid: newOrchPid,
+        name: "goal-orchestrator",
+        model: newOrch.model,
+      });
+
+      effects.push({
+        type: "emit_protocol",
+        action: "os_process_event",
+        message: `dead_executive_recovery: restarted orchestrator as ${newOrchPid}, reparented ${livingGoalProcesses.filter(p => p.type === "lifecycle").length} orphans, ${deferrals.size} deferrals pending`,
+      });
+    }
+  }
+
+  return [
+    {
+      ...state,
+      processes,
+      pendingTriggers,
+      deferrals,
+      housekeepCount,
+      consecutiveIdleTicks,
+    },
     assignEffectSeqs(effects),
   ];
 }
