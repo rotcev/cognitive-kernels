@@ -224,14 +224,14 @@ describe("Kernel effect log", () => {
     expect(typeof first.seq).toBe("number");
   });
 
-  test("boot collects submit_metacog effect for immediate metacog evaluation", () => {
+  test("boot does not emit submit_metacog — uses pendingTriggers instead", () => {
     const config = parseOsConfig({ enabled: true, memory: { basePath: tmpDir }, awareness: { enabled: false }, kernel: { telemetryEnabled: false, watchdogIntervalMs: 600000 } });
     const kernel = new OsKernel(config, new MockBrain(), tmpDir);
     kernel.boot("Test goal");
 
     const effects = kernel.getEffectLog();
     const metacogEffects = effects.filter((e: any) => e.type === "submit_metacog");
-    expect(metacogEffects.length).toBeGreaterThanOrEqual(1);
+    expect(metacogEffects).toHaveLength(0);
   });
 
   test("emitProtocol collects emit_protocol effect", () => {
@@ -430,9 +430,9 @@ describe("Effect log integration", () => {
     const protocolEffects = effects.filter((e: any) => e.type === "emit_protocol");
     expect(protocolEffects.length).toBeGreaterThanOrEqual(1);
 
-    // Should have submit_metacog effects (boot triggers immediate metacog evaluation)
+    // Boot no longer emits submit_metacog — uses pendingTriggers instead
     const metacogEffects = effects.filter((e: any) => e.type === "submit_metacog");
-    expect(metacogEffects.length).toBeGreaterThanOrEqual(1);
+    expect(metacogEffects).toHaveLength(0);
 
     // Log the effect type distribution for debugging
     const typeCounts: Record<string, number> = {};

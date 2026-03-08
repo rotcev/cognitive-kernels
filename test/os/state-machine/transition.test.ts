@@ -58,7 +58,7 @@ describe("transition — boot", () => {
     expect(newState.goal).toBe("build a calculator");
   });
 
-  test("boot creates metacog-daemon and emits submit_metacog", () => {
+  test("boot creates metacog-daemon and sets pendingTriggers (no submit_metacog)", () => {
     const state = makeState();
     const [newState, effects] = transition(state, bootEvent());
 
@@ -72,21 +72,23 @@ describe("transition — boot", () => {
     expect(metacog!.state).toBe("idle");
     expect(metacog!.priority).toBe(50);
 
-    // submit_metacog effect is emitted so metacog evaluates immediately after boot
+    // boot no longer emits submit_metacog — uses pendingTriggers instead
     const submitMetacog = effects.find(e => e.type === "submit_metacog");
-    expect(submitMetacog).toBeDefined();
+    expect(submitMetacog).toBeUndefined();
+    expect(newState.pendingTriggers).toContain("boot");
   });
 
-  test("boot produces emit_protocol and submit_metacog effects (no submit_llm — tick loop handles submission)", () => {
+  test("boot produces emit_protocol effects but no submit_metacog or submit_llm", () => {
     const state = makeState();
-    const [, effects] = transition(state, bootEvent());
+    const [newState, effects] = transition(state, bootEvent());
 
     const spawnEffects = effects.filter(e => e.type === "emit_protocol");
     expect(spawnEffects.length).toBeGreaterThanOrEqual(1);
 
-    // Boot emits submit_metacog so metacog declares initial topology
+    // Boot no longer emits submit_metacog — pendingTriggers: ["boot"] is sufficient
     const metacogEffects = effects.filter(e => e.type === "submit_metacog");
-    expect(metacogEffects).toHaveLength(1);
+    expect(metacogEffects).toHaveLength(0);
+    expect(newState.pendingTriggers).toContain("boot");
 
     // Boot does NOT emit submit_llm — process scheduling happens in the tick loop
     const submitEffects = effects.filter(e => e.type === "submit_llm");

@@ -107,12 +107,8 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     });
   }
 
-  // Trigger metacog to evaluate immediately after boot and declare initial topology
-  effects.push({
-    type: "submit_metacog",
-    triggerCount: 0,
-  });
-
+  // NOTE: No submit_metacog effect here — boot sets pendingTriggers: ["boot"],
+  // and the metacog timer will see the trigger and emit run_metacog.
   // NOTE: No submit_llm effect here — boot only sets up the process topology.
   // The kernel's tick loop / scheduling pass handles actual LLM submission.
 

@@ -114,13 +114,14 @@ describe("Event-driven kernel: boot sanity", () => {
     kernel.halt("test_complete");
   });
 
-  test("boot emits submit_metacog effect (metacog is the orchestrator)", () => {
+  test("boot uses pendingTriggers instead of submit_metacog (metacog is the orchestrator)", () => {
     const kernel = bootKernel();
     const snap = kernel.snapshot();
     const names = snap.processes.map((p) => p.name);
 
-    // submit_metacog effect was interpreted: transitionApprovedMetacog flag is set
-    expect(priv(kernel).transitionApprovedMetacog).toBe(true);
+    // boot no longer emits submit_metacog — pendingTriggers: ["boot"] is sufficient
+    // transitionApprovedMetacog is NOT set at boot; metacog timer will pick up the trigger
+    expect(priv(kernel).transitionApprovedMetacog).toBe(false);
 
     // No goal-orchestrator process — metacog declares topology instead
     expect(names.find((n: string) => n === "goal-orchestrator")).toBeUndefined();
