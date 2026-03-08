@@ -138,13 +138,7 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
   const config = state.config.kernel;
   const now = Date.now();
 
-  // 1. Never halt while LLM calls or ephemerals are still in-flight
-  //    (their results may spawn new processes or change halt conditions)
-  if (state.inflight.size > 0 || state.activeEphemeralCount > 0) {
-    return [state, []];
-  }
-
-  // 2. Wall-clock time exceeded
+  // 1. Wall-clock time exceeded (hard limit — ignores inflight)
   if (config.wallTimeLimitMs && state.startTime > 0) {
     const elapsed = now - state.startTime;
     if (elapsed >= config.wallTimeLimitMs) {
@@ -152,7 +146,7 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
     }
   }
 
-  // 3. Token budget exceeded
+  // 2. Token budget exceeded (hard limit — ignores inflight)
   if (config.tokenBudget) {
     let totalTokens = 0;
     for (const proc of state.processes.values()) {
@@ -161,6 +155,12 @@ function handleHaltCheck(state: KernelState, _event: HaltCheckEvent): Transition
     if (totalTokens >= config.tokenBudget) {
       return haltWith(state, "token_budget_exceeded", effects);
     }
+  }
+
+  // 3. Never halt while LLM calls or ephemerals are still in-flight
+  //    (their results may spawn new processes — blocks soft conditions below)
+  if (state.inflight.size > 0 || state.activeEphemeralCount > 0) {
+    return [state, []];
   }
 
   // 4. Deferrals exist — don't halt (more work expected)

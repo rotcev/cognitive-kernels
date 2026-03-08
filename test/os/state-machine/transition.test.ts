@@ -128,21 +128,35 @@ describe("transition — halt_check", () => {
     expect(effects.some(e => e.type === "halt")).toBe(true);
   });
 
-  test("inflight work prevents halt", () => {
-    const state = makeState({ tokenBudget: 100 });
-    state.processes.set("p1", {
+  test("inflight work prevents soft halt (all_processes_dead) but not hard halt (token_budget)", () => {
+    // Token budget is a hard halt — inflight doesn't block it
+    const state1 = makeState({ tokenBudget: 100 });
+    state1.processes.set("p1", {
       pid: "p1", type: "lifecycle", state: "running", name: "test",
       parentPid: null, objective: "test", priority: 5,
       spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
       tickCount: 1, tokensUsed: 200, model: "gpt-4", workingDir: "/tmp",
       children: [], onParentDeath: "orphan", restartPolicy: "never",
     });
-    state.inflight.add("p1"); // In-flight — should block halt
-    state.startTime = Date.now();
+    state1.inflight.add("p1");
+    state1.startTime = Date.now();
+    const [halted1] = transition(state1, haltCheckEvent());
+    expect(halted1.halted).toBe(true); // hard halt ignores inflight
+    expect(halted1.haltReason).toBe("token_budget_exceeded");
 
-    const [newState] = transition(state, haltCheckEvent());
-
-    expect(newState.halted).toBe(false);
+    // But inflight DOES prevent soft halts (like all_processes_dead)
+    const state2 = makeState();
+    state2.processes.set("p1", {
+      pid: "p1", type: "lifecycle", state: "dead", name: "test",
+      parentPid: null, objective: "test", priority: 5,
+      spawnedAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      tickCount: 1, tokensUsed: 10, model: "gpt-4", workingDir: "/tmp",
+      children: [], onParentDeath: "orphan", restartPolicy: "never",
+    });
+    state2.inflight.add("p2"); // another process in-flight
+    state2.startTime = Date.now();
+    const [notHalted] = transition(state2, haltCheckEvent());
+    expect(notHalted.halted).toBe(false); // inflight blocks soft halt
   });
 
   test("all processes dead halts", () => {

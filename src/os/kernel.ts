@@ -4222,7 +4222,9 @@ export class OsKernel {
    * Only applies fields that the transition function can modify.
    */
   private applyStateChanges(newState: KernelState): void {
-    this.halted = newState.halted;
+    // NOTE: Do NOT set this.halted here — haltResolve() sets it and must
+    // not see it as already true (it uses the flag to prevent duplicate halts).
+    // The caller checks newState.halted and calls haltResolve() if needed.
     this.haltReason = newState.haltReason ?? "";
     this.goalWorkDoneAt = newState.goalWorkDoneAt;
     this.consecutiveIdleTicks = newState.consecutiveIdleTicks;
@@ -4572,104 +4574,34 @@ Example: ["strategy-123", "strategy-456"]`;
   }
 
   shouldHalt(): boolean {
-    const logResult = (result: boolean): boolean => {
-      this.logEvent({ type: "halt_check", result, reason: result ? this.haltReason : null });
-      return result;
+    // Delegate to pure transition function — the first strangler connection.
+    // The transition function computes halt logic deterministically;
+    // we interpret the effects (emit_protocol, halt) back into the kernel.
+    const state = this.extractState();
+    const haltCheckEvent: KernelEvent = {
+      type: "halt_check",
+      result: false,   // placeholder — transition computes the real result
+      reason: null,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
     };
 
-    if (this.halted) {
-      return true;
-    }
+    const [newState, effects] = transition(state, haltCheckEvent);
 
-    // Wall time exceeded (0 = no limit)
-    if (
-      this.config.kernel.wallTimeLimitMs > 0 &&
-      this.startTime > 0 &&
-      Date.now() - this.startTime > this.config.kernel.wallTimeLimitMs
-    ) {
-      this.haltReason = "wall_time_exceeded";
-      return logResult(true);
-    }
+    // Apply state changes (halted, haltReason, goalWorkDoneAt)
+    this.applyStateChanges(newState);
 
-    // Token budget exceeded
-    const allProcesses = this.table.getAll();
-    const totalTokensUsed = allProcesses.reduce(
-      (sum, p) => sum + p.tokensUsed,
-      0,
-    );
-    if (totalTokensUsed >= this.config.kernel.tokenBudget) {
-      this.haltReason = "token_budget_exceeded";
-      return logResult(true);
-    }
+    // Interpret effects (emit_protocol events)
+    this.interpretTransitionEffects(effects);
 
-    // Never halt while LLM calls or ephemerals are still in-flight —
-    // their results may spawn new processes or write goal-critical data.
-    if (this.inflight.size > 0 || this.activeEphemeralCount > 0) {
-      return false;
-    }
+    // Log the halt_check event with the computed result
+    this.logEvent({
+      type: "halt_check",
+      result: newState.halted,
+      reason: newState.halted ? newState.haltReason : null,
+    });
 
-    // All processes are dead and no restart policies apply
-    const livingProcesses = allProcesses.filter((p) => p.state !== "dead");
-    if (livingProcesses.length === 0 && allProcesses.length > 0) {
-      // Check if any dead processes have restart policies that could fire
-      const restartable = allProcesses.filter(
-        (p) =>
-          p.state === "dead" &&
-          (p.restartPolicy === "always" ||
-            (p.restartPolicy === "on-failure" && p.exitCode !== 0)),
-      );
-      if (restartable.length === 0) {
-        this.haltReason = "all_processes_dead";
-        return logResult(true);
-      }
-    }
-
-    // Don't halt if deferrals are pending — more goal work is expected
-    if (this.deferrals.size > 0) {
-      return logResult(false);
-    }
-
-    // All goal work is done: no lifecycle/event processes alive, only daemons remain.
-    // Use a grace period to allow metacog/awareness to detect premature orchestrator
-    // exit and potentially respawn workers before we commit to halting.
-    if (livingProcesses.length > 0) {
-      const goalProcesses = livingProcesses.filter(
-        (p) => p.type === "lifecycle" || p.type === "event",
-      );
-      if (goalProcesses.length === 0) {
-        const gracePeriodMs = this.config.kernel.goalCompleteGracePeriodMs ?? 30_000;
-
-        if (this.goalWorkDoneAt === 0) {
-          // First time noticing only daemons remain — start grace period
-          this.goalWorkDoneAt = Date.now();
-          this.emitter?.emit({
-            action: "os_halt_grace_period",
-            status: "completed",
-            message: `only daemons remain — grace period started (${gracePeriodMs}ms). Metacog can respawn workers to continue goal work.`,
-          });
-          return logResult(false);
-        }
-
-        if (Date.now() - this.goalWorkDoneAt < gracePeriodMs) {
-          return logResult(false); // still in grace period
-        }
-
-        this.haltReason = "goal_work_complete";
-        return logResult(true);
-      } else {
-        // Lifecycle/event processes exist again (metacog respawned something) — reset grace period
-        if (this.goalWorkDoneAt > 0) {
-          this.goalWorkDoneAt = 0;
-          this.emitter?.emit({
-            action: "os_halt_grace_period",
-            status: "completed",
-            message: `grace period canceled — lifecycle processes respawned, goal work continuing`,
-          });
-        }
-      }
-    }
-
-    return logResult(false);
+    return newState.halted;
   }
 
   halt(reason: string): void {
