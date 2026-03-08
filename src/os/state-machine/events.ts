@@ -107,6 +107,18 @@ export type KernelEvent =
   | HaltCheckEvent
   ;
 
+/**
+ * Distributive Omit that preserves the discriminated union.
+ * `Omit<KernelEvent, K>` collapses the union into a single type,
+ * losing the discriminant. This version distributes over the union
+ * so each variant keeps its own fields.
+ */
+export type KernelEventInput = KernelEvent extends infer E
+  ? E extends KernelEvent
+    ? Omit<E, "timestamp" | "seq">
+    : never
+  : never;
+
 /** Helper to create a sequencer function for event logging. */
 export function createEventSequencer(): () => number {
   let seq = 0;

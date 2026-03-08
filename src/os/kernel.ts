@@ -60,7 +60,7 @@ import type { KernelAction } from "./counterfactual-simulator.js";
 import type { BlueprintTaskRecord } from "./types.js";
 import { AwarenessDaemon } from "./awareness-daemon.js";
 import { AsyncMutex } from "./async-mutex.js";
-import type { KernelEvent } from "./state-machine/events.js";
+import type { KernelEvent, KernelEventInput } from "./state-machine/events.js";
 import { createEventSequencer } from "./state-machine/events.js";
 
 
@@ -4162,7 +4162,7 @@ export class OsKernel {
   }
 
   /** Record a kernel event. */
-  private logEvent(event: Omit<KernelEvent, "timestamp" | "seq">): void {
+  private logEvent(event: KernelEventInput): void {
     this.eventLog.push({
       ...event,
       timestamp: Date.now(),

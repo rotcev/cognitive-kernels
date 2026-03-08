@@ -207,3 +207,53 @@ describe("Kernel event log", () => {
     expect(typeof (metacogEvents[0] as any).triggerCount).toBe("number");
   });
 });
+
+describe("Event log integration", () => {
+  test("a minimal kernel run produces a complete event sequence", async () => {
+    const brain = new MockBrain();
+    const config = parseOsConfig({
+      enabled: true,
+      memory: { basePath: tmpDir },
+      awareness: { enabled: false },
+      kernel: {
+        telemetryEnabled: false,
+        watchdogIntervalMs: 600000,
+        maxConcurrentProcesses: 3,
+        tokenBudget: 100, // very low — forces quick halt
+      },
+    });
+    const kernel = new OsKernel(config, brain, tmpDir);
+
+    try {
+      await kernel.run("Quick test");
+    } catch {
+      // May throw on very low token budget, that's fine
+    }
+
+    const log = kernel.getEventLog();
+
+    // Must have at least a boot event
+    expect(log[0].type).toBe("boot");
+
+    // Seq is monotonically increasing
+    for (let i = 1; i < log.length; i++) {
+      expect(log[i].seq).toBeGreaterThan(log[i - 1].seq);
+    }
+
+    // All events have timestamps
+    for (const event of log) {
+      expect(event.timestamp).toBeGreaterThan(0);
+    }
+
+    // Should have halt_check events (kernel checks halt condition during run)
+    const haltChecks = log.filter((e: any) => e.type === "halt_check");
+    expect(haltChecks.length).toBeGreaterThanOrEqual(1);
+
+    // Log the event type distribution for debugging
+    const typeCounts: Record<string, number> = {};
+    for (const e of log) {
+      typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1;
+    }
+    console.log("Event type distribution:", typeCounts);
+  });
+});
