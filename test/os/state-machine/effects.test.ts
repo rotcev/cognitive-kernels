@@ -207,9 +207,9 @@ describe("Kernel effect log", () => {
     const watchdog = timerEffects.find((e: any) => e.timer === "watchdog") as any;
     expect(watchdog.delayMs).toBe(60000);
 
-    // metacog: initial call is scheduleNextMetacog(120_000), clamped to min(120000, metacogIntervalMs=30000) = 30000
+    // metacog: initial call is scheduleNextMetacog(5_000), clamped to min(5000, metacogIntervalMs=30000) = 5000
     const metacog = timerEffects.find((e: any) => e.timer === "metacog") as any;
-    expect(metacog.delayMs).toBe(30000);
+    expect(metacog.delayMs).toBe(5000);
   });
 
   test("scheduleNextMetacog collects schedule_timer effect with clamped delay", () => {

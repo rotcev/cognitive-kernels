@@ -20,6 +20,7 @@ import type {
   OsSchedulerStrategy,
   OsHeuristic,
   SchedulingStrategy,
+  MetacogHistoryEntry,
 } from "../types.js";
 
 /** The deterministic kernel state — everything needed to compute the next transition. */
@@ -65,6 +66,40 @@ export type KernelState = {
   activeStrategyId: string | null;
   /** Boot-time LLM-matched strategy IDs (cached for the run). */
   matchedStrategyIds: Set<string>;
+
+  // --- Metacog coordination (replaces kernel flags) ---
+  /** Whether a metacog evaluation is currently in flight. */
+  metacogInflight: boolean;
+  /** Wall-clock ms of last metacog wake. */
+  lastMetacogWakeAt: number;
+  /** Rolling history of metacog evaluations. */
+  metacogHistory: MetacogHistoryEntry[];
+
+  // --- Awareness state ---
+  awarenessNotes: string[];
+  oscillationWarnings: any[];
+  blindSpots: any[];
+  metacogFocus: string | null;
+
+  // --- Drain tracking ---
+  /** PIDs currently being drained (graceful shutdown). */
+  drainingPids: Set<string>;
+
+  // --- Kill calibration ---
+  killThresholdAdjustment: number;
+  killEvalHistory: any[];
+
+  // --- Blueprint tracking ---
+  selectedBlueprintInfo: any | null;
+
+  // --- Telemetry ---
+  ephemeralStats: {
+    spawns: number;
+    successes: number;
+    failures: number;
+    totalDurationMs: number;
+  };
+  heuristicApplicationLog: any[];
 
   // --- Halt logic ---
   halted: boolean;
@@ -114,6 +149,25 @@ export function initialState(config: OsConfig, runId: string): KernelState {
 
     activeStrategyId: null,
     matchedStrategyIds: new Set(),
+
+    metacogInflight: false,
+    lastMetacogWakeAt: 0,
+    metacogHistory: [],
+
+    awarenessNotes: [],
+    oscillationWarnings: [],
+    blindSpots: [],
+    metacogFocus: null,
+
+    drainingPids: new Set(),
+
+    killThresholdAdjustment: 0,
+    killEvalHistory: [],
+
+    selectedBlueprintInfo: null,
+
+    ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
+    heuristicApplicationLog: [],
 
     halted: false,
     haltReason: null,

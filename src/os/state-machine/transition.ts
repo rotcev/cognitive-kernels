@@ -179,6 +179,7 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     startTime: Date.now(),
     processes,
     blackboard,
+    pendingTriggers: ["boot"],
   };
 
   return [newState, assignEffectSeqs(effects)];

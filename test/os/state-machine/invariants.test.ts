@@ -385,9 +385,10 @@ describe("Transition effect completeness (property-based)", () => {
 
         // If triggers were added to pendingTriggers, they should be from the known set.
         const knownTriggers = new Set([
+          "boot",
           "process_failed", "dag_deadlock", "resource_exhaustion",
           "ipc_timeout", "priority_conflict", "checkpoint_restore",
-          "goal_drift",
+          "goal_drift", "novel_situation", "tick_stall", "observation_failed",
         ]);
         for (const trigger of newState.pendingTriggers) {
           expect(knownTriggers.has(trigger)).toBe(true);

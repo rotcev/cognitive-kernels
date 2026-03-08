@@ -276,6 +276,7 @@ export type OsHeuristic = {
 // ─── Metacognitive Triggers ──────────────────────────────────────
 
 export type OsMetacogTrigger =
+  | "boot"
   | "process_failed"
   | "dag_deadlock"
   | "resource_exhaustion"

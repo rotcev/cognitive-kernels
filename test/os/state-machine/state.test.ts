@@ -62,6 +62,19 @@ describe("KernelState", () => {
       dagTopology: { nodes: [], edges: [] },
       deferrals: new Map(),
       pendingTriggers: [],
+      metacogInflight: false,
+      lastMetacogWakeAt: 0,
+      metacogHistory: [],
+      awarenessNotes: [],
+      oscillationWarnings: [],
+      blindSpots: [],
+      metacogFocus: null,
+      drainingPids: new Set(),
+      killThresholdAdjustment: 0,
+      killEvalHistory: [],
+      selectedBlueprintInfo: null,
+      ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
+      heuristicApplicationLog: [],
       halted: false,
       haltReason: null,
       goalWorkDoneAt: 0,
@@ -74,6 +87,42 @@ describe("KernelState", () => {
     expect(state.processes.size).toBe(1);
     expect(state.inflight.has("p1")).toBe(true);
     expect(state.blackboard.get("key1")?.value).toBe("val");
+  });
+
+  test("initialState includes metacog, awareness, drain, and telemetry defaults", () => {
+    const config = parseOsConfig({ enabled: true });
+    const state = initialState(config, "run-defaults");
+
+    // Metacog coordination
+    expect(state.metacogInflight).toBe(false);
+    expect(state.lastMetacogWakeAt).toBe(0);
+    expect(state.metacogHistory).toEqual([]);
+
+    // Awareness state
+    expect(state.awarenessNotes).toEqual([]);
+    expect(state.oscillationWarnings).toEqual([]);
+    expect(state.blindSpots).toEqual([]);
+    expect(state.metacogFocus).toBeNull();
+
+    // Drain tracking
+    expect(state.drainingPids).toBeInstanceOf(Set);
+    expect(state.drainingPids.size).toBe(0);
+
+    // Kill calibration
+    expect(state.killThresholdAdjustment).toBe(0);
+    expect(state.killEvalHistory).toEqual([]);
+
+    // Blueprint tracking
+    expect(state.selectedBlueprintInfo).toBeNull();
+
+    // Telemetry
+    expect(state.ephemeralStats).toEqual({
+      spawns: 0,
+      successes: 0,
+      failures: 0,
+      totalDurationMs: 0,
+    });
+    expect(state.heuristicApplicationLog).toEqual([]);
   });
 
   test("BlackboardEntry type works with various value types", () => {

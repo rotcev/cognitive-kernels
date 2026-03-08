@@ -404,7 +404,7 @@ export class OsKernel {
 
       // Self-scheduling metacog: fires once at boot, then reschedules based on
       // metacog's own nextWakeMs (capped at metacogIntervalMs as fallback max).
-      this.scheduleNextMetacog(120_000); // first check 2min after boot — scouts need time
+      this.scheduleNextMetacog(5_000); // first check 5s after boot — metacog declares initial topology
 
 
       this.startWatchdog();
@@ -3427,6 +3427,26 @@ export class OsKernel {
       metacogEvalCount: this.metacogEvalCount,
       activeStrategyId: this.activeStrategyId ?? null,
       matchedStrategyIds: this.bootMatchedStrategyIds ?? new Set(),
+
+      metacogInflight: false, // kernel uses mutex — state machine will own this
+      lastMetacogWakeAt: this.lastMetacogWakeAt,
+      metacogHistory: [...this.metacogHistory],
+
+      awarenessNotes: [...this.pendingAwarenessNotes],
+      oscillationWarnings: [...this.pendingOscillationWarnings],
+      blindSpots: [],
+      metacogFocus: this.metacogFocus,
+
+      drainingPids: new Set(this.drainingPids),
+
+      killThresholdAdjustment: this.killThresholdAdjustment,
+      killEvalHistory: [...this.killEvalHistory],
+
+      selectedBlueprintInfo: this.selectedBlueprintInfo,
+
+      ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
+      heuristicApplicationLog: [...this.heuristicApplicationLog],
+
       halted: this.halted,
       haltReason: this.haltReason,
       goalWorkDoneAt: this.goalWorkDoneAt,

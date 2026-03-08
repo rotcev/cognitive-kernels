@@ -111,6 +111,7 @@ export class OsMetacognitiveAgent {
     const lines: string[] = [];
 
     lines.push(`## Metacognitive Evaluation`);
+    lines.push(`Goal: ${this.goal}`);
     lines.push(`Ticks since last eval: ${context.ticksSinceLastEval}`);
     if (context.sinceLastWakeSec != null && context.sinceLastWakeSec > 0) {
       lines.push(`Approximate time since last wake: ${context.sinceLastWakeSec}s`);
@@ -118,6 +119,15 @@ export class OsMetacognitiveAgent {
 
     if (context.trigger) {
       lines.push(`Trigger: ${context.trigger}`);
+    }
+
+    // On boot trigger, tell metacog to declare the initial topology
+    if (context.trigger === "boot") {
+      lines.push("");
+      lines.push("**BOOT EVALUATION**: This is the first evaluation after kernel boot.");
+      lines.push("The system has no workers yet. You MUST declare an initial topology");
+      lines.push("to accomplish the goal above. Use task(), seq(), par(), and gate()");
+      lines.push("to decompose the goal into a work graph.");
     }
 
     // Long-running process telemetry (set by watchdog on tick_stall trigger)

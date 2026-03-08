@@ -1138,12 +1138,29 @@ describe("transition — timer_fired (housekeep)", () => {
     expect(effects.some(e => e.type === "persist_snapshot")).toBe(true);
   });
 
-  test("metacog and watchdog timers are no-ops in transition", () => {
+  test("metacog timer emits submit_metacog when pendingTriggers present (boot trigger)", () => {
     const state = makeState();
     const [s1] = transition(state, bootEvent());
+    // After boot, pendingTriggers includes "boot", so metacog timer should fire
+    expect(s1.pendingTriggers).toContain("boot");
 
     const [s2, e2] = transition(s1, timerEvent("metacog"));
+    expect(e2.some(e => e.type === "submit_metacog")).toBe(true);
+  });
+
+  test("metacog timer is a no-op when pendingTriggers is empty and cadence does not fire", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
+    // Clear pendingTriggers and set tickCount so cadence doesn't fire
+    const cleanState = { ...s1, pendingTriggers: [] as any[], tickCount: 1 };
+
+    const [, e2] = transition(cleanState, timerEvent("metacog"));
     expect(e2).toHaveLength(0);
+  });
+
+  test("watchdog timer is a no-op in transition", () => {
+    const state = makeState();
+    const [s1] = transition(state, bootEvent());
 
     const [s3, e3] = transition(s1, timerEvent("watchdog"));
     expect(e3).toHaveLength(0);
