@@ -25,7 +25,6 @@ import type {
   TopologySnapshot,
   SelfReport,
   KillEvalRecord,
-  DagMutation,
   MetacogHistoryEntry,
   AwarenessContext,
   ProgressSnapshot,
@@ -127,9 +126,6 @@ export class OsKernel {
   private recentCounterfactualLogs: string[] = [];
   /** GAP 1 (R6): Kill evaluation history for calibrating kill aggressiveness. */
   private killEvalHistory: KillEvalRecord[] = [];
-  /** GAP 3 (R6): History of dag rewrites for observability. */
-  private dagRewriteHistory: Array<{timestamp: number; mutationType: string; reason: string; pidsAffected: string[]}> = [];
-
   /** Kill threshold adjustment accumulated from kill eval history and awareness adjustments. */
   private killThresholdAdjustment = 0.0;
   /** Log of heuristic applications for retrospective validation. */
@@ -2750,7 +2746,7 @@ export class OsKernel {
     // Capture pre-snapshot for intervention outcome tracking
     const interventionTrackedKinds: Array<MetacogCommand['kind']> = [
       'fork', 'kill', 'spawn', 'defer', 'reprioritize',
-      'rewrite_dag', 'evolve_blueprint',
+      'evolve_blueprint',
     ];
     if ((interventionTrackedKinds as string[]).includes(cmd.kind)) {
       const allProcsNow = this.table.getAll();
@@ -3073,11 +3069,6 @@ export class OsKernel {
         this.supervisor.setPriority(cmd.pid, cmd.priority);
         break;
 
-      case "rewrite_dag":
-        // GAP 3 (R6): Delegate to handleDagRewrite for topology mutation
-        this.handleDagRewrite(cmd.mutation, cmd.reason);
-        break;
-
       case "learn":
         this.memoryStore.learn(
           cmd.heuristic,
@@ -3292,167 +3283,6 @@ export class OsKernel {
         break;
       }
     }
-  }
-
-  /**
-   * GAP 3 (R6): Handle a rewrite_dag metacog command by applying a DagMutation.
-   * Supports: collapse_parallel_to_sequential, fan_out, insert_checkpoint, merge_processes.
-   * Each mutation kills/spawns processes and emits a 'dag:rewritten' signal.
-   */
-  private handleDagRewrite(mutation: DagMutation, reason: string): void {
-    const pidsAffected: string[] = [];
-
-    /** Snapshot selected blackboard keys into a plain object. */
-    const snapshotBlackboard = (keys?: string[]): Record<string, unknown> => {
-      const snapshot: Record<string, unknown> = {};
-      if (!keys) return snapshot;
-      for (const key of keys) {
-        const entry = this.ipcBus.bbRead(key, 'kernel');
-        if (entry) snapshot[key] = entry.value;
-      }
-      return snapshot;
-    };
-
-    switch (mutation.type) {
-      case 'collapse_parallel_to_sequential': {
-        const bbSnapshot = snapshotBlackboard(mutation.preserveBlackboardKeys);
-        // Kill all parallel workers
-        for (const pid of mutation.pids) {
-          pidsAffected.push(pid);
-          this.supervisor.kill(pid, false, 'dag_rewrite');
-          this.executor.disposeThread(pid);
-          this.router.disposeThread(pid);
-          this.ephemeralThreads.get(pid)?.abort();
-          this.ephemeralThreads.delete(pid);
-        }
-        // Spawn a single sequential replacement with preserved context
-        const contextStr = Object.keys(bbSnapshot).length > 0
-          ? `\n\nContext from collapsed processes:\n${JSON.stringify(bbSnapshot, null, 2)}`
-          : '';
-        const newProc = this.supervisor.spawn({
-          type: 'lifecycle',
-          name: 'sequential-replacement',
-          objective: mutation.newObjective + contextStr,
-          model: this.config.kernel.processModel,
-          workingDir: this.workingDir,
-        });
-        this.supervisor.activate(newProc.pid);
-        pidsAffected.push(newProc.pid);
-        this.ipcBus.emitSignal('dag:rewritten', 'kernel', {
-          mutation: 'collapse_parallel_to_sequential',
-          killed: mutation.pids,
-          spawned: newProc.pid,
-        });
-        break;
-      }
-
-      case 'fan_out': {
-        const bbSnapshot = snapshotBlackboard(mutation.preserveBlackboardKeys);
-        // Kill source process
-        pidsAffected.push(mutation.sourcePid);
-        this.supervisor.kill(mutation.sourcePid, false, 'dag_rewrite');
-        this.executor.disposeThread(mutation.sourcePid);
-        this.router.disposeThread(mutation.sourcePid);
-        this.ephemeralThreads.get(mutation.sourcePid)?.abort();
-        this.ephemeralThreads.delete(mutation.sourcePid);
-        // Spawn N workers with shared context
-        const contextStr = Object.keys(bbSnapshot).length > 0
-          ? `\n\nShared context:\n${JSON.stringify(bbSnapshot, null, 2)}`
-          : '';
-        const spawnedPids: string[] = [];
-        for (const objective of mutation.workerObjectives) {
-          const workerProc = this.supervisor.spawn({
-            type: 'lifecycle',
-            name: 'fan-out-worker',
-            objective: objective + contextStr,
-            model: this.config.kernel.processModel,
-            workingDir: this.workingDir,
-          });
-          this.supervisor.activate(workerProc.pid);
-          spawnedPids.push(workerProc.pid);
-          pidsAffected.push(workerProc.pid);
-        }
-        this.ipcBus.emitSignal('dag:rewritten', 'kernel', {
-          mutation: 'fan_out',
-          killed: [mutation.sourcePid],
-          spawned: spawnedPids,
-        });
-        break;
-      }
-
-      case 'insert_checkpoint': {
-        // Spawn checkpoint process
-        const checkpointProc = this.supervisor.spawn({
-          type: 'lifecycle',
-          name: 'checkpoint-process',
-          objective: mutation.checkpointObjective,
-          model: this.config.kernel.processModel,
-          workingDir: this.workingDir,
-        });
-        this.supervisor.activate(checkpointProc.pid);
-        pidsAffected.push(checkpointProc.pid);
-        // Wire DAG edges: afterPid → checkpoint → beforePid
-        this.dagEngine.applyPatch({
-          addEdges: [
-            { from: mutation.afterPid, to: checkpointProc.pid, relation: 'dependency', label: 'dag_rewrite' },
-            { from: checkpointProc.pid, to: mutation.beforePid, relation: 'dependency', label: 'dag_rewrite' },
-          ],
-        });
-        this.ipcBus.emitSignal('dag:rewritten', 'kernel', {
-          mutation: 'insert_checkpoint',
-          checkpointPid: checkpointProc.pid,
-          afterPid: mutation.afterPid,
-          beforePid: mutation.beforePid,
-        });
-        break;
-      }
-
-      case 'merge_processes': {
-        const bbSnapshot = snapshotBlackboard(mutation.preserveBlackboardKeys);
-        // Kill all processes to be merged
-        for (const pid of mutation.pids) {
-          pidsAffected.push(pid);
-          this.supervisor.kill(pid, false, 'dag_rewrite');
-          this.executor.disposeThread(pid);
-          this.router.disposeThread(pid);
-          this.ephemeralThreads.get(pid)?.abort();
-          this.ephemeralThreads.delete(pid);
-        }
-        // Spawn one unified replacement with preserved context
-        const contextStr = Object.keys(bbSnapshot).length > 0
-          ? `\n\nContext from merged processes:\n${JSON.stringify(bbSnapshot, null, 2)}`
-          : '';
-        const mergedProc = this.supervisor.spawn({
-          type: 'lifecycle',
-          name: 'merged-process',
-          objective: mutation.mergedObjective + contextStr,
-          model: this.config.kernel.processModel,
-          workingDir: this.workingDir,
-        });
-        this.supervisor.activate(mergedProc.pid);
-        pidsAffected.push(mergedProc.pid);
-        this.ipcBus.emitSignal('dag:rewritten', 'kernel', {
-          mutation: 'merge_processes',
-          killed: mutation.pids,
-          spawned: mergedProc.pid,
-        });
-        break;
-      }
-    }
-
-    // Record in dag rewrite history for observability
-    this.dagRewriteHistory.push({
-      timestamp: Date.now(),
-      mutationType: mutation.type,
-      reason,
-      pidsAffected,
-    });
-
-    this.emitter?.emit({
-      action: 'os_metacog',
-      status: 'completed',
-      message: `dag_rewrite type=${mutation.type} reason="${reason}" pidsAffected=${pidsAffected.length}`,
-    });
   }
 
   /**

@@ -120,21 +120,8 @@ export class PerfAnalyzer {
       });
     }
 
-    // ── convoyEffects → rewrite_dag ───────────────────────────────
-    for (const convoy of report.convoyEffects) {
-      recs.push({
-        kind: 'rewrite_dag',
-        rationale:
-          `Convoy effect detected: ${convoy.pids.length} processes completed within ` +
-          `a ${convoy.clusterDurationMs}ms window, indicating burst completion and ` +
-          `potential head-of-line blocking. Switching to a pipeline topology would ` +
-          `interleave execution and reduce queuing latency.`,
-        payload: {
-          suggestion: 'switch to pipeline topology',
-          affectedPids: convoy.pids,
-        },
-      });
-    }
+    // convoyEffects: detected in analyze() but no longer mapped to a recommendation.
+    // Topology restructuring is now handled by the topology algebra (reconciler).
 
     return recs;
   }

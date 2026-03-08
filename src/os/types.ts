@@ -687,42 +687,12 @@ export type BlueprintMutation = {
   gatingChange?: string;
 };
 
-// ─── DAG Mutation ────────────────────────────────────────────────
-// GAP 3 (R6): Discriminated union of topology rewrite operations for in-run DAG mutation.
-
-export type DagMutation =
-  | {
-      type: 'collapse_parallel_to_sequential';
-      pids: string[];            // parallel workers to collapse
-      newObjective: string;      // objective for the single sequential replacement
-      preserveBlackboardKeys?: string[];  // keys to carry forward
-    }
-  | {
-      type: 'fan_out';
-      sourcePid: string;         // process to replace with N workers
-      workerObjectives: string[];  // one per new worker
-      preserveBlackboardKeys?: string[];
-    }
-  | {
-      type: 'insert_checkpoint';
-      afterPid: string;          // insert after this process
-      beforePid: string;         // insert before this process
-      checkpointObjective: string;
-    }
-  | {
-      type: 'merge_processes';
-      pids: string[];            // 2+ processes to merge into one
-      mergedObjective: string;
-      preserveBlackboardKeys?: string[];
-    };
-
 // ─── Metacognitive Commands ─────────────────────────────────────
 
 export type MetacogCommand =
   | { kind: "spawn"; descriptor: OsProcessDescriptor }
   | { kind: "kill"; pid: string; cascade: boolean; reason: string }
   | { kind: "reprioritize"; pid: string; priority: number }
-  | { kind: "rewrite_dag"; mutation: DagMutation; reason: string }
   | { kind: "learn"; heuristic: string; confidence: number; context: string; scope?: HeuristicScope }
   | { kind: "halt"; status: "achieved" | "unachievable" | "stalled"; summary: string }
   | { kind: "define_blueprint"; blueprint: Omit<TopologyBlueprint, "id" | "stats" | "learnedAt"> }

@@ -474,9 +474,6 @@ export class LlmExecutorBackend implements ExecutorBackend, ExecutorContextInjec
       "- `evolve_blueprint` — { kind: \"evolve_blueprint\", sourceBlueprintId: string, mutations: { namePrefix?, roleChanges?, gatingChange? }, description: string }",
       "  Derive a new topology blueprint from an existing one by applying structural mutations.",
       "  The evolved blueprint inherits decayed Bayesian priors and starts with fresh usage stats.",
-      "- `rewrite_dag` — { kind: \"rewrite_dag\", mutation: DagMutation, reason: string }",
-      "  Restructure running topology mid-execution. Mutations: collapse_parallel_to_sequential,",
-      "  fan_out, insert_checkpoint, merge_processes. Preserves blackboard state across rewrites.",
     ].join("\n");
   }
 

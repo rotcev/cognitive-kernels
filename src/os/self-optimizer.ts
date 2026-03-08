@@ -1,4 +1,4 @@
-import type { MetacogCommand, OsDagPatch } from './types.js';
+import type { MetacogCommand } from './types.js';
 import type { TelemetrySnapshot } from './types.js';
 import type { Recommendation, BottleneckReport } from './perf-analyzer.js';
 
@@ -220,13 +220,6 @@ export class SelfOptimizer {
           cascade: false,
           reason: rec.rationale,
         };
-      }
-
-      case 'rewrite_dag': {
-        // GAP 3 (R6): rewrite_dag now requires a DagMutation discriminated union.
-        // SelfOptimizer lacks the process-table context to select the right mutation type;
-        // defer topology rewrites to the LLM metacog agent which can reason about structure.
-        return null;
       }
 
       // The following kinds are issued by the metacog kernel directly; the
