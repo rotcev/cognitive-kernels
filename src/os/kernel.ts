@@ -60,6 +60,8 @@ import type { KernelAction } from "./counterfactual-simulator.js";
 import type { BlueprintTaskRecord } from "./types.js";
 import { AwarenessDaemon } from "./awareness-daemon.js";
 import { AsyncMutex } from "./async-mutex.js";
+import type { KernelEvent } from "./state-machine/events.js";
+import { createEventSequencer } from "./state-machine/events.js";
 
 
 export class OsKernel {
@@ -187,6 +189,10 @@ export class OsKernel {
   private ephemeralThreads: Map<string, import("../types.js").BrainThread> = new Map();
   private readonly browserMcpConfig?: import("../types.js").McpServerConfig;
 
+  /** Typed event log — the input side of the state machine. */
+  private readonly eventLog: KernelEvent[] = [];
+  private readonly nextSeq = createEventSequencer();
+
   constructor(
     config: OsConfig,
     client: Brain,
@@ -260,6 +266,7 @@ export class OsKernel {
 
   boot(goal: string, options?: { restoreFromRunId?: string }): void {
     this.goal = goal;
+    this.logEvent({ type: "boot", goal });
     this.startTime = Date.now();
     // GAP 2: configure counterfactual simulator tick interval
     this.counterfactualSim.setMsPerTick(this.config.kernel.tickIntervalMs);
@@ -4089,6 +4096,20 @@ export class OsKernel {
   /** Extract goal tags from the current goal string. */
   private extractGoalTags(): string[] {
     return extractGoalTagsFromGoal(this.goal);
+  }
+
+  /** Record a kernel event. */
+  private logEvent(event: Omit<KernelEvent, "timestamp" | "seq">): void {
+    this.eventLog.push({
+      ...event,
+      timestamp: Date.now(),
+      seq: this.nextSeq(),
+    } as KernelEvent);
+  }
+
+  /** Get the event log (for testing and Lens). */
+  getEventLog(): readonly KernelEvent[] {
+    return this.eventLog;
   }
 
   /**
