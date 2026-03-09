@@ -39,6 +39,7 @@ export const PROCESS_TURN_OUTPUT_SCHEMA = {
               "spawn_system",
               "spawn_kernel",
               "cancel_defer",
+              "mcp_call",
             ],
           },
           // sleep
@@ -115,6 +116,8 @@ export const PROCESS_TURN_OUTPUT_SCHEMA = {
           // spawn_kernel
           goal: { type: "string" },
           maxTicks: { type: "number" },
+          // mcp_call
+          tool: { type: "string" },
         },
         required: ["kind"],
       },

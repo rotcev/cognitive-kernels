@@ -22,6 +22,9 @@ export type SubmitLlmEffect = BaseEffect & {
   pid: string;
   name: string;
   model: string;
+  /** Optional context to inject as the prompt instead of the default system+objective.
+   *  Used after mcp_call to tell the worker the result of its tool call. */
+  context?: string;
 };
 
 /** Submit an ephemeral (fire-and-forget scout) for execution. */
@@ -221,6 +224,14 @@ export type RunSubkernelEffect = BaseEffect & {
   maxTicks?: number;
 };
 
+/** Execute an MCP tool call. */
+export type ExecuteMcpCallEffect = BaseEffect & {
+  type: "execute_mcp_call";
+  pid: string;
+  tool: string;
+  args: Record<string, unknown>;
+};
+
 /** The discriminated union of all kernel effects. */
 export type KernelEffect =
   | SubmitLlmEffect
@@ -252,6 +263,7 @@ export type KernelEffect =
   | RunEphemeralEffect
   | RunShellEffect
   | RunSubkernelEffect
+  | ExecuteMcpCallEffect
   ;
 
 /** Distributive Omit for KernelEffect union (preserves discriminant). */

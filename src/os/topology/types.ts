@@ -24,7 +24,8 @@ export type GateCondition =
 export type TopologyExpr =
   | { type: "task"; name: string; objective: string;
       reads?: string[]; writes?: string[];
-      model?: string; priority?: number; backend?: TaskBackend }
+      model?: string; priority?: number; backend?: TaskBackend;
+      capabilities?: { observationTools?: string[] } }
   | { type: "seq"; children: TopologyExpr[] }
   | { type: "par"; children: TopologyExpr[] }
   | { type: "gate"; condition: GateCondition; child: TopologyExpr };
@@ -39,6 +40,7 @@ export interface FlatNode {
   priority?: number;
   backend?: TaskBackend;
   gateCondition?: GateCondition;
+  capabilities?: { observationTools?: string[] };
 }
 
 /** Flattened graph — nodes + dependency edges. */

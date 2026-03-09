@@ -575,7 +575,8 @@ export type OsProcessCommand =
   | { kind: "spawn_ephemeral"; objective: string; name?: string; model?: string }
   | { kind: "spawn_system"; name: string; command: string; args?: string[]; env?: Record<string, string> }
   | { kind: "spawn_kernel"; name: string; goal: string; maxTicks?: number }
-  | { kind: "cancel_defer"; name: string; reason: string };
+  | { kind: "cancel_defer"; name: string; reason: string }
+  | { kind: "mcp_call"; tool: string; args: Record<string, unknown> };
 
 // ─── Spawn Graph ───────────────────────────────────────────────
 
@@ -710,7 +711,8 @@ export type MetacogCommand =
   | { kind: "spawn_system"; name: string; command: string; args?: string[]; env?: Record<string, string>; objective: string; priority?: number }
   | { kind: "spawn_kernel"; name: string; goal: string; priority?: number; maxTicks?: number }
   | { kind: "defer"; descriptor: OsProcessDescriptor; condition: DeferCondition; reason: string; maxWaitTicks?: number }
-  | { kind: "cancel_defer"; name: string; reason: string };
+  | { kind: "cancel_defer"; name: string; reason: string }
+  | { kind: "mcp_call"; tool: string; args: Record<string, unknown> };
 
 // ─── Deferrals ──────────────────────────────────────────────────
 

@@ -352,20 +352,27 @@ describe("KernelInterpreter", () => {
 
   // ─── run_shell placeholder ──────────────────────────────────
 
-  it("run_shell enqueues shell_output_received placeholder", async () => {
+  it("run_shell spawns real process and enqueues shell_output on exit", async () => {
     const effect: KernelEffect = {
       type: "run_shell",
       pid: "shell-1",
-      command: "echo",
-      args: ["hello"],
+      command: "/usr/bin/true",
+      args: [],
       seq: 0,
     };
 
     await interpreter.interpret(effect, makeState());
 
-    const event = await queue.dequeue();
-    expect(event.type).toBe("shell_output_received");
-    expect((event as any).pid).toBe("shell-1");
+    // Drain events until we get one with exitCode defined
+    let event: any;
+    do {
+      event = await queue.dequeue();
+    } while (event.type === "shell_output" && event.exitCode === undefined);
+
+    expect(event.type).toBe("shell_output");
+    expect(event.pid).toBe("shell-1");
+    // Process exited — exitCode should be defined
+    expect(event.exitCode).toBeDefined();
   });
 
   // ─── run_subkernel placeholder ──────────────────────────────
