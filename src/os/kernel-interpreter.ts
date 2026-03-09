@@ -126,7 +126,7 @@ function buildWorkerPrompt(proc: OsProcess): string {
  * by walking dependency edges backwards through the DAG topology.
  * Returns an empty set if no DAG exists (falls back to global injection).
  */
-function getUpstreamAncestorNames(state: KernelState, proc: OsProcess): Set<string> | null {
+export function getUpstreamAncestorNames(state: KernelState, proc: OsProcess): Set<string> | null {
   const dag = state.dagTopology;
   if (!dag || dag.edges.length === 0) return null; // no DAG — fall back to global
 
@@ -165,7 +165,7 @@ function getUpstreamAncestorNames(state: KernelState, proc: OsProcess): Set<stri
 }
 
 /** Build upstream context from blackboard results produced by other workers. */
-function buildUpstreamContext(state: KernelState, proc: OsProcess): string {
+export function buildUpstreamContext(state: KernelState, proc: OsProcess): string {
   const entries: string[] = [];
 
   // Scope to DAG ancestors when dependency edges exist, otherwise global
