@@ -440,4 +440,78 @@ describe("buildUpstreamContext", () => {
     expect(ctx).toContain('"findings"');
     expect(ctx).toContain("[1,2,3]");
   });
+
+  // ─── Progress key tests ──────────────────────────────────────
+
+  it("includes progress keys from parallel siblings (no DAG = global)", () => {
+    const state = makeState({
+      blackboard: new Map([
+        ["progress:worker-b", { value: "Found 3 APIs, investigating auth", writtenBy: "p2", version: 1 }],
+        ["progress:worker-c", { value: "Stripe looks most promising", writtenBy: "p3", version: 1 }],
+      ]),
+    });
+    const ctx = buildUpstreamContext(state, proc("p1", "worker-a"));
+    expect(ctx).toContain("progress:worker-b");
+    expect(ctx).toContain("Found 3 APIs");
+    expect(ctx).toContain("progress:worker-c");
+    expect(ctx).toContain("Stripe looks most promising");
+  });
+
+  it("excludes own progress key", () => {
+    const state = makeState({
+      blackboard: new Map([
+        ["progress:worker-a", { value: "my own progress", writtenBy: "p1", version: 1 }],
+        ["progress:worker-b", { value: "sibling progress", writtenBy: "p2", version: 1 }],
+      ]),
+    });
+    const ctx = buildUpstreamContext(state, proc("p1", "worker-a"));
+    expect(ctx).not.toContain("progress:worker-a");
+    expect(ctx).toContain("progress:worker-b");
+  });
+
+  it("DAG-scoped: only includes progress from ancestors", () => {
+    // research → report, unrelated is independent
+    const state = makeState({
+      dag: {
+        nodes: [
+          { pid: "p1", name: "research", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+          { pid: "p2", name: "report", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+          { pid: "p3", name: "unrelated", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+        ],
+        edges: [
+          { from: "p1", to: "p2", relation: "dependency" },
+        ],
+      },
+      blackboard: new Map([
+        ["progress:research", { value: "halfway done", writtenBy: "p1", version: 1 }],
+        ["progress:unrelated", { value: "doing my own thing", writtenBy: "p3", version: 1 }],
+      ]),
+    });
+    const ctx = buildUpstreamContext(state, proc("p2", "report"));
+    expect(ctx).toContain("progress:research");
+    expect(ctx).not.toContain("progress:unrelated");
+  });
+
+  it("parallel workers see each other's progress (global fallback)", () => {
+    // par([a, b, c]) — no dependency edges, all see each other
+    const state = makeState({
+      dag: {
+        nodes: [
+          { pid: "p1", name: "a", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+          { pid: "p2", name: "b", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+          { pid: "p3", name: "c", type: "lifecycle", state: "running", priority: 50, parentPid: null },
+        ],
+        edges: [], // pure parallel — no dependency edges
+      },
+      blackboard: new Map([
+        ["progress:a", { value: "found relevant APIs", writtenBy: "p1", version: 2 }],
+        ["progress:c", { value: "auth research complete", writtenBy: "p3", version: 1 }],
+      ]),
+    });
+    const ctx = buildUpstreamContext(state, proc("p2", "b"));
+    expect(ctx).toContain("progress:a");
+    expect(ctx).toContain("found relevant APIs");
+    expect(ctx).toContain("progress:c");
+    expect(ctx).toContain("auth research complete");
+  });
 });

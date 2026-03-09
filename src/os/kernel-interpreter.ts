@@ -45,7 +45,9 @@ function buildWorkerPrompt(proc: OsProcess): string {
   lines.push("");
   lines.push("## Available commands");
   lines.push("");
-  lines.push("- **bb_write(key, value)**: Write a result to the shared blackboard. Use \"result:<your-process-name>\" as the key.");
+  lines.push("- **bb_write(key, value)**: Write a result to the shared blackboard. Use \"result:<your-process-name>\" as the key for final results.");
+  lines.push("  You can also write intermediate progress: bb_write(\"progress:<your-process-name>\", \"short summary of what you've found/done so far\").");
+  lines.push("  Other parallel workers will see your progress and can coordinate with you. Keep progress values concise (1-3 sentences).");
   lines.push("- **spawn_ephemeral(objective, name?)**: Spawn a lightweight scout for parallel sub-tasks.");
   lines.push("- **exit(reason?, code?)**: You're done. Use code=0 for success.");
   lines.push("- **idle(wakeOnSignals?)**: Pause and wait for new information.");
@@ -173,12 +175,12 @@ export function buildUpstreamContext(state: KernelState, proc: OsProcess): strin
   const ancestorNames = getUpstreamAncestorNames(state, proc);
 
   for (const [key, entry] of state.blackboard) {
-    // Include result:* keys from other processes, plus shell/mcp output
-    if (!key.startsWith("result:") && !key.startsWith("shell:") && !key.startsWith("mcp:")) continue;
+    // Include result:*, progress:*, shell:*, mcp:* keys from other processes
+    if (!key.startsWith("result:") && !key.startsWith("progress:") && !key.startsWith("shell:") && !key.startsWith("mcp:")) continue;
     // Skip internal/system keys
     if (key.startsWith("shell:exit:")) continue;
     // Skip own keys
-    if (key === `result:${proc.name}`) continue;
+    if (key === `result:${proc.name}` || key === `progress:${proc.name}`) continue;
 
     // If DAG-scoped, only include keys written by upstream ancestors
     if (ancestorNames !== null) {
