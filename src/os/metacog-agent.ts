@@ -115,6 +115,8 @@ export class OsMetacognitiveAgent {
       "  - To iterate on a task's approach, keep the same name and update the objective.",
       "  - If a task failed, re-declare it with the same name — the reconciler will respawn it.",
       "  - Completed tasks (dead processes) are never respawned — the reconciler skips them.",
+      "  - A process with state=dead and blackboardWrites is DONE. Do NOT spawn a v2/retry",
+      "    of a completed task. Its output is on the blackboard — move on to the next phase.",
       "  Names must be unique.",
       "",
       "memory: Array of learning commands (learn, define_blueprint, evolve_blueprint, record_strategy). Same as before.",
