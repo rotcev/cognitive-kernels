@@ -22,13 +22,14 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer } from "node:http";
 import type { LensEventBus, LensBusEvent } from "./event-bus.js";
-import type { LensSnapshot, LensSnapshotDelta, LensTerminalLine, LensTerminalLevel, LensTerminalFilter, LensServerMessage, LensClientMessage } from "./types.js";
+import type { LensSnapshot, LensSnapshotDelta, LensTerminalLine, LensTerminalLevel, LensTerminalFilter, LensServerMessage, LensClientMessage, LensProcess, LensDagNode, LensEdge } from "./types.js";
 import { buildLensSnapshot } from "./view-models.js";
 import { diffSnapshots } from "./snapshot-differ.js";
 import { StreamSegmenter } from "./stream-segmenter.js";
 import { extractCognitiveEvent } from "./cognitive-events.js";
 import type { NarrativeGenerator } from "./narrative.js";
 import type { OsSystemSnapshot } from "../os/types.js";
+import type { OsProcessType } from "../os/types.js";
 
 interface TerminalSubscription {
   filter?: LensTerminalFilter;
@@ -315,6 +316,9 @@ export class LensServer {
       this.broadcastToRun(runId, { type: "cognitive_event", runId, cognitiveEvent });
     }
 
+    // ── Event-driven DAG: derive topology from protocol events ──
+    this.deriveStateFromEvent(runId, run, event);
+
     // If the event has an agentId, send terminal line to process subscribers
     // and global terminal subscribers
     if (event.agentId) {
@@ -341,6 +345,227 @@ export class LensServer {
     }
   }
 
+  // ── Event-derived DAG state ──────────────────────────────────────
+
+  /**
+   * Derive DAG/topology state from protocol events in real-time.
+   * This makes the topology view event-driven (<10ms latency)
+   * instead of depending on periodic snapshot polling.
+   */
+  private deriveStateFromEvent(
+    runId: string,
+    run: RunState,
+    event: import("../types.js").RuntimeProtocolEvent,
+  ): void {
+    const action = event.action;
+    const detail = event.detail as Record<string, unknown> | undefined;
+
+    if (action === "os_boot") {
+      // Initialize an empty snapshot from boot event
+      const goal = (detail?.goal as string) ?? event.message?.replace("goal=", "") ?? "";
+      const bootRunId = (detail?.runId as string) ?? runId;
+
+      const metacogNode: LensDagNode = {
+        pid: "__metacog__",
+        name: "metacog",
+        type: "daemon" as OsProcessType,
+        state: "idle",
+        role: "kernel",
+        priority: 100,
+        parentPid: null,
+      };
+
+      const metacogProcess: LensProcess = {
+        pid: "__metacog__",
+        name: "metacog",
+        type: "daemon" as OsProcessType,
+        state: "idle",
+        role: "kernel",
+        parentPid: null,
+        children: [],
+        objective: "Metacognitive oversight",
+        priority: 100,
+        tickCount: 0,
+        tokensUsed: 0,
+        tokenBudget: null,
+        model: "",
+        spawnedAt: event.timestamp ?? new Date().toISOString(),
+        lastActiveAt: event.timestamp ?? new Date().toISOString(),
+        backendKind: "llm",
+        selfReports: [],
+        blackboardIO: [],
+      };
+
+      if (!run.lastSnapshot) {
+        run.lastSnapshot = {
+          runId: bootRunId,
+          tick: 0,
+          goal,
+          elapsed: 0,
+          processes: [metacogProcess],
+          dag: { nodes: [metacogNode], edges: [] },
+          blackboard: {},
+          heuristics: [],
+          deferrals: [],
+          metrics: {
+            totalTokens: 0, tokenRate: 0, processCount: 1,
+            runningCount: 0, sleepingCount: 0, deadCount: 0,
+            checkpointedCount: 0, suspendedCount: 0,
+            dagDepth: 0, dagEdgeCount: 0, wallTimeElapsedMs: 0, tickCount: 0,
+          },
+        };
+        this.broadcastToRun(runId, { type: "snapshot", runId, snapshot: run.lastSnapshot });
+      }
+      return;
+    }
+
+    if (action === "os_process_spawn" && detail) {
+      const pid = detail.pid as string;
+      const name = (detail.name as string) ?? "unknown";
+      const objective = (detail.objective as string) ?? "";
+      const model = (detail.model as string) ?? "";
+      const priority = (detail.priority as number) ?? 50;
+      const parentPid = (detail.parentPid as string) ?? null;
+      const procType = (detail.type as OsProcessType) ?? "lifecycle";
+      const backend = detail.backend as { kind?: "llm" | "system" | "kernel" } | undefined;
+      const timestamp = event.timestamp ?? new Date().toISOString();
+
+      if (!pid) return;
+
+      // Determine role
+      const role = procType === "daemon" ? "kernel" as const
+        : backend?.kind === "kernel" ? "sub-kernel" as const
+        : backend?.kind === "system" ? "shell" as const
+        : "worker" as const;
+
+      const newProcess: LensProcess = {
+        pid, name, type: procType, state: "running", role,
+        parentPid, children: [], objective, priority,
+        tickCount: 0, tokensUsed: 0, tokenBudget: null,
+        model, spawnedAt: timestamp, lastActiveAt: timestamp,
+        backendKind: backend?.kind, selfReports: [], blackboardIO: [],
+      };
+
+      const newNode: LensDagNode = {
+        pid, name, type: procType, state: "running", role,
+        priority, parentPid, backendKind: backend?.kind,
+      };
+
+      // Build edges
+      const newEdges: LensEdge[] = [];
+      if (parentPid) {
+        newEdges.push({ from: parentPid, to: pid, relation: "parent-child" });
+      } else {
+        // Top-level process — connect from metacog
+        newEdges.push({ from: "__metacog__", to: pid, relation: "orchestrates" });
+      }
+
+      // Update parent's children list
+      if (parentPid && run.lastSnapshot) {
+        const parentProc = run.lastSnapshot.processes.find(p => p.pid === parentPid);
+        if (parentProc && !parentProc.children.includes(pid)) {
+          parentProc.children = [...parentProc.children, pid];
+        }
+      }
+
+      if (run.lastSnapshot) {
+        // Apply to cached snapshot
+        run.lastSnapshot = {
+          ...run.lastSnapshot,
+          processes: [...run.lastSnapshot.processes, newProcess],
+          dag: {
+            nodes: [...run.lastSnapshot.dag.nodes, newNode],
+            edges: [...run.lastSnapshot.dag.edges, ...newEdges],
+          },
+          metrics: {
+            ...run.lastSnapshot.metrics,
+            processCount: run.lastSnapshot.processes.length + 1,
+            runningCount: (run.lastSnapshot.metrics.runningCount ?? 0) + 1,
+            dagEdgeCount: run.lastSnapshot.dag.edges.length + newEdges.length,
+          },
+        };
+
+        // Broadcast delta
+        const delta: LensSnapshotDelta = {
+          tick: run.lastSnapshot.tick,
+          timestamp: timestamp,
+          processes: {
+            added: [newProcess],
+            removed: [],
+            changed: [],
+          },
+          dag: {
+            addedNodes: [newNode],
+            removedNodes: [],
+            addedEdges: newEdges,
+            removedEdges: [],
+          },
+          metrics: {
+            processCount: run.lastSnapshot.metrics.processCount,
+            runningCount: run.lastSnapshot.metrics.runningCount,
+            dagEdgeCount: run.lastSnapshot.metrics.dagEdgeCount,
+          },
+        };
+        this.broadcastToRun(runId, { type: "delta", runId, delta });
+      }
+      return;
+    }
+
+    if (action === "os_process_kill" && detail) {
+      const pid = detail.pid as string;
+      if (!pid || !run.lastSnapshot) return;
+
+      const procIdx = run.lastSnapshot.processes.findIndex(p => p.pid === pid);
+      if (procIdx < 0) return;
+
+      const updatedProc = { ...run.lastSnapshot.processes[procIdx], state: "dead" as const };
+      const procs = [...run.lastSnapshot.processes];
+      procs[procIdx] = updatedProc;
+
+      // Update node state in DAG
+      const nodes = run.lastSnapshot.dag.nodes.map(n =>
+        n.pid === pid ? { ...n, state: "dead" as const } : n
+      );
+
+      const wasRunning = run.lastSnapshot.processes[procIdx].state === "running";
+
+      run.lastSnapshot = {
+        ...run.lastSnapshot,
+        processes: procs,
+        dag: { ...run.lastSnapshot.dag, nodes },
+        metrics: {
+          ...run.lastSnapshot.metrics,
+          deadCount: (run.lastSnapshot.metrics.deadCount ?? 0) + 1,
+          runningCount: wasRunning
+            ? Math.max(0, (run.lastSnapshot.metrics.runningCount ?? 0) - 1)
+            : run.lastSnapshot.metrics.runningCount,
+        },
+      };
+
+      const delta: LensSnapshotDelta = {
+        tick: run.lastSnapshot.tick,
+        timestamp: event.timestamp ?? new Date().toISOString(),
+        processes: {
+          added: [],
+          removed: [],
+          changed: [{ pid, changed: { state: "dead" } }],
+        },
+        dag: {
+          addedNodes: [],
+          removedNodes: [],
+          addedEdges: [],
+          removedEdges: [],
+        },
+        metrics: {
+          deadCount: run.lastSnapshot.metrics.deadCount,
+          runningCount: run.lastSnapshot.metrics.runningCount,
+        },
+      };
+      this.broadcastToRun(runId, { type: "delta", runId, delta });
+      return;
+    }
+  }
+
   private handleSnapshot(runId: string, rawSnapshot: OsSystemSnapshot): void {
     const run = this.getOrCreateRunState(runId);
 
@@ -354,6 +579,10 @@ export class LensServer {
       total: rawSnapshot.progressMetrics.totalTokensUsed,
       timestamp: Date.now(),
     };
+
+    // Always inject metacog virtual process/node if not already present.
+    // The UI derives DAG from processes, so metacog must be in both arrays.
+    this.ensureMetacogInSnapshot(lensSnapshot);
 
     let snapshotDelta: import("./types.js").LensSnapshotDelta | null = null;
 
@@ -381,6 +610,69 @@ export class LensServer {
         }
       };
       void doNarrate();
+    }
+  }
+
+  /**
+   * Ensure the metacog virtual process/node exists in a snapshot.
+   * The UI derives DAG nodes from `processes`, so metacog must appear there.
+   */
+  private ensureMetacogInSnapshot(snapshot: LensSnapshot): void {
+    const METACOG_PID = "__metacog__";
+    const hasMetacogProcess = snapshot.processes.some(p => p.pid === METACOG_PID);
+    if (!hasMetacogProcess) {
+      const hasRunning = snapshot.processes.some(p => p.state === "running");
+      const metacogState = hasRunning ? "running" : "idle";
+
+      snapshot.processes.push({
+        pid: METACOG_PID,
+        name: "metacog",
+        type: "daemon" as OsProcessType,
+        state: metacogState as any,
+        role: "kernel",
+        parentPid: null,
+        children: [],
+        objective: "Metacognitive oversight",
+        priority: 100,
+        tickCount: 0,
+        tokensUsed: 0,
+        tokenBudget: null,
+        model: "",
+        spawnedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        backendKind: "llm",
+        selfReports: [],
+        blackboardIO: [],
+      });
+    }
+
+    const hasMetacogNode = snapshot.dag.nodes.some(n => n.pid === METACOG_PID);
+    if (!hasMetacogNode) {
+      snapshot.dag.nodes.push({
+        pid: METACOG_PID,
+        name: "metacog",
+        type: "daemon" as OsProcessType,
+        state: "idle",
+        role: "kernel",
+        priority: 100,
+        parentPid: null,
+      });
+    }
+
+    // Ensure top-level processes have an "orchestrates" edge from metacog
+    for (const proc of snapshot.processes) {
+      if (proc.pid === METACOG_PID) continue;
+      if (proc.parentPid) continue; // Not top-level
+      const hasEdge = snapshot.dag.edges.some(
+        e => e.from === METACOG_PID && e.to === proc.pid,
+      );
+      if (!hasEdge) {
+        snapshot.dag.edges.push({
+          from: METACOG_PID,
+          to: proc.pid,
+          relation: "orchestrates",
+        });
+      }
     }
   }
 

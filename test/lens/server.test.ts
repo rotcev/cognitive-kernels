@@ -165,9 +165,11 @@ describe("lens:server", () => {
     if (msg.type === "snapshot") {
       expect(msg.runId).toBe("test-run-1");
       expect(msg.snapshot.tick).toBe(0);
-      expect(msg.snapshot.processes.length).toBe(2);
+      // 2 from makeSnapshot + 1 injected __metacog__ virtual process
+      expect(msg.snapshot.processes.length).toBe(3);
       expect(msg.snapshot.processes[0].role).toBe("kernel"); // goal-orchestrator = kernel (root lifecycle)
       expect(msg.snapshot.processes[1].role).toBe("kernel"); // metacog = kernel (daemon)
+      expect(msg.snapshot.processes[2].pid).toBe("__metacog__"); // injected virtual metacog
     }
 
     ws.close();

@@ -33,6 +33,8 @@ export type TopologyExpr =
 export interface FlatNode {
   name: string;
   objective: string;
+  reads?: string[];
+  writes?: string[];
   model?: string;
   priority?: number;
   backend?: TaskBackend;

@@ -13,11 +13,12 @@
  *   - Enqueues events into the EventQueue on async completion
  */
 
-import type { Brain, BrainThread } from "../types.js";
+import type { Brain, BrainThread, BrainProvider } from "../types.js";
 import type { OsProtocolEmitter } from "./protocol-emitter.js";
 import type { ScopedMemoryStore } from "./scoped-memory-store.js";
 import { EventQueue } from "./event-queue.js";
 import { OsMetacognitiveAgent } from "./metacog-agent.js";
+import { BrainLensAdapter } from "../lens/brain-lens-adapter.js";
 import type { KernelState } from "./state-machine/state.js";
 import type { KernelEffect } from "./state-machine/effects.js";
 import type { OsSystemSnapshot } from "./types.js";
@@ -63,6 +64,7 @@ export class KernelInterpreter {
   private readonly queue: EventQueue;
   private readonly memoryStore: ScopedMemoryStore | null;
   private readonly workingDir: string;
+  private readonly lensAdapter: BrainLensAdapter | null;
 
   /** Active wall-clock timers (keyed by timer name). */
   private readonly timers = new Map<string, NodeJS.Timeout>();
@@ -79,12 +81,16 @@ export class KernelInterpreter {
     queue: EventQueue,
     memoryStore: ScopedMemoryStore | null,
     workingDir: string,
+    provider?: BrainProvider,
   ) {
     this.brain = brain;
     this.emitter = emitter;
     this.queue = queue;
     this.memoryStore = memoryStore;
     this.workingDir = workingDir;
+    this.lensAdapter = emitter && provider
+      ? new BrainLensAdapter({ emitter, provider })
+      : null;
   }
 
   /**
@@ -141,9 +147,19 @@ export class KernelInterpreter {
         const thread = this.getOrCreateThread(effect.pid, proc.model ?? state.config.kernel.processModel);
         const prompt = WORKER_SYSTEM_PROMPT + "\n\n# Your Objective\n\n" + proc.objective;
         const processName = proc.name;
+        const pid = effect.pid;
+
+        // Wire LLM streaming → lens adapter → protocol emitter → lens bus (real-time terminal)
+        const onStreamEvent = this.lensAdapter
+          ? this.lensAdapter.createStreamCallback(pid, processName)
+          : this.emitter
+            ? (event: import("../types.js").StreamEvent) => {
+                this.emitter!.emitStreamEvent(pid, processName, event);
+              }
+            : undefined;
 
         void thread
-          .run(prompt)
+          .run(prompt, { onStreamEvent })
           .then((result) => {
             const parsed = parseWorkerCommands(result.finalResponse, processName);
             this.queue.enqueue({
@@ -380,13 +396,31 @@ export class KernelInterpreter {
       reason: d.reason,
     }));
 
+    // Include metacog as a virtual kernel-level node in the DAG for rendering
+    const dagTopology = { ...state.dagTopology, nodes: [...state.dagTopology.nodes], edges: [...state.dagTopology.edges] };
+    const metacogPid = "__metacog__";
+    dagTopology.nodes.push({
+      pid: metacogPid,
+      name: "metacog",
+      type: "daemon" as any,
+      state: state.metacogInflight ? "running" : "idle",
+      priority: 100,
+      parentPid: null,
+    });
+    // Connect metacog to all top-level worker processes (no parentPid)
+    for (const node of state.dagTopology.nodes) {
+      if (!node.parentPid && node.type !== "daemon") {
+        dagTopology.edges.push({ from: metacogPid, to: node.pid, relation: "orchestrates" });
+      }
+    }
+
     return {
       runId: state.runId,
       tickCount: state.tickCount,
       goal: state.goal,
       processes: allProcesses,
-      dagTopology: state.dagTopology,
-      dagMetrics: { nodeCount: state.dagTopology.nodes.length, edgeCount: state.dagTopology.edges.length, maxDepth: 0, runningCount: activeProcessCount, stalledCount: stalledProcessCount, deadCount: 0 },
+      dagTopology,
+      dagMetrics: { nodeCount: dagTopology.nodes.length, edgeCount: dagTopology.edges.length, maxDepth: 0, runningCount: activeProcessCount, stalledCount: stalledProcessCount, deadCount: 0 },
       ipcSummary: { signalCount: 0, blackboardKeyCount: state.blackboard.size },
       deferrals,
       progressMetrics: {

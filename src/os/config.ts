@@ -19,7 +19,7 @@ const osKernelSchema = z.object({
   watchdogIntervalMs: z.number().int().positive().default(300000),
   housekeepIntervalMs: z.number().int().positive().default(500),
   metacogIntervalMs: z.number().int().positive().default(60000),
-  snapshotIntervalMs: z.number().int().positive().default(10000),
+  snapshotIntervalMs: z.number().int().positive().default(3000),
   goalCompleteGracePeriodMs: z.number().int().nonnegative().default(30000),
 }).strict();
 

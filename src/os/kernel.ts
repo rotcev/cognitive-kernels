@@ -3442,6 +3442,8 @@ export class OsKernel {
 
       drainingPids: new Set(this.drainingPids),
 
+      scopes: new Map(),
+
       ephemeralStats: { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 },
 
       halted: this.halted,

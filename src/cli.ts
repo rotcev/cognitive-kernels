@@ -111,7 +111,7 @@ async function handleServeCommand(flags: Map<string, string | boolean>): Promise
     lensSession = new LensSession({
       port: lensPort,
       storage: storageBackend,
-      pollIntervalMs: 2000,
+      pollIntervalMs: 1000,
     });
     await lensSession.start();
     const addr = lensSession.address;

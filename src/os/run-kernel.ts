@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Brain } from "../types.js";
+import type { Brain, BrainProvider } from "../types.js";
 import type { OsConfig, OsSystemSnapshot } from "./types.js";
 import type { OsProtocolEmitter } from "./protocol-emitter.js";
 import type { ScopedMemoryStore } from "./scoped-memory-store.js";
@@ -33,6 +33,7 @@ export async function runKernel(
     hasNewEpisodicData?: boolean;
     consolidatorObjective?: string;
     awarenessModel?: string;
+    provider?: BrainProvider;
   } = {},
 ): Promise<KernelState> {
   const workingDir = options.workingDir ?? process.cwd();
@@ -43,6 +44,7 @@ export async function runKernel(
     queue,
     options.memoryStore ?? null,
     workingDir,
+    options.provider,
   );
 
   let state = initialState(config, randomUUID());
@@ -76,7 +78,7 @@ export async function runKernel(
   );
 
   // Emit boot protocol event
-  emitter?.emit({ action: "os_boot", status: "started", message: `goal=${goal}` } as any);
+  emitter?.emit({ action: "os_boot", status: "started", message: `goal=${goal}`, detail: { goal, runId: state.runId } } as any);
 
   // ── The event loop ──────────────────────────────────────────────
   while (!state.halted) {

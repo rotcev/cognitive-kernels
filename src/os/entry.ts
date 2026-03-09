@@ -21,6 +21,8 @@ export type OsModeInput = {
   cwd: string;
   provider?: "claude" | "codex";
   runId?: string;
+  /** Lens event bus for real-time in-process streaming (zero-latency path). */
+  lensBus?: import("../lens/event-bus.js").LensEventBus;
 };
 
 export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
@@ -99,6 +101,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
       snapshotPath,
       livePath,
       storageBackend: backend,
+      lensBus: input.lensBus,
     });
   } else if (input.protocolLogPath) {
     // Filesystem only
@@ -108,6 +111,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
       protocolLogPath: input.protocolLogPath,
       snapshotPath,
       livePath,
+      lensBus: input.lensBus,
     });
   } else if (process.env.DATABASE_URL && input.runId) {
     // DB-only mode
@@ -117,6 +121,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
     emitter = new OsProtocolEmitter({
       storageBackend: backend,
       runId: input.runId,
+      lensBus: input.lensBus,
     });
   }
 
@@ -162,6 +167,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
       hasNewEpisodicData,
       consolidatorObjective,
       awarenessModel: osConfig.awareness?.model,
+      provider,
     });
 
     const snapshot = stateToSnapshot(finalState);

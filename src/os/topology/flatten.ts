@@ -14,6 +14,8 @@ function flattenExpr(expr: TopologyExpr, gateCondition: GateCondition | undefine
       const node: FlatNode = {
         name: expr.name,
         objective: expr.objective,
+        reads: expr.reads,
+        writes: expr.writes,
         model: expr.model,
         priority: expr.priority,
         backend: expr.backend,

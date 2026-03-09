@@ -12,7 +12,7 @@
  * - topology_declared, metacog_response_received, awareness_response_received
  */
 
-import type { KernelState, BlackboardEntry } from "./state.js";
+import type { KernelState, BlackboardEntry, BlackboardScope } from "./state.js";
 import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent, LlmTurnCompletedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology, MetacogHistoryEntry, MetacogCommand } from "../types.js";
@@ -170,6 +170,11 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
   const effects: KernelEffectInput[] = [];
   const processes = new Map(state.processes);
   const blackboard = new Map(state.blackboard);
+  const scopes = new Map(state.scopes);
+  // Deep-copy scope entries so mutations don't leak
+  for (const [id, scope] of scopes) {
+    scopes.set(id, { ...scope, entries: new Map(scope.entries) });
+  }
   const deferrals = new Map(state.deferrals);
   const pendingTriggers = [...state.pendingTriggers];
 
@@ -213,6 +218,7 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
       type: "emit_protocol",
       action: "os_process_kill",
       message: "execution_failed",
+      detail: { pid: event.pid, name: updatedProc.name },
     });
 
     // Auto-signal parent
@@ -282,17 +288,18 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         break;
 
       case "bb_write":
-        processBlackboardWrite(blackboard, updatedProc, cmd.key, cmd.value);
+        scopedWrite(blackboard, scopes, updatedProc, cmd.key, cmd.value);
         break;
 
       case "bb_read": {
         const readResults: Record<string, unknown> = {};
         for (const key of cmd.keys) {
-          const entry = blackboard.get(key);
+          const entry = scopedRead(blackboard, scopes, updatedProc, key);
           if (entry) {
             readResults[key] = entry.value;
           }
         }
+        // Inbox goes to root blackboard (kernel reads it directly)
         blackboard.set(`_inbox:${event.pid}`, {
           value: readResults,
           writtenBy: "kernel",
@@ -413,6 +420,11 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
       }
 
       case "exit": {
+        // Publish scope data to parent before death
+        if (updatedProc.scopeId) {
+          publishScope(blackboard, scopes, updatedProc.scopeId);
+        }
+
         // Kill the process
         updatedProc.state = "dead";
         updatedProc.exitCode = cmd.code;
@@ -421,6 +433,7 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
           type: "emit_protocol",
           action: "os_process_kill",
           message: `exit: ${cmd.reason}`,
+          detail: { pid: event.pid, name: updatedProc.name },
         });
 
         // Auto-signal parent
@@ -476,11 +489,17 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
   // Process deferrals — a process dying or bb writes may trigger conditions
   processPureDeferrals(state, processes, deferrals, effects);
 
+  // Emit snapshot immediately on process death for real-time lens DAG updates
+  if (updatedProc.state === "dead") {
+    effects.push({ type: "persist_snapshot", runId: state.runId });
+  }
+
   return [
     {
       ...state,
       processes,
       blackboard,
+      scopes,
       deferrals,
       pendingTriggers,
       lastProcessCompletionTime: Date.now(),
@@ -493,15 +512,37 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
 // process_completed helpers
 // ---------------------------------------------------------------------------
 
-/** Update blackboard with a write and track which keys the process has written. */
-function processBlackboardWrite(
+// ---------------------------------------------------------------------------
+// Scoped Blackboard helpers
+// ---------------------------------------------------------------------------
+
+/** Create a new scope for a process. */
+function createScope(
+  scopes: Map<string, BlackboardScope>,
+  scopeId: string,
+  parentId: string | null,
+  publishKeys: string[],
+): void {
+  scopes.set(scopeId, {
+    id: scopeId,
+    parentId,
+    entries: new Map(),
+    publishKeys,
+  });
+}
+
+/** Write to a process's scope (or root blackboard if no scope). */
+function scopedWrite(
   blackboard: Map<string, BlackboardEntry>,
+  scopes: Map<string, BlackboardScope>,
   proc: OsProcess,
   key: string,
   value: unknown,
 ): void {
-  const existing = blackboard.get(key);
-  blackboard.set(key, {
+  const scope = proc.scopeId ? scopes.get(proc.scopeId) : undefined;
+  const target = scope?.entries ?? blackboard;
+  const existing = target.get(key);
+  target.set(key, {
     value,
     writtenBy: proc.pid,
     version: (existing?.version ?? 0) + 1,
@@ -509,6 +550,58 @@ function processBlackboardWrite(
   if (!proc.blackboardKeysWritten) proc.blackboardKeysWritten = [];
   if (!proc.blackboardKeysWritten.includes(key)) {
     proc.blackboardKeysWritten.push(key);
+  }
+}
+
+/** Read from a process's scope chain (local → parent → ... → root). */
+function scopedRead(
+  blackboard: Map<string, BlackboardEntry>,
+  scopes: Map<string, BlackboardScope>,
+  proc: OsProcess,
+  key: string,
+): BlackboardEntry | undefined {
+  // Walk up the scope chain
+  let scopeId = proc.scopeId;
+  while (scopeId) {
+    const scope = scopes.get(scopeId);
+    if (!scope) break;
+    const entry = scope.entries.get(key);
+    if (entry) return entry;
+    scopeId = scope.parentId ?? undefined;
+  }
+  // Fall through to root blackboard
+  return blackboard.get(key);
+}
+
+/**
+ * Publish a completed process's scope data to its parent scope (or root).
+ * If the scope has publishKeys, only those are promoted. Otherwise all keys.
+ */
+function publishScope(
+  blackboard: Map<string, BlackboardEntry>,
+  scopes: Map<string, BlackboardScope>,
+  scopeId: string,
+): void {
+  const scope = scopes.get(scopeId);
+  if (!scope) return;
+
+  const keysToPublish = scope.publishKeys.length > 0
+    ? scope.publishKeys
+    : [...scope.entries.keys()];
+
+  // Determine target: parent scope entries, or root blackboard
+  const parentScope = scope.parentId ? scopes.get(scope.parentId) : undefined;
+  const target = parentScope?.entries ?? blackboard;
+
+  for (const key of keysToPublish) {
+    const entry = scope.entries.get(key);
+    if (entry) {
+      const existing = target.get(key);
+      target.set(key, {
+        ...entry,
+        version: (existing?.version ?? 0) + 1,
+      });
+    }
   }
 }
 
@@ -592,6 +685,16 @@ function processSpawnChild(
     type: "emit_protocol",
     action: "os_process_spawn",
     message: `parent=${parent.pid}`,
+    detail: {
+      pid: childPid,
+      name: resolvedDescriptor.name,
+      objective: resolvedDescriptor.objective,
+      model: resolvedDescriptor.model,
+      priority: resolvedDescriptor.priority ?? 50,
+      parentPid: parent.pid,
+      type: resolvedDescriptor.type ?? "lifecycle",
+      backend: resolvedDescriptor.backend,
+    },
   });
   effects.push({
     type: "submit_llm",
@@ -654,6 +757,15 @@ function processSpawnEphemeral(
     type: "emit_protocol",
     action: "os_process_spawn",
     message: `parent=${parent.name} type=ephemeral model=${ephModel}`,
+    detail: {
+      pid: ephPid,
+      name: ephName,
+      objective: cmd.objective,
+      model: ephModel,
+      priority: 30,
+      parentPid: parent.pid,
+      type: "event",
+    },
   });
   effects.push({
     type: "run_ephemeral",
@@ -1664,6 +1776,10 @@ function reconcileTopologyInto(
   // Apply reconcile effects: create/kill/drain processes in state AND emit kernel effects
   const processes = new Map(state.processes);
   const drainingPids = new Set(state.drainingPids);
+  const scopes = new Map(state.scopes);
+  for (const [id, scope] of scopes) {
+    scopes.set(id, { ...scope, entries: new Map(scope.entries) });
+  }
   const now = new Date().toISOString();
 
   for (const re of reconcileEffects) {
@@ -1692,6 +1808,13 @@ function reconcileTopologyInto(
         // Handle non-LLM backends
         if (re.backend) {
           (newProc as any).backend = re.backend;
+        }
+
+        // Create scoped blackboard for this process if it has writes declarations
+        if (re.writes && re.writes.length > 0) {
+          const scopeId = `scope-${pid}`;
+          createScope(scopes, scopeId, null, re.writes);
+          newProc.scopeId = scopeId;
         }
 
         processes.set(pid, newProc);
@@ -1732,6 +1855,12 @@ function reconcileTopologyInto(
           processes.set(re.pid, { ...proc, state: "dead", exitReason: "killed by topology" });
         }
         effects.push({ type: "kill_process", pid: re.pid, name: re.name });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_process_kill",
+          message: `topology: killed ${re.name}`,
+          detail: { pid: re.pid, name: re.name },
+        });
         break;
       }
       case "drain_process": {
@@ -1780,7 +1909,16 @@ function reconcileTopologyInto(
   }
   const dagTopology: OsDagTopology = { nodes: dagNodes, edges: dagEdges };
 
-  const newState: KernelState = { ...state, processes, drainingPids, inflight, dagTopology };
+  const newState: KernelState = { ...state, processes, drainingPids, inflight, dagTopology, scopes };
+
+  // Emit snapshot immediately on topology change (spawn/kill) for real-time lens updates
+  const hasTopologyChange = reconcileEffects.some(
+    re => re.type === "spawn_process" || re.type === "kill_process" || re.type === "drain_process",
+  );
+  if (hasTopologyChange) {
+    effects.push({ type: "persist_snapshot", runId: state.runId });
+  }
+
   return { state: newState, effects };
 }
 

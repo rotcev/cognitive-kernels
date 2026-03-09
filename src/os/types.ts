@@ -109,6 +109,9 @@ export type OsProcess = {
   // Observability — keys this process has written to the blackboard
   blackboardKeysWritten?: string[];
 
+  // Scoped blackboard — ID of this process's private scope
+  scopeId?: string;
+
   // Ephemeral spawn tracking
   ephemeralSpawnCount?: number;
 
@@ -206,7 +209,7 @@ export type OsDagNode = {
 export type OsDagEdge = {
   from: string;
   to: string;
-  relation: "parent-child" | "dependency";
+  relation: "parent-child" | "dependency" | "orchestrates";
   label?: string;
 };
 

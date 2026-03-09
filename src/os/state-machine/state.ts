@@ -38,7 +38,10 @@ export type KernelState = {
   activeEphemeralCount: number;
 
   // --- IPC / Blackboard ---
+  /** Root scope entries — gates and metacog see this. Published data lands here. */
   blackboard: Map<string, BlackboardEntry>;
+  /** Scoped blackboard tree. Each process gets a scope; writes go local, reads walk up. */
+  scopes: Map<string, BlackboardScope>;
 
   // --- Scheduling ---
   tickCount: number;
@@ -107,6 +110,15 @@ export type BlackboardEntry = {
   version: number;
 };
 
+/** A scoped blackboard — private workspace for a process subtree. */
+export type BlackboardScope = {
+  id: string;
+  parentId: string | null;  // null = root scope (KernelState.blackboard)
+  entries: Map<string, BlackboardEntry>;
+  /** Keys this scope will publish to parent on completion. Empty = publish all. */
+  publishKeys: string[];
+};
+
 /** Create the initial kernel state before any events are processed. */
 export function initialState(config: OsConfig, runId: string): KernelState {
   return {
@@ -119,6 +131,7 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     activeEphemeralCount: 0,
 
     blackboard: new Map(),
+    scopes: new Map(),
 
     tickCount: 0,
     schedulerStrategy: config.scheduler.strategy,
