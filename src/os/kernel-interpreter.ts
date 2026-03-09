@@ -121,6 +121,34 @@ function buildWorkerPrompt(proc: OsProcess): string {
   return lines.join("\n");
 }
 
+/** Build upstream context from blackboard results produced by other workers. */
+function buildUpstreamContext(state: KernelState, proc: OsProcess): string {
+  const entries: string[] = [];
+
+  for (const [key, entry] of state.blackboard) {
+    // Include result:* keys from other processes, plus shell stdout
+    if (!key.startsWith("result:") && !key.startsWith("shell:") && !key.startsWith("mcp:")) continue;
+    // Skip internal/system keys
+    if (key.startsWith("shell:exit:")) continue;
+    // Skip own keys
+    if (key === `result:${proc.name}`) continue;
+
+    const value = typeof entry.value === "string"
+      ? entry.value
+      : JSON.stringify(entry.value);
+    // Cap each entry to keep prompt bounded
+    const capped = value.length > 1000 ? value.slice(0, 1000) + "..." : value;
+    entries.push(`**${key}**: ${capped}`);
+  }
+
+  if (entries.length === 0) return "";
+
+  return "\n\n## Upstream Results (from other workers)\n\n" +
+    "These are results already produced by other workers in this run. " +
+    "Use them to stay consistent and avoid duplicating work.\n\n" +
+    entries.join("\n\n");
+}
+
 export class KernelInterpreter {
   private readonly brain: Brain;
   private readonly emitter: OsProtocolEmitter | null;
@@ -221,7 +249,8 @@ export class KernelInterpreter {
           prompt = effect.context;
         } else {
           const systemPrompt = buildWorkerPrompt(proc);
-          prompt = systemPrompt + "\n\n# Your Objective\n\n" + proc.objective;
+          const upstream = buildUpstreamContext(state, proc);
+          prompt = systemPrompt + upstream + "\n\n# Your Objective\n\n" + proc.objective;
         }
 
         void thread
