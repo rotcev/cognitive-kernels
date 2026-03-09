@@ -41,6 +41,33 @@ await runOsMode({
 });
 ```
 
+## Cohesion model
+
+Multi-agent systems typically struggle with coherence — independent workers produce
+contradictory or redundant output because they can't see each other. Cognitive kernels
+solve this structurally through the shared blackboard, mediated by a deterministic
+transition function.
+
+**Sequential cohesion** — When the metacog declares a topology with dependencies
+(e.g. `seq([research, write-report])`), the DAG edges are stored in `dagTopology`.
+On each LLM turn, the interpreter walks the DAG backwards from the current process
+and injects only ancestor results into the prompt. Downstream workers see exactly
+what their upstream dependencies produced — no more, no less.
+
+**Parallel cohesion** — Workers write intermediate progress to `progress:<name>`
+keys on the blackboard as they work. On each subsequent turn, parallel siblings see
+each other's progress through the same upstream context injection (which falls back
+to global scope when no dependency edges exist). Workers self-organize turn-by-turn:
+one discovers an API, its sibling sees that and focuses elsewhere, a third adjusts
+its approach based on both. No coordinator needed — the shared blackboard is the
+coordination mechanism.
+
+**Safety guarantee** — All blackboard reads and writes go through
+`transition(state, event) → [state', effects]`. One event at a time, pure function,
+no races. Workers physically cannot corrupt each other's state because the kernel
+mediates every mutation. This is what makes the shared-memory approach viable —
+it's not optimistic concurrency, it's structural impossibility of conflict.
+
 ## Future directions
 
 - **Progressive elaboration** — Currently the orchestrator waits for all scouts/readers
