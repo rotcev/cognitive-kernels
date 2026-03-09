@@ -86,7 +86,7 @@ const osObservationSchema = z.object({
   enabled: z.boolean().default(true),
   browserMcp: withObjectDefaults(z.object({
     command: z.string().default("npx"),
-    args: z.array(z.string()).default(["concurrent-browser-mcp", "--no-headless"]),
+    args: z.array(z.string()).default(["concurrent-browser-mcp"]),
     env: z.record(z.string(), z.string()).optional(),
     maxInstances: z.number().int().positive().default(5),
   })),

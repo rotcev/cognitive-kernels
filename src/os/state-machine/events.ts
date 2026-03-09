@@ -113,6 +113,8 @@ export type ShellOutputEvent = BaseEvent & {
   pid: string;
   hasStdout: boolean;
   hasStderr: boolean;
+  stdout?: string;
+  stderr?: string;
   exitCode?: number;
 };
 
@@ -182,6 +184,16 @@ export type ShellOutputReceivedEvent = BaseEvent & {
   exitCode: number;
 };
 
+/** An MCP tool call completed. */
+export type McpCallCompletedEvent = BaseEvent & {
+  type: "mcp_call_completed";
+  pid: string;
+  tool: string;
+  success: boolean;
+  result?: string;
+  error?: string;
+};
+
 /** IPC queue was flushed, waking blocked processes. */
 export type IpcFlushedEvent = BaseEvent & {
   type: "ipc_flushed";
@@ -206,6 +218,7 @@ export type KernelEvent =
   | LlmTurnCompletedEvent
   | SubkernelCompletedEvent
   | ShellOutputReceivedEvent
+  | McpCallCompletedEvent
   | IpcFlushedEvent
   ;
 

@@ -13,6 +13,7 @@
  *   - Enqueues events into the EventQueue on async completion
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
 import type { Brain, BrainThread } from "../types.js";
 import type { OsProtocolEmitter } from "./protocol-emitter.js";
 import type { ScopedMemoryStore } from "./scoped-memory-store.js";
@@ -20,42 +21,105 @@ import { EventQueue } from "./event-queue.js";
 import { OsMetacognitiveAgent } from "./metacog-agent.js";
 import type { KernelState } from "./state-machine/state.js";
 import type { KernelEffect } from "./state-machine/effects.js";
-import type { OsSystemSnapshot } from "./types.js";
+import type { OsSystemSnapshot, OsProcess } from "./types.js";
+import { McpClient } from "./mcp-client.js";
 
-/** Worker system prompt — tells the LLM how to format its response. */
-const WORKER_SYSTEM_PROMPT = `You are a worker process in a cognitive kernel. Your job is to accomplish your objective and report results.
+/** Build a dynamic worker system prompt based on process capabilities. */
+function buildWorkerPrompt(proc: OsProcess): string {
+  const lines: string[] = [];
 
-IMPORTANT: End your response with a JSON command block wrapped in \`\`\`json fences:
+  lines.push("You are a worker process in a cognitive kernel — an autonomous intelligence system.");
+  lines.push("Your job is to accomplish your objective and report results.");
+  lines.push("");
+  lines.push("IMPORTANT: End your response with a JSON command block wrapped in ```json fences:");
+  lines.push("");
+  lines.push("```json");
+  lines.push("{");
+  lines.push('  "commands": [');
+  lines.push('    { "kind": "bb_write", "key": "result:your-name", "value": "your result here" },');
+  lines.push('    { "kind": "exit", "reason": "completed" }');
+  lines.push("  ]");
+  lines.push("}");
+  lines.push("```");
+  lines.push("");
+  lines.push("## Available commands");
+  lines.push("");
+  lines.push("- **bb_write(key, value)**: Write a result to the shared blackboard. Use \"result:<your-process-name>\" as the key.");
+  lines.push("- **spawn_ephemeral(objective, name?)**: Spawn a lightweight scout for parallel sub-tasks.");
+  lines.push("- **exit(reason?, code?)**: You're done. Use code=0 for success.");
+  lines.push("- **idle(wakeOnSignals?)**: Pause and wait for new information.");
+  lines.push("- **sleep(durationMs)**: Pause for a duration.");
 
-\`\`\`json
-{
-  "commands": [
-    { "kind": "bb_write", "key": "result:your-name", "value": "your result here" },
-    { "kind": "exit", "reason": "completed" }
-  ]
+  // Add sense-specific commands based on capabilities
+  const tools = proc.capabilities?.observationTools ?? [];
+
+  if (tools.includes("shell")) {
+    lines.push("- **spawn_system(name, command, args?, env?)**: Spawn a managed shell process. Its stdout/stderr are captured to the blackboard passively. You'll be notified when it exits.");
+  }
+
+  if (tools.length > 0) {
+    lines.push("- **mcp_call(tool, args)**: Call an MCP tool directly. The result is written to the blackboard at `mcp:<your-name>:<tool-name>`. You'll be woken when the result arrives.");
+    lines.push("  IMPORTANT: Only emit ONE mcp_call per turn. After emitting it, your turn ends. You will be re-invoked with the result. Then emit the next mcp_call.");
+    lines.push("");
+    lines.push("## Available MCP tools (senses)");
+    lines.push("");
+
+    if (tools.includes("browser")) {
+      lines.push("### Browser tools (via mcp_call)");
+      lines.push("IMPORTANT: You must create a browser instance first, then pass its instanceId to all other calls.");
+      lines.push("");
+      lines.push("1. `browser_create_instance(options?)` — Create a browser instance. Returns { instanceId }. Call this FIRST.");
+      lines.push("   options: { browser?: \"chromium\"|\"firefox\", headless?: boolean }");
+      lines.push("2. `browser_navigate(instanceId, url)` — Navigate to a URL");
+      lines.push("3. `browser_screenshot(instanceId)` — Take a screenshot");
+      lines.push("4. `browser_click(instanceId, selector)` — Click an element");
+      lines.push("5. `browser_fill(instanceId, selector, value)` — Fill a form field");
+      lines.push("6. `browser_get_page_info(instanceId)` — Get page title and URL");
+      lines.push("7. `browser_get_markdown(instanceId)` — Get page content as markdown");
+      lines.push("8. `browser_evaluate(instanceId, expression)` — Execute JavaScript in the page");
+      lines.push("9. `browser_wait_for_element(instanceId, selector)` — Wait for element to appear");
+      lines.push("10. `browser_close_instance(instanceId)` — Close the browser instance when done");
+      lines.push("");
+      lines.push("Workflow (one mcp_call per turn, wait for result before next call):");
+      lines.push("");
+      lines.push("Turn 1 - create browser:");
+      lines.push("```json");
+      lines.push("{ \"commands\": [{ \"kind\": \"mcp_call\", \"tool\": \"browser_create_instance\", \"args\": {} }] }");
+      lines.push("```");
+      lines.push("(Your turn ends. You will be re-invoked with the result containing the instanceId.)");
+      lines.push("");
+      lines.push("Turn 2 - navigate (using instanceId from previous result):");
+      lines.push("```json");
+      lines.push("{ \"commands\": [{ \"kind\": \"mcp_call\", \"tool\": \"browser_navigate\", \"args\": { \"instanceId\": \"<from-result>\", \"url\": \"https://example.com\" } }] }");
+      lines.push("```");
+      lines.push("(Your turn ends. You will be re-invoked with the navigation result.)");
+      lines.push("");
+      lines.push("Turn 3 - get info, write result, exit:");
+      lines.push("```json");
+      lines.push("{ \"commands\": [{ \"kind\": \"mcp_call\", \"tool\": \"browser_get_page_info\", \"args\": { \"instanceId\": \"<same-id>\" } }] }");
+      lines.push("```");
+      lines.push("(Your turn ends. You will be re-invoked with the page info. Then bb_write and exit.)");
+    }
+
+    if (tools.includes("shell")) {
+      lines.push("");
+      lines.push("### Shell (via spawn_system)");
+      lines.push("Shell processes run as managed subprocesses. Their output flows to the blackboard.");
+      lines.push("Use spawn_system for long-running processes (servers, watchers).");
+      lines.push("For quick commands, you can use your built-in Bash tool directly.");
+    }
+  }
+
+  lines.push("");
+  lines.push("## Ephemerals");
+  lines.push("");
+  lines.push("If your objective involves multiple independent sub-tasks, spawn ephemerals to do them in parallel.");
+  lines.push("Each ephemeral is a fast, focused scout. Spawn them, then idle to wait for results.");
+  lines.push("");
+  lines.push("If you don't include a command block, the kernel will auto-write your full response to the blackboard and exit you.");
+
+  return lines.join("\n");
 }
-\`\`\`
-
-Available commands:
-- bb_write(key, value): Write a result to the shared blackboard. Use "result:<your-process-name>" as the key.
-- spawn_ephemeral(objective, name?): Spawn a lightweight scout to explore or investigate something concurrently. The scout runs in parallel and its result is written to the blackboard at "ephemeral:<name>:<id>". You can spawn multiple ephemerals and then idle to wait for their results.
-- exit(reason?, code?): You're done. Use code=0 for success. Always exit when your work is complete.
-- idle(wakeOnSignals?): Pause and wait for new information (e.g. ephemeral results arriving on the blackboard).
-- sleep(durationMs): Pause for a duration.
-
-## When to use ephemerals
-
-If your objective involves multiple independent sub-tasks — reading several files, researching different topics, exploring different approaches — spawn ephemerals to do them in parallel instead of doing everything sequentially yourself. Each ephemeral is a fast, focused scout. Example workflow:
-
-1. Analyze your objective and identify independent sub-investigations
-2. Spawn an ephemeral for each one: { "kind": "spawn_ephemeral", "objective": "Read and summarize src/foo.ts", "name": "scout-foo" }
-3. Idle to wait: { "kind": "idle" }
-4. When you wake, read ephemeral results from the blackboard and synthesize
-
-This is significantly faster than doing everything yourself for tasks with 3+ independent parts.
-
-If you don't include a command block, the kernel will auto-write your full response to the blackboard and exit you.
-`;
 
 export class KernelInterpreter {
   private readonly brain: Brain;
@@ -73,18 +137,27 @@ export class KernelInterpreter {
   /** Cached metacognitive agent instance (created lazily). */
   private metacogAgent: OsMetacognitiveAgent | null = null;
 
+  /** Active shell subprocesses (keyed by pid). */
+  private readonly shellProcesses = new Map<string, ChildProcess>();
+
+  /** MCP client for tool calls (created lazily from config). */
+  private mcpClient: McpClient | null = null;
+  private readonly mcpConfig: { command: string; args?: string[]; env?: Record<string, string> } | null;
+
   constructor(
     brain: Brain,
     emitter: OsProtocolEmitter | null,
     queue: EventQueue,
     memoryStore: ScopedMemoryStore | null,
     workingDir: string,
+    mcpConfig?: { command: string; args?: string[]; env?: Record<string, string> } | null,
   ) {
     this.brain = brain;
     this.emitter = emitter;
     this.queue = queue;
     this.memoryStore = memoryStore;
     this.workingDir = workingDir;
+    this.mcpConfig = mcpConfig ?? null;
   }
 
   /**
@@ -139,8 +212,17 @@ export class KernelInterpreter {
         if (!proc) break;
 
         const thread = this.getOrCreateThread(effect.pid, proc.model ?? state.config.kernel.processModel);
-        const prompt = WORKER_SYSTEM_PROMPT + "\n\n# Your Objective\n\n" + proc.objective;
         const processName = proc.name;
+
+        // If the effect has context (e.g. MCP result), use it directly as the follow-up prompt.
+        // Otherwise, build the full system prompt + objective (first turn).
+        let prompt: string;
+        if (effect.type === "submit_llm" && effect.context) {
+          prompt = effect.context;
+        } else {
+          const systemPrompt = buildWorkerPrompt(proc);
+          prompt = systemPrompt + "\n\n# Your Objective\n\n" + proc.objective;
+        }
 
         void thread
           .run(prompt)
@@ -253,16 +335,89 @@ export class KernelInterpreter {
         break;
       }
 
-      // ── Shell process ─────────────────────────────────────────
+      // ── Shell process (real child_process spawn) ────────────────
       case "run_shell": {
-        // TODO: Wire shell process execution (spawn child_process)
-        this.queue.enqueue({
-          type: "shell_output_received",
-          pid: effect.pid,
-          output: "",
-          exitCode: 0,
-          timestamp: Date.now(),
-          seq: 0,
+        const child = spawn(effect.command, effect.args, {
+          cwd: effect.workingDir ?? this.workingDir,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env },
+        });
+
+        this.shellProcesses.set(effect.pid, child);
+
+        let stdoutBuf = "";
+        let stderrBuf = "";
+        let flushTimer: NodeJS.Timeout | null = null;
+
+        const debouncedFlush = () => {
+          if (flushTimer) clearTimeout(flushTimer);
+          flushTimer = setTimeout(() => {
+            if (stdoutBuf || stderrBuf) {
+              this.queue.enqueue({
+                type: "shell_output",
+                pid: effect.pid,
+                hasStdout: stdoutBuf.length > 0,
+                hasStderr: stderrBuf.length > 0,
+                stdout: stdoutBuf || undefined,
+                stderr: stderrBuf || undefined,
+                timestamp: Date.now(),
+                seq: 0,
+              });
+              // Reset buffers after flush
+              stdoutBuf = "";
+              stderrBuf = "";
+            }
+          }, 2000);
+        };
+
+        child.stdout?.on("data", (chunk: Buffer) => {
+          stdoutBuf += chunk.toString();
+          // Cap buffer at 8KB
+          if (stdoutBuf.length > 8192) {
+            stdoutBuf = stdoutBuf.slice(-8192);
+          }
+          debouncedFlush();
+        });
+
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderrBuf += chunk.toString();
+          if (stderrBuf.length > 8192) {
+            stderrBuf = stderrBuf.slice(-8192);
+          }
+          debouncedFlush();
+        });
+
+        child.on("exit", (code) => {
+          if (flushTimer) clearTimeout(flushTimer);
+          this.shellProcesses.delete(effect.pid);
+
+          this.queue.enqueue({
+            type: "shell_output",
+            pid: effect.pid,
+            hasStdout: stdoutBuf.length > 0,
+            hasStderr: stderrBuf.length > 0,
+            stdout: stdoutBuf || undefined,
+            stderr: stderrBuf || undefined,
+            exitCode: code ?? 1,
+            timestamp: Date.now(),
+            seq: 0,
+          });
+        });
+
+        child.on("error", (err) => {
+          if (flushTimer) clearTimeout(flushTimer);
+          this.shellProcesses.delete(effect.pid);
+
+          this.queue.enqueue({
+            type: "shell_output",
+            pid: effect.pid,
+            hasStdout: false,
+            hasStderr: true,
+            stderr: err instanceof Error ? err.message : String(err),
+            exitCode: 1,
+            timestamp: Date.now(),
+            seq: 0,
+          });
         });
         break;
       }
@@ -279,6 +434,60 @@ export class KernelInterpreter {
           timestamp: Date.now(),
           seq: 0,
         });
+        break;
+      }
+
+      // ── MCP tool call ──────────────────────────────────────────
+      case "execute_mcp_call": {
+        void (async () => {
+          try {
+            const client = await this.getOrCreateMcpClient();
+            if (!client) {
+              this.queue.enqueue({
+                type: "mcp_call_completed",
+                pid: effect.pid,
+                tool: effect.tool,
+                success: false,
+                error: "No MCP server configured",
+                timestamp: Date.now(),
+                seq: 0,
+              });
+              return;
+            }
+
+            // Force headless: false on browser_create_instance so the browser is visible
+            const args = effect.tool === "browser_create_instance"
+              ? { ...effect.args, headless: false }
+              : effect.args;
+
+            const result = await client.callTool(effect.tool, args);
+            const textContent = result.content
+              ?.filter((c) => c.type === "text" && c.text)
+              .map((c) => c.text)
+              .join("\n") ?? "";
+
+            this.queue.enqueue({
+              type: "mcp_call_completed",
+              pid: effect.pid,
+              tool: effect.tool,
+              success: !result.isError,
+              result: textContent || JSON.stringify(result.content),
+              error: result.isError ? textContent : undefined,
+              timestamp: Date.now(),
+              seq: 0,
+            });
+          } catch (err) {
+            this.queue.enqueue({
+              type: "mcp_call_completed",
+              pid: effect.pid,
+              tool: effect.tool,
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+              timestamp: Date.now(),
+              seq: 0,
+            });
+          }
+        })();
         break;
       }
 
@@ -308,7 +517,7 @@ export class KernelInterpreter {
     }
   }
 
-  /** Clear all timers and abort all threads. */
+  /** Clear all timers, abort all threads, kill shell processes, close MCP client. */
   cleanup(): void {
     for (const timer of this.timers.values()) {
       clearInterval(timer);
@@ -319,6 +528,16 @@ export class KernelInterpreter {
       thread.abort();
     }
     this.threads.clear();
+
+    for (const child of this.shellProcesses.values()) {
+      child.kill();
+    }
+    this.shellProcesses.clear();
+
+    if (this.mcpClient) {
+      this.mcpClient.close();
+      this.mcpClient = null;
+    }
 
     this.metacogAgent = null;
   }
@@ -351,6 +570,16 @@ export class KernelInterpreter {
       );
     }
     return this.metacogAgent;
+  }
+
+  /** Get or create the MCP client, connecting lazily. */
+  private async getOrCreateMcpClient(): Promise<McpClient | null> {
+    if (this.mcpClient?.isConnected) return this.mcpClient;
+    if (!this.mcpConfig) return null;
+
+    this.mcpClient = new McpClient(this.mcpConfig);
+    await this.mcpClient.connect();
+    return this.mcpClient;
   }
 
   /**

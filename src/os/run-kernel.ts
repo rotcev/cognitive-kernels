@@ -37,12 +37,23 @@ export async function runKernel(
 ): Promise<KernelState> {
   const workingDir = options.workingDir ?? process.cwd();
   const queue = new EventQueue();
+
+  // Extract MCP config from observation settings
+  const mcpConfig = config.observation?.enabled && config.observation?.browserMcp
+    ? {
+        command: config.observation.browserMcp.command,
+        args: config.observation.browserMcp.args,
+        env: config.observation.browserMcp.env,
+      }
+    : null;
+
   const interpreter = new KernelInterpreter(
     brain,
     emitter,
     queue,
     options.memoryStore ?? null,
     workingDir,
+    mcpConfig,
   );
 
   let state = initialState(config, randomUUID());

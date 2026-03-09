@@ -13,7 +13,7 @@
  */
 
 import type { KernelState, BlackboardEntry } from "./state.js";
-import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent, LlmTurnCompletedEvent } from "./events.js";
+import type { KernelEvent, BootEvent, HaltCheckEvent, ExternalCommandEvent, ProcessCompletedEvent, EphemeralCompletedEvent, TimerFiredEvent, MetacogEvaluatedEvent, AwarenessEvaluatedEvent, ShellOutputEvent, TopologyDeclaredEvent, MetacogResponseReceivedEvent, AwarenessResponseReceivedEvent, LlmTurnCompletedEvent, McpCallCompletedEvent } from "./events.js";
 import type { KernelEffect, KernelEffectInput } from "./effects.js";
 import type { OsProcess, OsProcessCommand, DeferCondition, DeferEntry, SelfReport, OsMetacogTrigger, OsSchedulerStrategy, OsHeuristic, SchedulingStrategy, OsDagTopology, MetacogHistoryEntry, MetacogCommand } from "../types.js";
 import { reconcile } from "../topology/reconcile.js";
@@ -61,6 +61,8 @@ export function transition(state: KernelState, event: KernelEvent): TransitionRe
       return handleAwarenessResponseReceived(state, event);
     case "llm_turn_completed":
       return handleLlmTurnCompleted(state, event);
+    case "mcp_call_completed":
+      return handleMcpCallCompleted(state, event);
     default:
       return [state, []];
   }
@@ -452,6 +454,71 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
         }
         // Rebuild DAG after process death
         effects.push({ type: "rebuild_dag" });
+        break;
+      }
+
+      case "spawn_system": {
+        if (!state.config.systemProcess?.enabled) {
+          effects.push({
+            type: "emit_protocol",
+            action: "os_command_rejected",
+            message: `spawn_system rejected: systemProcess.enabled is false`,
+          });
+          break;
+        }
+
+        const shellNow = new Date().toISOString();
+        const shellPid = `os-shell-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const shellProc: OsProcess = {
+          pid: shellPid,
+          type: "lifecycle",
+          state: "running",
+          name: cmd.name,
+          parentPid: event.pid,
+          objective: `shell: ${cmd.command} ${(cmd.args ?? []).join(" ")}`,
+          priority: state.config.processes.defaultPriority,
+          spawnedAt: shellNow,
+          lastActiveAt: shellNow,
+          tickCount: 0,
+          tokensUsed: 0,
+          model: state.config.kernel.processModel,
+          workingDir: state.processes.values().next().value?.workingDir ?? "/tmp",
+          children: [],
+          onParentDeath: "orphan",
+          restartPolicy: "never",
+          backend: { kind: "system", command: cmd.command, args: cmd.args, env: cmd.env },
+        };
+        processes.set(shellPid, shellProc);
+        updatedProc.children = [...(updatedProc.children ?? []), shellPid];
+
+        effects.push({
+          type: "run_shell",
+          pid: shellPid,
+          command: cmd.command,
+          args: cmd.args ?? [],
+        });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_system_spawn",
+          message: `spawn_system name=${cmd.name} command=${cmd.command} pid=${shellPid}`,
+        });
+        break;
+      }
+
+      case "mcp_call": {
+        effects.push({
+          type: "execute_mcp_call",
+          pid: event.pid,
+          tool: cmd.tool,
+          args: cmd.args,
+        });
+        updatedProc.state = "idle";
+        effects.push({ type: "idle_process", pid: event.pid });
+        effects.push({
+          type: "emit_protocol",
+          action: "os_mcp_call",
+          message: `mcp_call tool=${cmd.tool} pid=${event.pid}`,
+        });
         break;
       }
     }
@@ -1126,10 +1193,39 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
 
   const effects: KernelEffectInput[] = [];
   const processes = new Map(state.processes);
+  const blackboard = new Map(state.blackboard);
   const now = new Date().toISOString();
 
   const proc = processes.get(event.pid);
   if (!proc) return [state, []];
+
+  // Emit protocol events for stdout/stderr content (flows to Lens terminal view)
+  if (event.stdout) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_shell_output",
+      message: event.stdout,
+      detail: { stream: "stdout", pid: event.pid, name: proc.name },
+    });
+    blackboard.set(`shell:${proc.name}:stdout`, {
+      value: event.stdout,
+      writtenBy: "kernel",
+      version: (blackboard.get(`shell:${proc.name}:stdout`)?.version ?? 0) + 1,
+    });
+  }
+  if (event.stderr) {
+    effects.push({
+      type: "emit_protocol",
+      action: "os_shell_output",
+      message: event.stderr,
+      detail: { stream: "stderr", pid: event.pid, name: proc.name },
+    });
+    blackboard.set(`shell:${proc.name}:stderr`, {
+      value: event.stderr,
+      writtenBy: "kernel",
+      version: (blackboard.get(`shell:${proc.name}:stderr`)?.version ?? 0) + 1,
+    });
+  }
 
   // If exitCode is present, the shell process has exited
   if (event.exitCode !== undefined) {
@@ -1142,10 +1238,8 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
     };
     processes.set(event.pid, updated);
 
-    // Notify parent via bb write
-    const blackboard = new Map(state.blackboard);
     blackboard.set(`shell:exit:${event.pid}`, {
-      value: { exitCode: event.exitCode, pid: event.pid },
+      value: { exitCode: event.exitCode, pid: event.pid, name: proc.name },
       writtenBy: "kernel",
       version: 1,
     });
@@ -1156,16 +1250,40 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
       message: `shell pid=${event.pid} name=${proc.name} exitCode=${event.exitCode}`,
     });
 
-    // Signal parent process
+    // Signal parent process and re-submit to LLM if it was waiting
+    let inflight = state.inflight;
     if (proc.parentPid) {
-      effects.push({
-        type: "activate_process",
-        pid: proc.parentPid,
-      });
+      const parent = processes.get(proc.parentPid);
+      if (parent) {
+        effects.push({
+          type: "activate_process",
+          pid: proc.parentPid,
+        });
+
+        if (parent.state === "idle" || parent.state === "sleeping") {
+          const wokenParent = { ...parent, state: "running" as const, lastActiveAt: now };
+          processes.set(proc.parentPid, wokenParent);
+
+          const stdout = event.stdout ? `\n\nStdout:\n${event.stdout.slice(0, 2000)}` : "";
+          const stderr = event.stderr ? `\n\nStderr:\n${event.stderr.slice(0, 2000)}` : "";
+          const shellContext = `Your shell process "${proc.name}" (pid=${event.pid}) exited with code ${event.exitCode}.` +
+            (event.exitCode === 0 ? ` The command completed successfully.` : ` The command failed.`) +
+            stdout + stderr + `\n\nContinue with your next step.`;
+
+          effects.push({
+            type: "submit_llm",
+            pid: proc.parentPid,
+            name: wokenParent.name,
+            model: wokenParent.model,
+            context: shellContext,
+          });
+          inflight = new Set([...state.inflight, proc.parentPid]);
+        }
+      }
     }
 
     return [
-      { ...state, processes, blackboard },
+      { ...state, processes, blackboard, inflight },
       assignEffectSeqs(effects),
     ];
   }
@@ -1175,7 +1293,7 @@ function handleShellOutput(state: KernelState, event: ShellOutputEvent): Transit
   processes.set(event.pid, updated);
 
   return [
-    { ...state, processes },
+    { ...state, processes, blackboard },
     assignEffectSeqs(effects),
   ];
 }
@@ -1694,6 +1812,13 @@ function reconcileTopologyInto(
           (newProc as any).backend = re.backend;
         }
 
+        // Propagate capabilities from topology or default observation tools
+        if (re.capabilities) {
+          (newProc as any).capabilities = re.capabilities;
+        } else if (state.config.observation?.enabled && (!re.backend || re.backend.kind === "llm")) {
+          (newProc as any).capabilities = { observationTools: ["browser", "shell"] };
+        }
+
         processes.set(pid, newProc);
 
         effects.push({
@@ -2092,6 +2217,58 @@ function handleLlmTurnCompleted(
   }
 
   return [newState, effects];
+}
+
+function handleMcpCallCompleted(
+  state: KernelState,
+  event: McpCallCompletedEvent,
+): TransitionResult {
+  if (state.halted) return [state, []];
+
+  const effects: KernelEffectInput[] = [];
+  const processes = new Map(state.processes);
+  const blackboard = new Map(state.blackboard);
+
+  const proc = processes.get(event.pid);
+  if (!proc) return [state, []];
+
+  // Write MCP result to blackboard so the process can read it
+  const resultKey = `mcp:${proc.name}:${event.tool}`;
+  blackboard.set(resultKey, {
+    value: event.success ? event.result : { error: event.error },
+    writtenBy: "kernel",
+    version: 1,
+  });
+
+  // Wake the process
+  const updatedProc = { ...proc, state: "running" as const, lastActiveAt: new Date().toISOString() };
+  processes.set(event.pid, updatedProc);
+
+  effects.push({ type: "activate_process", pid: event.pid });
+
+  // Re-submit to LLM with the MCP result injected
+  const mcpResultContext = event.success
+    ? `Your mcp_call to "${event.tool}" succeeded. Result is on the blackboard at key "${resultKey}":\n\n${event.result}\n\nUse this result to proceed with your next step. Remember to read the instanceId from the result above if needed.`
+    : `Your mcp_call to "${event.tool}" failed: ${event.error}\n\nYou may retry or adjust your approach.`;
+
+  effects.push({
+    type: "submit_llm",
+    pid: event.pid,
+    name: updatedProc.name,
+    model: updatedProc.model,
+    context: mcpResultContext,
+  });
+
+  effects.push({
+    type: "emit_protocol",
+    action: "os_mcp_result",
+    message: `mcp_call_completed tool=${event.tool} pid=${event.pid} success=${event.success}`,
+  });
+
+  return [
+    { ...state, processes, blackboard, inflight: new Set([...state.inflight, event.pid]) },
+    assignEffectSeqs(effects),
+  ];
 }
 
 function assignEffectSeqs(inputs: KernelEffectInput[]): KernelEffect[] {
