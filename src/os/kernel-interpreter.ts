@@ -193,9 +193,20 @@ export class KernelInterpreter {
       case "run_metacog": {
         const agent = this.getOrCreateMetacog(state);
 
+        // Wire metacog LLM streaming → lens (so terminal shows metacog's thinking)
+        const metacogPid = "__metacog__";
+        const metacogName = "metacog";
+        const onStreamEvent = this.lensAdapter
+          ? this.lensAdapter.createStreamCallback(metacogPid, metacogName)
+          : this.emitter
+            ? (event: import("../types.js").StreamEvent) => {
+                this.emitter!.emitStreamEvent(metacogPid, metacogName, event);
+              }
+            : undefined;
+
         void (async () => {
           try {
-            const response = await agent.evaluate(effect.context);
+            const response = await agent.evaluate(effect.context, { onStreamEvent });
             this.queue.enqueue({
               type: "metacog_response_received",
               response,

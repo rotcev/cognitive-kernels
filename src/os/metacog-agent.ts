@@ -7,7 +7,7 @@ import type {
   SelectedBlueprintInfo,
 } from "./types.js";
 import type { MetacogOutput, MetacogMemoryCommand } from "./topology/types.js";
-import type { Brain, BrainThread } from "../types.js";
+import type { Brain, BrainThread, StreamEvent } from "../types.js";
 import { METACOG_OUTPUT_SCHEMA } from "./schemas.js";
 
 export class OsMetacognitiveAgent {
@@ -502,7 +502,10 @@ export class OsMetacognitiveAgent {
     return this.pendingTriggers.length > 0;
   }
 
-  async evaluate(context: MetacogContext): Promise<string> {
+  async evaluate(
+    context: MetacogContext,
+    options?: { onStreamEvent?: (event: StreamEvent) => void },
+  ): Promise<string> {
     if (this.thread === null) {
       this.thread = this.client.startThread({ model: this.model });
     }
@@ -520,6 +523,7 @@ export class OsMetacognitiveAgent {
 
     const result = await this.thread.run(input, {
       outputSchema: METACOG_OUTPUT_SCHEMA,
+      onStreamEvent: options?.onStreamEvent,
     });
 
     this.evaluationCount += 1;
