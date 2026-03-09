@@ -653,15 +653,25 @@ function publishScope(
   const scope = scopes.get(scopeId);
   if (!scope) return;
 
-  const keysToPublish = scope.publishKeys.length > 0
-    ? scope.publishKeys
-    : [...scope.entries.keys()];
+  // Build the set of keys to publish:
+  // 1. Declared publishKeys (from topology writes)
+  // 2. Always promote result:* and progress:* keys (kernel coordination)
+  const declaredKeys = scope.publishKeys.length > 0
+    ? new Set(scope.publishKeys)
+    : new Set(scope.entries.keys());
+
+  // Also promote kernel coordination keys regardless of publishKeys
+  for (const key of scope.entries.keys()) {
+    if (key.startsWith("result:") || key.startsWith("progress:")) {
+      declaredKeys.add(key);
+    }
+  }
 
   // Determine target: parent scope entries, or root blackboard
   const parentScope = scope.parentId ? scopes.get(scope.parentId) : undefined;
   const target = parentScope?.entries ?? blackboard;
 
-  for (const key of keysToPublish) {
+  for (const key of declaredKeys) {
     const entry = scope.entries.get(key);
     if (entry) {
       const existing = target.get(key);

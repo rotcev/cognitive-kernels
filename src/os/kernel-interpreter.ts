@@ -26,28 +26,41 @@ import type { OsSystemSnapshot, OsProcess } from "./types.js";
 import { McpClient } from "./mcp-client.js";
 
 /** Build a dynamic worker system prompt based on process capabilities. */
-function buildWorkerPrompt(proc: OsProcess): string {
+function buildWorkerPrompt(proc: OsProcess, declaredWriteKeys?: string[]): string {
   const lines: string[] = [];
+
+  // Determine the result key: use the topology-declared write key if available,
+  // otherwise fall back to result:${proc.name}
+  const resultKey = declaredWriteKeys && declaredWriteKeys.length > 0
+    ? declaredWriteKeys[0]
+    : `result:${proc.name}`;
 
   lines.push("You are a worker process in a cognitive kernel — an autonomous intelligence system.");
   lines.push("Your job is to accomplish your objective and report results.");
   lines.push("");
   lines.push("IMPORTANT: End your response with a JSON command block wrapped in ```json fences.");
-  lines.push(`When you are done, you MUST write your result to key "result:${proc.name}" before exiting:`);
+  lines.push(`When you are done, you MUST write your result to key "${resultKey}" before exiting:`);
   lines.push("");
   lines.push("```json");
   lines.push("{");
   lines.push('  "commands": [');
-  lines.push(`    { "kind": "bb_write", "key": "result:${proc.name}", "value": "summary of what you produced" },`);
+  lines.push(`    { "kind": "bb_write", "key": "${resultKey}", "value": "summary of what you produced" },`);
   lines.push('    { "kind": "exit", "reason": "completed" }');
   lines.push("  ]");
   lines.push("}");
   lines.push("```");
+  if (declaredWriteKeys && declaredWriteKeys.length > 1) {
+    lines.push("");
+    lines.push("You are also expected to write these additional keys:");
+    for (let i = 1; i < declaredWriteKeys.length; i++) {
+      lines.push(`- \`${declaredWriteKeys[i]}\``);
+    }
+  }
   lines.push("");
   lines.push("## Available commands");
   lines.push("");
-  lines.push("- **bb_write(key, value)**: Write a result to the shared blackboard. Use \"result:<your-process-name>\" as the key for final results.");
-  lines.push("  You can also write intermediate progress: bb_write(\"progress:<your-process-name>\", \"short summary of what you've found/done so far\").");
+  lines.push(`- **bb_write(key, value)**: Write a result to the shared blackboard. Use "${resultKey}" as the key for final results.`);
+  lines.push(`  You can also write intermediate progress: bb_write("progress:${proc.name}", "short summary of what you've found/done so far").`);
   lines.push("  Other parallel workers will see your progress and can coordinate with you. Keep progress values concise (1-3 sentences).");
   lines.push("- **spawn_ephemeral(objective, name?)**: Spawn a lightweight scout for parallel sub-tasks.");
   lines.push("- **exit(reason?, code?)**: You're done. Use code=0 for success.");
@@ -323,7 +336,11 @@ export class KernelInterpreter {
         if (effect.type === "submit_llm" && effect.context) {
           prompt = effect.context;
         } else {
-          const systemPrompt = buildWorkerPrompt(proc);
+          // Look up the process's scope publishKeys (from topology writes declarations)
+          const scopePublishKeys = proc.scopeId
+            ? state.scopes.get(proc.scopeId)?.publishKeys
+            : undefined;
+          const systemPrompt = buildWorkerPrompt(proc, scopePublishKeys);
           const upstream = buildUpstreamContext(state, proc);
           prompt = systemPrompt + upstream + "\n\n# Your Objective\n\n" + proc.objective;
         }
