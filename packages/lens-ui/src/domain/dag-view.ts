@@ -225,9 +225,9 @@ export class LensDagView extends LensElement {
       }
     }
 
-    // Also use edges with explicit parent-child relation
+    // Also use edges with explicit parent-child or orchestrates relation
     for (const edge of this.edges) {
-      if (edge.relation !== "parent-child") continue;
+      if (edge.relation !== "parent-child" && edge.relation !== "orchestrates") continue;
       const parent = map.get(edge.from);
       const child = map.get(edge.to);
       if (parent && child && !childOf.has(edge.to)) {
