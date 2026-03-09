@@ -32,12 +32,13 @@ function buildWorkerPrompt(proc: OsProcess): string {
   lines.push("You are a worker process in a cognitive kernel — an autonomous intelligence system.");
   lines.push("Your job is to accomplish your objective and report results.");
   lines.push("");
-  lines.push("IMPORTANT: End your response with a JSON command block wrapped in ```json fences:");
+  lines.push("IMPORTANT: End your response with a JSON command block wrapped in ```json fences.");
+  lines.push(`When you are done, you MUST write your result to key "result:${proc.name}" before exiting:`);
   lines.push("");
   lines.push("```json");
   lines.push("{");
   lines.push('  "commands": [');
-  lines.push('    { "kind": "bb_write", "key": "result:your-name", "value": "your result here" },');
+  lines.push(`    { "kind": "bb_write", "key": "result:${proc.name}", "value": "summary of what you produced" },`);
   lines.push('    { "kind": "exit", "reason": "completed" }');
   lines.push("  ]");
   lines.push("}");
