@@ -121,17 +121,71 @@ function buildWorkerPrompt(proc: OsProcess): string {
   return lines.join("\n");
 }
 
+/**
+ * Collect the set of process names that are upstream ancestors of `proc`
+ * by walking dependency edges backwards through the DAG topology.
+ * Returns an empty set if no DAG exists (falls back to global injection).
+ */
+function getUpstreamAncestorNames(state: KernelState, proc: OsProcess): Set<string> | null {
+  const dag = state.dagTopology;
+  if (!dag || dag.edges.length === 0) return null; // no DAG — fall back to global
+
+  // Build pid→name lookup and reverse adjacency (to → from[]) for dependency edges only
+  const pidToName = new Map<string, string>();
+  for (const node of dag.nodes) {
+    pidToName.set(node.pid, node.name);
+  }
+  const reverseAdj = new Map<string, string[]>(); // pid → upstream pids
+  for (const edge of dag.edges) {
+    if (edge.relation !== "dependency") continue;
+    const existing = reverseAdj.get(edge.to) ?? [];
+    existing.push(edge.from);
+    reverseAdj.set(edge.to, existing);
+  }
+
+  // If no dependency edges exist at all, fall back to global
+  if (reverseAdj.size === 0) return null;
+
+  // BFS backwards from proc.pid to collect all ancestors
+  const ancestors = new Set<string>();
+  const queue = [proc.pid];
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const upstreams = reverseAdj.get(current) ?? [];
+    for (const upPid of upstreams) {
+      const name = pidToName.get(upPid);
+      if (name) ancestors.add(name);
+      queue.push(upPid);
+    }
+  }
+  return ancestors;
+}
+
 /** Build upstream context from blackboard results produced by other workers. */
 function buildUpstreamContext(state: KernelState, proc: OsProcess): string {
   const entries: string[] = [];
 
+  // Scope to DAG ancestors when dependency edges exist, otherwise global
+  const ancestorNames = getUpstreamAncestorNames(state, proc);
+
   for (const [key, entry] of state.blackboard) {
-    // Include result:* keys from other processes, plus shell stdout
+    // Include result:* keys from other processes, plus shell/mcp output
     if (!key.startsWith("result:") && !key.startsWith("shell:") && !key.startsWith("mcp:")) continue;
     // Skip internal/system keys
     if (key.startsWith("shell:exit:")) continue;
     // Skip own keys
     if (key === `result:${proc.name}`) continue;
+
+    // If DAG-scoped, only include keys written by upstream ancestors
+    if (ancestorNames !== null) {
+      // Extract worker name from key prefix (result:foo, shell:foo:stdout, mcp:foo:tool)
+      const parts = key.split(":");
+      const workerName = parts[1];
+      if (!ancestorNames.has(workerName)) continue;
+    }
 
     const value = typeof entry.value === "string"
       ? entry.value

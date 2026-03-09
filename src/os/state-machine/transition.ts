@@ -20,6 +20,7 @@ import { reconcile } from "../topology/reconcile.js";
 import { validateTopology } from "../topology/validate.js";
 import { optimizeTopology } from "../topology/optimize.js";
 import { autoArrange } from "../topology/auto-arrange.js";
+import { flatten } from "../topology/flatten.js";
 import type { TopologyExpr, MetacogMemoryCommand } from "../topology/types.js";
 import { randomUUID } from "node:crypto";
 import { buildMetacogContextPure } from "./metacog-context.js";
@@ -1890,6 +1891,8 @@ function reconcileTopologyInto(
   // Rebuild DAG topology from updated process table
   const dagNodes: OsDagTopology["nodes"] = [];
   const dagEdges: OsDagTopology["edges"] = [];
+  // Build name→pid lookup for mapping topology edges to process PIDs
+  const nameToPid = new Map<string, string>();
   for (const [pid, proc] of processes) {
     dagNodes.push({
       pid,
@@ -1899,8 +1902,18 @@ function reconcileTopologyInto(
       priority: proc.priority,
       parentPid: proc.parentPid,
     });
+    nameToPid.set(proc.name, pid);
     if (proc.parentPid && processes.has(proc.parentPid)) {
       dagEdges.push({ from: proc.parentPid, to: pid, relation: "parent-child" });
+    }
+  }
+  // Add topology dependency edges (from FlatGraph edges mapped to PIDs)
+  const flat = flatten(topology);
+  for (const edge of flat.edges) {
+    const fromPid = nameToPid.get(edge.from);
+    const toPid = nameToPid.get(edge.to);
+    if (fromPid && toPid) {
+      dagEdges.push({ from: fromPid, to: toPid, relation: "dependency", label: `${edge.from} → ${edge.to}` });
     }
   }
   const dagTopology: OsDagTopology = { nodes: dagNodes, edges: dagEdges };
