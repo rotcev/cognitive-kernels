@@ -202,7 +202,9 @@ export function buildUpstreamContext(state: KernelState, proc: OsProcess): strin
 
   return "\n\n## Upstream Results (from other workers)\n\n" +
     "These are results already produced by other workers in this run. " +
-    "Use them to stay consistent and avoid duplicating work.\n\n" +
+    "You MUST follow any schemas, contracts, or specifications defined here — " +
+    "they are binding agreements between workers, not suggestions. " +
+    "Use exact field names, types, and structures as specified.\n\n" +
     entries.join("\n\n");
 }
 
