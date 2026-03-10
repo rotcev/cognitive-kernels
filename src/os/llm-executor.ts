@@ -431,7 +431,7 @@ export class LlmExecutorBackend implements ExecutorBackend, ExecutorContextInjec
       "  Parallel processes emerge naturally from sharing the same `after` dependencies.",
       "  Observer nodes MUST include `capabilities: { observationTools: [\"browser\", \"shell\"] }` to get",
       "  browser MCP tools (screenshots, console messages, network requests) and shell access.",
-      "- `bb_write` — { kind: \"bb_write\", key: string, value: any } — write to shared blackboard",
+      "- `bb_write` — { kind: \"bb_write\", key: string, value: any } — write to blackboard (scoped to your process; visible to others after publish)",
       "- `bb_read` — { kind: \"bb_read\", keys: string[] } — request blackboard keys (results in next turn inbox)",
       "- `signal_emit` — { kind: \"signal_emit\", signal: string, payload?: any } — emit signal",
       "- `idle` — { kind: \"idle\", wakeOnSignals?: string[] } — wait for events",
