@@ -103,6 +103,7 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
   const newState: KernelState = {
     ...state,
     goal: event.goal,
+    metacogContext: event.metacogContext,
     startTime: Date.now(),
     processes,
     blackboard,

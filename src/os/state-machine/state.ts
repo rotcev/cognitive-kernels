@@ -27,6 +27,7 @@ import type {
 export type KernelState = {
   // --- Identity ---
   goal: string;
+  metacogContext?: string;
   runId: string;
   config: OsConfig;
 

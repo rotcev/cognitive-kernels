@@ -462,6 +462,10 @@ export class KernelRunManager {
     const cwd = path.resolve(input.cwd);
     const args = [this.scriptPath, "os", "--goal", input.goal, "--json"];
 
+    if (input.metacogContext) {
+      args.push("--metacog-context", input.metacogContext);
+    }
+
     if (artifacts) {
       args.push("--out", artifacts.outputPath);
       args.push("--protocol-log", artifacts.protocolLogPath);

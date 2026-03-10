@@ -4,6 +4,7 @@ import type { ApiSchemaSet } from "./types.js";
 export const createRunSchema = z
   .object({
     goal: z.string().min(1),
+    metacogContext: z.string().optional(),
     provider: z.enum(["claude", "codex"]).optional(),
     configPath: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),

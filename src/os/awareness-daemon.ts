@@ -1,4 +1,4 @@
-import type { Brain, BrainThread } from "../types.js";
+import type { Brain } from "../types.js";
 import type {
   AwarenessContext,
   AwarenessResponse,
@@ -71,8 +71,6 @@ export class AwarenessDaemon {
   private readonly client: Brain;
   private readonly workingDir: string;
   private readonly emitter?: OsProtocolEmitter;
-  private thread: BrainThread | null = null;
-  private initialized = false;
   private evaluationCount = 0;
   private lastNotes: string[] = [];
 
@@ -168,21 +166,15 @@ export class AwarenessDaemon {
   }
 
   async evaluate(context: AwarenessContext): Promise<AwarenessResponse> {
-    if (this.thread === null) {
-      this.thread = this.client.startThread({ model: this.model });
-    }
+    // Fresh thread each evaluation — context prompt already contains the full
+    // metacog history, intervention outcomes, heuristic inventory, progress
+    // timeline, and prior notes. Accumulating thread history would just stack
+    // stale snapshots as redundant input tokens.
+    const thread = this.client.startThread({ model: this.model });
 
-    const contextPrompt = this.buildContextPrompt(context);
+    const input = AWARENESS_SYSTEM_PROMPT + "\n\n---\n\n" + this.buildContextPrompt(context);
 
-    let input: string;
-    if (!this.initialized) {
-      input = AWARENESS_SYSTEM_PROMPT + "\n\n---\n\n" + contextPrompt;
-      this.initialized = true;
-    } else {
-      input = contextPrompt;
-    }
-
-    const result = await this.thread.run(input, {
+    const result = await thread.run(input, {
       outputSchema: AWARENESS_OUTPUT_SCHEMA,
     });
 

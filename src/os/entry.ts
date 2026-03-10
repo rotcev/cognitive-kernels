@@ -16,6 +16,8 @@ loadDotenv();
 
 export type OsModeInput = {
   goal: string;
+  /** Optional context injected into the metacog system prompt. Consumers use this to shape worker behavior without modifying the kernel. */
+  metacogContext?: string;
   configPath?: string;
   protocolLogPath?: string;
   cwd: string;
@@ -163,6 +165,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
   try {
     const finalState = await runKernel(input.goal, osConfig, client, emitter ?? null, {
       workingDir: input.cwd,
+      metacogContext: input.metacogContext,
       memoryStore,
       hasNewEpisodicData,
       consolidatorObjective,
@@ -180,6 +183,11 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
   } catch (err) {
     emitCrash("kernel.run", err);
     throw err;
+  } finally {
+    // Ensure the process exits even if DB pools or other handles keep the event loop alive.
+    // The CLI caller (handleOsCommand) writes output synchronously after await, so by the
+    // time we reach here all I/O is flushed. Give a brief grace period for any final writes.
+    setTimeout(() => process.exit(0), 500).unref();
   }
 }
 

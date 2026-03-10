@@ -29,6 +29,7 @@ export async function runKernel(
   emitter: OsProtocolEmitter | null,
   options: {
     workingDir?: string;
+    metacogContext?: string;
     memoryStore?: ScopedMemoryStore | null;
     hasNewEpisodicData?: boolean;
     consolidatorObjective?: string;
@@ -65,6 +66,7 @@ export async function runKernel(
   queue.enqueue({
     type: "boot",
     goal,
+    metacogContext: options.metacogContext,
     workingDir,
     hasNewEpisodicData: options.hasNewEpisodicData ?? false,
     consolidatorObjective: options.consolidatorObjective,

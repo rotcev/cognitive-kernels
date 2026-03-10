@@ -10,6 +10,7 @@ import type { RunTopologyView } from "../runs/monitoring.js";
 export type ApiSchemaSet = {
   createRun: z.ZodType<{
     goal: string;
+    metacogContext?: string;
     provider?: "claude" | "codex";
     configPath?: string;
     cwd?: string;

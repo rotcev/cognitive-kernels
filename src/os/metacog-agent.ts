@@ -7,19 +7,18 @@ import type {
   SelectedBlueprintInfo,
 } from "./types.js";
 import type { MetacogOutput, MetacogMemoryCommand } from "./topology/types.js";
-import type { Brain, BrainThread, StreamEvent } from "../types.js";
+import type { Brain, StreamEvent } from "../types.js";
 import { METACOG_OUTPUT_SCHEMA } from "./schemas.js";
 
 export class OsMetacognitiveAgent {
-  private thread: BrainThread | null = null;
   private evaluationCount = 0;
   private tokensUsed = 0;
   private readonly model: string;
   private readonly goal: string;
   private readonly client: Brain;
   private readonly workingDir: string;
+  private readonly metacogContext?: string;
   private pendingTriggers: OsMetacogTrigger[] = [];
-  private initialized = false;
   private processSnapshot: OsProcess[] = [];
   private blueprintsSnapshot: TopologyBlueprint[] = [];
   private selectedBlueprint: SelectedBlueprintInfo | null = null;
@@ -30,11 +29,13 @@ export class OsMetacognitiveAgent {
     goal: string,
     client: Brain,
     workingDir: string,
+    metacogContext?: string,
   ) {
     this.model = model;
     this.goal = goal;
     this.client = client;
     this.workingDir = workingDir;
+    this.metacogContext = metacogContext;
   }
 
   buildSystemPrompt(): string {
@@ -169,6 +170,9 @@ export class OsMetacognitiveAgent {
       "## Goal",
       "",
       `${this.goal}`,
+      ...(this.metacogContext
+        ? ["", "## Additional Context (from caller)", "", this.metacogContext]
+        : []),
     ].join("\n");
   }
 
@@ -327,6 +331,18 @@ export class OsMetacognitiveAgent {
         if (proc.completionCriteria && proc.completionCriteria.length > 0) {
           lines.push(`  completionCriteria: [${proc.completionCriteria.join("; ")}]`);
         }
+      }
+    }
+
+    // Active task names — explicit callout to prevent accidental renaming during reconciliation
+    const activeTasks = this.processSnapshot.filter(p => p.state !== "dead");
+    if (activeTasks.length > 0) {
+      lines.push("");
+      lines.push("### Active Task Names (use these EXACT names in topology)");
+      lines.push("If you re-declare topology, you MUST use these exact names for tasks that should keep running.");
+      lines.push("A different name = kill the old process + spawn a new one = wasted tokens and time.");
+      for (const proc of activeTasks) {
+        lines.push(`  - "${proc.name}" (state=${proc.state}, ticks=${proc.tickCount})`);
       }
     }
 
@@ -525,22 +541,16 @@ export class OsMetacognitiveAgent {
     context: MetacogContext,
     options?: { onStreamEvent?: (event: StreamEvent) => void },
   ): Promise<string> {
-    if (this.thread === null) {
-      this.thread = this.client.startThread({ model: this.model });
-    }
+    // Fresh thread each evaluation — the context prompt already contains the full
+    // system state (process table, blackboard, metrics, intervention history,
+    // awareness notes). Reusing threads would accumulate stale snapshots as input
+    // tokens with zero informational value, since each context prompt supersedes
+    // the last. Prior decisions are already fed back via metacogHistory.
+    const thread = this.client.startThread({ model: this.model });
 
-    const contextPrompt = this.buildContextPrompt(context);
+    const input = this.buildSystemPrompt() + "\n\n---\n\n" + this.buildContextPrompt(context);
 
-    // On first evaluation, prepend the system prompt so the thread has role context
-    let input: string;
-    if (!this.initialized) {
-      input = this.buildSystemPrompt() + "\n\n---\n\n" + contextPrompt;
-      this.initialized = true;
-    } else {
-      input = contextPrompt;
-    }
-
-    const result = await this.thread.run(input, {
+    const result = await thread.run(input, {
       outputSchema: METACOG_OUTPUT_SCHEMA,
       onStreamEvent: options?.onStreamEvent,
     });
