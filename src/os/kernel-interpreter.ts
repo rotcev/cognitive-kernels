@@ -162,7 +162,9 @@ function buildWorkerPrompt(proc: OsProcess, declaredWriteKeys?: string[], worker
     lines.push("");
     lines.push("## Additional Context");
     lines.push("");
-    lines.push(workerContext);
+    // Substitute {process-name} placeholder so consumer-provided prompts
+    // (e.g. Parallax worker context) can reference the worker's actual name.
+    lines.push(workerContext.replace(/\{your-process-name\}/g, proc.name));
   }
 
   return lines.join("\n");

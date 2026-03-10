@@ -670,7 +670,7 @@ function publishScope(
 
   // Also promote kernel coordination keys regardless of publishKeys
   for (const key of scope.entries.keys()) {
-    if (key.startsWith("result:") || key.startsWith("progress:")) {
+    if (key.startsWith("result:") || key.startsWith("progress:") || key.startsWith("findings:") || key.startsWith("inputs:") || key.startsWith("analysis:")) {
       declaredKeys.add(key);
     }
   }
@@ -1877,7 +1877,7 @@ function reconcileTopologyInto(
   state: KernelState,
   topology: TopologyExpr,
   effects: KernelEffectInput[],
-): { state: KernelState; effects: KernelEffectInput[] } {
+): { state: KernelState; effects: KernelEffectInput[]; topologyChanged: boolean } {
   // Auto-arrange: if tasks have reads/writes annotations, compute par/seq from data deps
   topology = autoArrange(topology);
 
@@ -1889,7 +1889,7 @@ function reconcileTopologyInto(
       action: "os_topology_error",
       message: `invalid topology: ${validation.errors.map(e => e.message).join(", ")}`,
     });
-    return { state, effects };
+    return { state, effects, topologyChanged: false };
   }
 
   // Optimize
@@ -2079,7 +2079,7 @@ function reconcileTopologyInto(
     effects.push({ type: "persist_snapshot", runId: state.runId });
   }
 
-  return { state: newState, effects };
+  return { state: newState, effects, topologyChanged: hasTopologyChange };
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,14 +2233,16 @@ function handleMetacogResponseReceived(
     ? metacogHistory.slice(-historyWindow)
     : metacogHistory;
 
-  // Emit observability protocol event with full structured detail
+  // Emit observability protocol event with full structured detail.
+  // phaseName is deferred — only included after reconciliation confirms actual topology changes.
+  const metacogEventIndex = effects.length;
   effects.push({
     type: "emit_protocol",
     action: "os_metacog",
     message: `assessment=${assessment.slice(0, 100)} topology=${topology !== null ? "declared" : "null"} memory=${memory.length} halt=${halt?.status ?? "none"}`,
     detail: {
       assessment,
-      phaseName,
+      phaseName: null,  // patched below if topology actually changes
       topology,
       memory,
       halt,
@@ -2298,6 +2300,13 @@ function handleMetacogResponseReceived(
   // Handle topology → reconcile
   if (topology !== null) {
     const result = reconcileTopologyInto(newState, topology, effects);
+    // Only surface phaseName when reconciliation actually spawned/killed processes
+    if (phaseName && result.topologyChanged) {
+      const metacogEvent = result.effects[metacogEventIndex] as any;
+      if (metacogEvent?.detail) {
+        metacogEvent.detail.phaseName = phaseName;
+      }
+    }
     return [result.state, assignEffectSeqs(result.effects)];
   }
 
