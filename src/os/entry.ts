@@ -18,6 +18,8 @@ export type OsModeInput = {
   goal: string;
   /** Optional context injected into the metacog system prompt. Consumers use this to shape worker behavior without modifying the kernel. */
   metacogContext?: string;
+  /** Optional context injected into worker system prompts. */
+  workerContext?: string;
   configPath?: string;
   protocolLogPath?: string;
   cwd: string;
@@ -166,6 +168,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
     const finalState = await runKernel(input.goal, osConfig, client, emitter ?? null, {
       workingDir: input.cwd,
       metacogContext: input.metacogContext,
+      workerContext: input.workerContext,
       memoryStore,
       hasNewEpisodicData,
       consolidatorObjective,

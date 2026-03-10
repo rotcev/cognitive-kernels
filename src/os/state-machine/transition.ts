@@ -104,6 +104,7 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     ...state,
     goal: event.goal,
     metacogContext: event.metacogContext,
+    workerContext: event.workerContext,
     startTime: Date.now(),
     processes,
     blackboard,
@@ -293,6 +294,12 @@ function handleProcessCompleted(state: KernelState, event: ProcessCompletedEvent
 
       case "bb_write":
         scopedWrite(blackboard, scopes, updatedProc, cmd.key, cmd.value);
+        effects.push({
+          type: "emit_protocol",
+          action: "os_bb_write",
+          message: `bb_write key=${cmd.key} pid=${event.pid}`,
+          detail: { pid: event.pid, name: updatedProc.name, key: cmd.key, value: cmd.value, scopeId: updatedProc.scopeId },
+        });
         break;
 
       case "bb_read": {
@@ -1989,6 +1996,10 @@ function reconcileTopologyInto(
       case "kill_process": {
         const proc = processes.get(re.pid);
         if (proc) {
+          // Publish scoped data before death so findings reach root blackboard
+          if (proc.scopeId) {
+            publishScope(state.blackboard, scopes, proc.scopeId);
+          }
           processes.set(re.pid, { ...proc, state: "dead", exitReason: "killed by topology" });
         }
         effects.push({ type: "kill_process", pid: re.pid, name: re.name });
@@ -2193,6 +2204,7 @@ function handleMetacogResponseReceived(
   const memory: MetacogMemoryCommand[] = Array.isArray(parsed.memory) ? parsed.memory : [];
   const halt: { status: "achieved" | "unachievable" | "stalled"; summary: string } | null = parsed.halt ?? null;
   const assessment: string = parsed.assessment ?? "";
+  const phaseName: string | null = typeof parsed.phaseName === "string" ? parsed.phaseName : null;
 
   const effects: KernelEffectInput[] = [];
 
@@ -2228,6 +2240,7 @@ function handleMetacogResponseReceived(
     message: `assessment=${assessment.slice(0, 100)} topology=${topology !== null ? "declared" : "null"} memory=${memory.length} halt=${halt?.status ?? "none"}`,
     detail: {
       assessment,
+      phaseName,
       topology,
       memory,
       halt,

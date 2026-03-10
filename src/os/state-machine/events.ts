@@ -28,6 +28,8 @@ export type BootEvent = BaseEvent & {
   goal: string;
   /** Optional context injected into the metacog system prompt by the caller. */
   metacogContext?: string;
+  /** Optional context injected into worker system prompts by the caller. */
+  workerContext?: string;
   /** Working directory for spawned processes. */
   workingDir?: string;
   /** Whether memory-consolidator daemon should be spawned. */

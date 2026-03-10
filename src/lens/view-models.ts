@@ -151,15 +151,15 @@ function buildLensBB(snap: OsSystemSnapshot): Record<string, LensBBEntry> {
   if (!snap.blackboard) return result;
 
   for (const [key, value] of Object.entries(snap.blackboard)) {
-    // Find writer from process data
-    const writer = snap.processes.find((p) =>
-      p.blackboardKeysWritten?.includes(key),
-    );
+    // Prefer authoritative writtenBy from snapshot metadata, fall back to process search
+    const writerName = snap.blackboardWriters?.[key]
+      ?? snap.processes.find((p) => p.blackboardKeysWritten?.includes(key))?.name
+      ?? "unknown";
 
     result[key] = {
       key,
       value,
-      writer: writer?.name ?? "unknown",
+      writer: writerName,
       readBy: [], // Can't determine from snapshot alone; augmented from events
     };
   }

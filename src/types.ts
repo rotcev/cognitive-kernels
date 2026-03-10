@@ -144,6 +144,7 @@ export type KernelRunLogChunk = {
 export type KernelRunInput = {
   goal: string;
   metacogContext?: string;
+  workerContext?: string;
   configPath?: string;
   cwd: string;
   provider?: BrainProvider;

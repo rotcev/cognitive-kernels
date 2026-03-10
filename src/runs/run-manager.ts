@@ -466,6 +466,10 @@ export class KernelRunManager {
       args.push("--metacog-context", input.metacogContext);
     }
 
+    if (input.workerContext) {
+      args.push("--worker-context", input.workerContext);
+    }
+
     if (artifacts) {
       args.push("--out", artifacts.outputPath);
       args.push("--protocol-log", artifacts.protocolLogPath);

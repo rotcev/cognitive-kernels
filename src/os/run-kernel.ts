@@ -30,6 +30,7 @@ export async function runKernel(
   options: {
     workingDir?: string;
     metacogContext?: string;
+    workerContext?: string;
     memoryStore?: ScopedMemoryStore | null;
     hasNewEpisodicData?: boolean;
     consolidatorObjective?: string;
@@ -67,6 +68,7 @@ export async function runKernel(
     type: "boot",
     goal,
     metacogContext: options.metacogContext,
+    workerContext: options.workerContext,
     workingDir,
     hasNewEpisodicData: options.hasNewEpisodicData ?? false,
     consolidatorObjective: options.consolidatorObjective,
@@ -154,10 +156,21 @@ export function stateToSnapshot(state: KernelState): OsSystemSnapshot {
     (p) => p.state === "sleeping" || p.state === "idle",
   ).length;
 
+  // Build PID → name lookup for blackboard writer attribution
+  const pidToName = new Map<string, string>();
+  for (const p of allProcesses) {
+    pidToName.set(p.pid, p.name);
+  }
+
   const blackboard: Record<string, unknown> = {};
+  const blackboardWriters: Record<string, string> = {};
   for (const [key, entry] of state.blackboard) {
     if (!key.startsWith("_inbox:")) {
       blackboard[key] = entry.value;
+      if (entry.writtenBy) {
+        const name = pidToName.get(entry.writtenBy);
+        if (name) blackboardWriters[key] = name;
+      }
     }
   }
 
@@ -199,5 +212,6 @@ export function stateToSnapshot(state: KernelState): OsSystemSnapshot {
     recentEvents: [],
     recentHeuristics: state.schedulerHeuristics.slice(0, 10),
     blackboard,
+    blackboardWriters,
   };
 }

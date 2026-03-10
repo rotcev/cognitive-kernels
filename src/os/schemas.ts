@@ -133,6 +133,10 @@ export const METACOG_OUTPUT_SCHEMA = {
       type: "string",
       description: "Overall assessment of system state and progress toward the goal",
     },
+    phaseName: {
+      anyOf: [{ type: "string" }, { type: "null" }],
+      description: "Short user-facing label (2-5 words) for the current phase whenever topology changes. Write it as a natural activity description the end user would understand — e.g. 'Exploring the landscape', 'Verifying claims', 'Building the answer'. Avoid technical jargon. Null when topology is unchanged.",
+    },
     topology: {
       anyOf: [{ type: "string" }, { type: "null" }],
       description: "JSON-encoded topology expression using primitives (task, seq, par, gate). Set to null if no changes needed. Example: {\"type\":\"par\",\"children\":[{\"type\":\"task\",\"name\":\"worker-1\",\"objective\":\"do X\"}]}",

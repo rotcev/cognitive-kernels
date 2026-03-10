@@ -11,6 +11,7 @@ export type ApiSchemaSet = {
   createRun: z.ZodType<{
     goal: string;
     metacogContext?: string;
+    workerContext?: string;
     provider?: "claude" | "codex";
     configPath?: string;
     cwd?: string;

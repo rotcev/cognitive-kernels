@@ -44,6 +44,7 @@ export function createRunsApiApp(options: RunsApiOptions = {}): Hono {
     )({
       goal: body.goal,
       metacogContext: body.metacogContext,
+      workerContext: body.workerContext,
       provider: body.provider ?? options.defaultProvider,
       cwd: body.cwd ?? options.defaultCwd ?? process.cwd(),
       configPath: body.configPath ?? options.defaultConfigPath,

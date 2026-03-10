@@ -26,7 +26,7 @@ import type { OsSystemSnapshot, OsProcess } from "./types.js";
 import { McpClient } from "./mcp-client.js";
 
 /** Build a dynamic worker system prompt based on process capabilities. */
-function buildWorkerPrompt(proc: OsProcess, declaredWriteKeys?: string[]): string {
+function buildWorkerPrompt(proc: OsProcess, declaredWriteKeys?: string[], workerContext?: string): string {
   const lines: string[] = [];
 
   // Determine the result key: use the topology-declared write key if available,
@@ -128,12 +128,42 @@ function buildWorkerPrompt(proc: OsProcess, declaredWriteKeys?: string[]): strin
   }
 
   lines.push("");
-  lines.push("## Ephemerals");
+  lines.push("## Parallel Delegation with Ephemerals");
   lines.push("");
-  lines.push("If your objective involves multiple independent sub-tasks, spawn ephemerals to do them in parallel.");
-  lines.push("Each ephemeral is a fast, focused scout. Spawn them, then idle to wait for results.");
+  lines.push("You can spawn lightweight ephemeral processes to work on independent sub-tasks in parallel.");
+  lines.push("Ephemerals are fast, single-purpose agents. They write their results to the blackboard, then exit.");
+  lines.push("");
+  lines.push("**When to spawn ephemerals instead of doing it yourself:**");
+  lines.push("- Your objective decomposes into 3+ independent sub-tasks that don't depend on each other");
+  lines.push("- You need to gather information from multiple independent sources");
+  lines.push("- The sub-tasks are self-contained enough to describe in one sentence each");
+  lines.push("");
+  lines.push("**When NOT to spawn ephemerals:**");
+  lines.push("- Sub-tasks depend on each other (output of one feeds the next)");
+  lines.push("- The work is a single coherent chain of reasoning");
+  lines.push("- You only have 1-2 things to do");
+  lines.push("");
+  lines.push("**Pattern: spawn N ephemerals, idle, then synthesize:**");
+  lines.push("```json");
+  lines.push("{");
+  lines.push('  "commands": [');
+  lines.push('    { "kind": "spawn_ephemeral", "objective": "Sub-task A description", "name": "scout-a" },');
+  lines.push('    { "kind": "spawn_ephemeral", "objective": "Sub-task B description", "name": "scout-b" },');
+  lines.push('    { "kind": "spawn_ephemeral", "objective": "Sub-task C description", "name": "scout-c" },');
+  lines.push('    { "kind": "idle", "wakeOnSignals": ["process_completed"] }');
+  lines.push("  ]");
+  lines.push("}");
+  lines.push("```");
+  lines.push("When all ephemerals complete, you'll be woken. Read their results from the blackboard, synthesize, write your result, and exit.");
   lines.push("");
   lines.push("If you don't include a command block, the kernel will auto-write your full response to the blackboard and exit you.");
+
+  if (workerContext) {
+    lines.push("");
+    lines.push("## Additional Context");
+    lines.push("");
+    lines.push(workerContext);
+  }
 
   return lines.join("\n");
 }
@@ -340,7 +370,7 @@ export class KernelInterpreter {
           const scopePublishKeys = proc.scopeId
             ? state.scopes.get(proc.scopeId)?.publishKeys
             : undefined;
-          const systemPrompt = buildWorkerPrompt(proc, scopePublishKeys);
+          const systemPrompt = buildWorkerPrompt(proc, scopePublishKeys, state.workerContext);
           const upstream = buildUpstreamContext(state, proc);
           prompt = systemPrompt + upstream + "\n\n# Your Objective\n\n" + proc.objective;
         }
@@ -379,6 +409,9 @@ export class KernelInterpreter {
       // ── Metacognitive evaluation ──────────────────────────────
       case "run_metacog": {
         const agent = this.getOrCreateMetacog(state);
+
+        // Hydrate process snapshot so metacog sees the full process table
+        agent.setProcessSnapshot(Array.from(state.processes.values()));
 
         // Wire metacog LLM streaming → lens (so terminal shows metacog's thinking)
         const metacogPid = "__metacog__";
@@ -428,8 +461,13 @@ export class KernelInterpreter {
 
       // ── Ephemeral (fire-and-forget scout) ─────────────────────
       case "run_ephemeral": {
-        const model = effect.model ?? state.config.kernel.processModel;
-        const thread = this.brain.startThread({ model });
+        const model = effect.model ?? state.config.ephemeral.defaultModel;
+        const thread = this.brain.startThread({
+          model,
+          workingDirectory: this.workingDir,
+          sandboxMode: "danger-full-access" as any,
+          skipGitRepoCheck: true,
+        });
         const startMs = Date.now();
 
         void thread
@@ -727,10 +765,21 @@ export class KernelInterpreter {
       (p) => p.state === "sleeping" || p.state === "idle",
     ).length;
 
+    // Build PID → name lookup for blackboard writer attribution
+    const pidToName = new Map<string, string>();
+    for (const p of allProcesses) {
+      pidToName.set(p.pid, p.name);
+    }
+
     const blackboard: Record<string, unknown> = {};
+    const blackboardWriters: Record<string, string> = {};
     for (const [key, entry] of state.blackboard) {
       if (!key.startsWith("_inbox:")) {
         blackboard[key] = entry.value;
+        if (entry.writtenBy) {
+          const name = pidToName.get(entry.writtenBy);
+          if (name) blackboardWriters[key] = name;
+        }
       }
     }
 
@@ -780,6 +829,7 @@ export class KernelInterpreter {
       recentEvents: [],
       recentHeuristics: state.schedulerHeuristics.slice(0, 10),
       blackboard,
+      blackboardWriters,
     };
   }
 }

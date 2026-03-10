@@ -28,6 +28,7 @@ export type KernelState = {
   // --- Identity ---
   goal: string;
   metacogContext?: string;
+  workerContext?: string;
   runId: string;
   config: OsConfig;
 

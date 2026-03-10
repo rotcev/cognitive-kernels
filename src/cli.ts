@@ -54,10 +54,12 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
   const outPath = outPathRaw ? path.resolve(cwd, outPathRaw) : undefined;
   const runId = readStringFlag(flags, "--run-id");
   const metacogContext = readStringFlag(flags, "--metacog-context");
+  const workerContext = readStringFlag(flags, "--worker-context");
 
   const snapshot = await runOsMode({
     goal,
     metacogContext,
+    workerContext,
     configPath,
     protocolLogPath,
     cwd,

@@ -870,6 +870,8 @@ export type OsSystemSnapshot = {
   recentEvents: OsProcessEvent[];
   recentHeuristics: OsHeuristic[];
   blackboard?: Record<string, unknown>;
+  /** Maps blackboard key → writer process name (populated from writtenBy PID). */
+  blackboardWriters?: Record<string, string>;
   selectedBlueprint?: SelectedBlueprintInfo;
   deferrals?: Array<{ id: string; name: string; condition: DeferCondition; waitedTicks: number; reason: string }>;
 };
