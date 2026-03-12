@@ -24,18 +24,22 @@ export class OsMetacognitiveAgent {
   private selectedBlueprint: SelectedBlueprintInfo | null = null;
   private ephemeralStats: { spawns: number; successes: number; failures: number; totalDurationMs: number } = { spawns: 0, successes: 0, failures: 0, totalDurationMs: 0 };
 
+  private readonly metacogCapabilities: string[];
+
   constructor(
     model: string,
     goal: string,
     client: Brain,
     workingDir: string,
     metacogContext?: string,
+    metacogCapabilities?: string[],
   ) {
     this.model = model;
     this.goal = goal;
     this.client = client;
     this.workingDir = workingDir;
     this.metacogContext = metacogContext;
+    this.metacogCapabilities = metacogCapabilities ?? [];
   }
 
   buildSystemPrompt(): string {
@@ -120,7 +124,12 @@ export class OsMetacognitiveAgent {
       "    of a completed task. Its output is on the blackboard — move on to the next phase.",
       "  Names must be unique.",
       "",
-      "memory: Array of learning commands (learn, define_blueprint, evolve_blueprint, record_strategy). Same as before.",
+      "memory: Array of commands. Available kinds: learn, define_blueprint, evolve_blueprint, record_strategy.",
+      ...(this.metacogCapabilities.includes("bb_write") ? [
+        '  Additionally: { kind: "bb_write", key: "some-key", value: { ... } } — write directly to the global blackboard.',
+        "  Use this for relaying decisions, updating shared context, or any coordination state.",
+        "  This writes immediately (no scoping, no publish-on-death). Use for architecture:* and decision relay.",
+      ] : []),
       "",
       'halt: { status: "achieved" | "unachievable" | "stalled", summary: "..." } when goal is achieved/unachievable, else null.',
       '  - "achieved" requires evidence: deliverables verified on the blackboard.',

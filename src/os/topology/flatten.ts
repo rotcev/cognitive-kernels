@@ -21,6 +21,7 @@ function flattenExpr(expr: TopologyExpr, gateCondition: GateCondition | undefine
         backend: expr.backend,
         gateCondition,
         capabilities: expr.capabilities,
+        tags: expr.tags,
       };
       return {
         nodes: new Map([[expr.name, node]]),

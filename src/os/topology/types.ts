@@ -25,7 +25,8 @@ export type TopologyExpr =
   | { type: "task"; name: string; objective: string;
       reads?: string[]; writes?: string[];
       model?: string; priority?: number; backend?: TaskBackend;
-      capabilities?: { observationTools?: string[] } }
+      capabilities?: { observationTools?: string[] };
+      tags?: Record<string, string> }
   | { type: "seq"; children: TopologyExpr[] }
   | { type: "par"; children: TopologyExpr[] }
   | { type: "gate"; condition: GateCondition; child: TopologyExpr };
@@ -41,6 +42,7 @@ export interface FlatNode {
   backend?: TaskBackend;
   gateCondition?: GateCondition;
   capabilities?: { observationTools?: string[] };
+  tags?: Record<string, string>;
 }
 
 /** Flattened graph — nodes + dependency edges. */
@@ -81,4 +83,5 @@ export type MetacogMemoryCommand =
   | { kind: "learn"; heuristic: string; confidence: number; context: string; scope?: string }
   | { kind: "define_blueprint"; blueprint: Record<string, unknown> }
   | { kind: "evolve_blueprint"; sourceBlueprintId: string; mutations: Record<string, unknown>; description: string }
-  | { kind: "record_strategy"; strategy: Record<string, unknown> };
+  | { kind: "record_strategy"; strategy: Record<string, unknown> }
+  | { kind: "bb_write"; key: string; value: unknown };

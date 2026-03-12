@@ -40,6 +40,8 @@ export type BootEvent = BaseEvent & {
   awarenessEnabled?: boolean;
   /** Model for awareness-daemon. */
   awarenessModel?: string;
+  /** Product-configurable capabilities for the metacog (e.g. "bb_write"). */
+  metacogCapabilities?: string[];
 };
 
 /** An LLM process completed a turn. */

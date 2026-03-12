@@ -30,6 +30,7 @@ const startRunInputSchema = z
     provider: z.enum(["claude", "codex"]).optional(),
     configPath: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
+    metacogCapabilities: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -419,6 +420,7 @@ export class CognitiveKernelsControlPlane {
           provider: input.provider,
           cwd: input.cwd ?? this.defaultCwd,
           configPath: input.configPath ?? this.defaultConfigPath,
+          metacogCapabilities: input.metacogCapabilities,
         };
         const run = await this.runManager.startRun(runInput);
         return successTextResult(formatRunText(run), { run });

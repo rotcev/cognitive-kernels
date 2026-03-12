@@ -80,6 +80,9 @@ export type KernelState = {
   /** Rolling history of metacog evaluations. */
   metacogHistory: MetacogHistoryEntry[];
 
+  // --- Metacog capabilities (product-configurable) ---
+  metacogCapabilities: string[];
+
   // --- Awareness state ---
   awarenessNotes: string[];
 
@@ -156,6 +159,8 @@ export function initialState(config: OsConfig, runId: string): KernelState {
     metacogInflight: false,
     lastMetacogWakeAt: 0,
     metacogHistory: [],
+
+    metacogCapabilities: [],
 
     awarenessNotes: [],
 

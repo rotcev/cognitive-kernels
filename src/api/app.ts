@@ -48,6 +48,7 @@ export function createRunsApiApp(options: RunsApiOptions = {}): Hono {
       provider: body.provider ?? options.defaultProvider,
       cwd: body.cwd ?? options.defaultCwd ?? process.cwd(),
       configPath: body.configPath ?? options.defaultConfigPath,
+      metacogCapabilities: body.metacogCapabilities,
     });
 
     return c.json<RunResponse>({ run }, 201);

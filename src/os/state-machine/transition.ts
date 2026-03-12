@@ -105,6 +105,7 @@ function handleBoot(state: KernelState, event: BootEvent): TransitionResult {
     goal: event.goal,
     metacogContext: event.metacogContext,
     workerContext: event.workerContext,
+    metacogCapabilities: event.metacogCapabilities ?? [],
     startTime: Date.now(),
     processes,
     blackboard,
@@ -1961,6 +1962,11 @@ function reconcileTopologyInto(
           (newProc as any).capabilities = { observationTools: ["browser", "shell"] };
         }
 
+        // Propagate tags from topology for product-layer metadata
+        if (re.tags) {
+          (newProc as any).tags = re.tags;
+        }
+
         processes.set(pid, newProc);
 
         effects.push({
@@ -1989,6 +1995,7 @@ function reconcileTopologyInto(
             model: newProc.model,
             priority: re.priority,
             backend: re.backend,
+            tags: re.tags,
           },
         });
         break;
@@ -2100,7 +2107,33 @@ function handleTopologyDeclared(state: KernelState, event: TopologyDeclaredEvent
   }
 
   // Handle memory commands (emit effects for kernel to execute)
+  let blackboard = state.blackboard;
   for (const cmd of event.memory) {
+    if (cmd.kind === "bb_write") {
+      if (state.metacogCapabilities.includes("bb_write")) {
+        blackboard = new Map(blackboard);
+        const existing = blackboard.get(cmd.key);
+        blackboard.set(cmd.key, {
+          value: cmd.value,
+          writtenBy: "metacog",
+          version: (existing?.version ?? 0) + 1,
+        });
+        const preview = String(JSON.stringify(cmd.value)).slice(0, 200);
+        effects.push({
+          type: "emit_protocol",
+          action: "os_bb_write",
+          message: `metacog bb_write: ${cmd.key}`,
+          detail: { key: cmd.key, name: "metacog", valuePreview: preview },
+        });
+      } else {
+        effects.push({
+          type: "emit_protocol",
+          action: "os_metacog_memory",
+          message: `bb_write capability not enabled — skipping write to "${cmd.key}"`,
+        });
+      }
+      continue;
+    }
     effects.push({
       type: "emit_protocol",
       action: "os_metacog_memory",
@@ -2108,13 +2141,16 @@ function handleTopologyDeclared(state: KernelState, event: TopologyDeclaredEvent
     });
   }
 
+  // Apply any blackboard mutations from bb_write commands
+  const stateWithBb = blackboard !== state.blackboard ? { ...state, blackboard } : state;
+
   // Handle topology declaration
   if (event.topology !== null) {
-    const result = reconcileTopologyInto(state, event.topology, effects);
+    const result = reconcileTopologyInto(stateWithBb, event.topology, effects);
     return [result.state, assignEffectSeqs(result.effects)];
   }
 
-  return [state, assignEffectSeqs(effects)];
+  return [stateWithBb, assignEffectSeqs(effects)];
 }
 
 // ---------------------------------------------------------------------------

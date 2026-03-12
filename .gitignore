@@ -4,3 +4,5 @@ dist
 .env
 .playwright-mcp/
 .worktrees/
+src/**/*.js
+src/**/*.d.ts

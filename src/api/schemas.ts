@@ -9,6 +9,7 @@ export const createRunSchema = z
     provider: z.enum(["claude", "codex"]).optional(),
     configPath: z.string().min(1).optional(),
     cwd: z.string().min(1).optional(),
+    metacogCapabilities: z.array(z.string()).optional(),
   })
   .strict();
 

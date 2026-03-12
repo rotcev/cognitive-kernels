@@ -55,6 +55,10 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
   const runId = readStringFlag(flags, "--run-id");
   const metacogContext = readStringFlag(flags, "--metacog-context");
   const workerContext = readStringFlag(flags, "--worker-context");
+  const metacogCapabilitiesRaw = readStringFlag(flags, "--metacog-capabilities");
+  const metacogCapabilities = metacogCapabilitiesRaw
+    ? metacogCapabilitiesRaw.split(",").map(s => s.trim()).filter(Boolean)
+    : undefined;
 
   const snapshot = await runOsMode({
     goal,
@@ -65,6 +69,7 @@ async function handleOsCommand(flags: Map<string, string | boolean>): Promise<vo
     cwd,
     provider,
     runId,
+    metacogCapabilities,
   });
 
   const serialized = JSON.stringify(snapshot, null, 2);

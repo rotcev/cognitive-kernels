@@ -15,6 +15,7 @@ export type ApiSchemaSet = {
     provider?: "claude" | "codex";
     configPath?: string;
     cwd?: string;
+    metacogCapabilities?: string[];
   }>;
   runIdParams: z.ZodType<{
     runId: string;

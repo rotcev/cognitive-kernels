@@ -486,6 +486,10 @@ export class KernelRunManager {
       args.push("--provider", input.provider);
     }
 
+    if (input.metacogCapabilities && input.metacogCapabilities.length > 0) {
+      args.push("--metacog-capabilities", input.metacogCapabilities.join(","));
+    }
+
     return {
       command: this.nodePath,
       args,

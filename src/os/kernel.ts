@@ -3438,6 +3438,8 @@ export class OsKernel {
       lastMetacogWakeAt: this.lastMetacogWakeAt,
       metacogHistory: [...this.metacogHistory],
 
+      metacogCapabilities: [],
+
       awarenessNotes: [...this.pendingAwarenessNotes],
 
       drainingPids: new Set(this.drainingPids),

@@ -1,9 +1,37 @@
 # cognitive-kernels
 
-Standalone cognitive kernel runtime for reusable AI process substrates.
+An operating system for minds.
 
-This repo keeps the kernel, scheduler, memory, and execution substrate, while
-dropping older product-specific orchestration layers.
+## Cognitive programming
+
+Programming used to mean telling a machine what to do. Cognitive programming
+means telling a system of minds how to think together.
+
+You don't write procedures. You write physics — the rules that govern how
+minds coordinate, constrain, and verify each other. The topology algebra
+(`seq`, `par`, `gate`) structures thought. The blackboard gives minds shared
+memory. The metacog decomposes goals and orchestrates workers. You define
+the invariants. The system figures out the motion.
+
+When it underperforms, you don't read stack traces. You study behavior. A
+reviewer inventing requirements nobody asked for. A coordinator scheduling
+work in the wrong order. A worker drifting from the goal. These are
+cognitive bugs — you fix them by calibrating the constraints minds operate
+under.
+
+When you optimize, you don't profile code. You restructure how minds
+coordinate. Pipeline work so they stay busy instead of idle. Consolidate
+review so one mind evaluates a batch instead of many minds evaluating one
+each. Defer verification until there's something real to verify. These are
+the same decisions a human manager makes. Except the team runs at machine
+speed.
+
+The kernel is four ideas: a deterministic transition function that mediates
+all state. Scoped blackboards that give minds isolation without losing
+coherence. A topology algebra that structures work. Protocol events that
+make everything observable. Products built on top define what the minds
+should care about — build instructions, research strategies, review
+criteria, creative briefs. The domain changes. The kernel doesn't.
 
 ## Architecture
 

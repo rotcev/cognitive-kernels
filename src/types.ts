@@ -148,6 +148,7 @@ export type KernelRunInput = {
   configPath?: string;
   cwd: string;
   provider?: BrainProvider;
+  metacogCapabilities?: string[];
 };
 
 export type KernelRun = {

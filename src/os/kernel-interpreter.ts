@@ -740,6 +740,7 @@ export class KernelInterpreter {
         this.brain,
         this.workingDir,
         state.metacogContext,
+        state.metacogCapabilities,
       );
     }
     return this.metacogAgent;

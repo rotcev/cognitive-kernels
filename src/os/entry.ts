@@ -27,6 +27,8 @@ export type OsModeInput = {
   runId?: string;
   /** Lens event bus for real-time in-process streaming (zero-latency path). */
   lensBus?: import("../lens/event-bus.js").LensEventBus;
+  /** Product-configurable capabilities for the metacog (e.g. "bb_write"). */
+  metacogCapabilities?: string[];
 };
 
 export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
@@ -174,6 +176,7 @@ export async function runOsMode(input: OsModeInput): Promise<OsSystemSnapshot> {
       consolidatorObjective,
       awarenessModel: osConfig.awareness?.model,
       provider,
+      metacogCapabilities: input.metacogCapabilities,
     });
 
     const snapshot = stateToSnapshot(finalState);

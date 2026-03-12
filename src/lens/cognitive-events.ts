@@ -106,7 +106,7 @@ export interface LensCognitiveInterventionMetacog extends LensCognitiveEventBase
   action: "metacog";
   detail: {
     assessment: string;
-    phaseName: string | null;
+    phaseName?: string;
     commands: Array<{ kind: string; reason?: string; target?: string }>;
     citedHeuristicIds: string[];
   };
@@ -187,7 +187,7 @@ EXTRACTORS.set("os_metacog", (event) => {
     agentName: event.agentName,
     detail: {
       assessment: d.assessment as string,
-      phaseName: typeof d.phaseName === "string" ? d.phaseName : null,
+      ...(typeof d.phaseName === "string" ? { phaseName: d.phaseName } : {}),
       commands: (d.commands ?? []) as Array<{ kind: string; reason?: string; target?: string }>,
       citedHeuristicIds: (d.citedHeuristicIds ?? []) as string[],
     },

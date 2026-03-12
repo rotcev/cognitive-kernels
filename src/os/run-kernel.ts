@@ -36,6 +36,7 @@ export async function runKernel(
     consolidatorObjective?: string;
     awarenessModel?: string;
     provider?: BrainProvider;
+    metacogCapabilities?: string[];
   } = {},
 ): Promise<KernelState> {
   const workingDir = options.workingDir ?? process.cwd();
@@ -74,6 +75,7 @@ export async function runKernel(
     consolidatorObjective: options.consolidatorObjective,
     awarenessEnabled: config.awareness?.enabled ?? false,
     awarenessModel: options.awarenessModel ?? config.awareness?.model,
+    metacogCapabilities: options.metacogCapabilities,
     timestamp: Date.now(),
     seq: seq++,
   } as KernelEvent);

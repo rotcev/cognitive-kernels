@@ -4,7 +4,7 @@ import type { TopologyExpr, FlatNode, GateCondition } from "./types.js";
 
 /** Effects produced by the reconciler. */
 export type ReconcileEffect =
-  | { type: "spawn_process"; name: string; objective: string; reads?: string[]; writes?: string[]; model?: string; priority?: number; backend?: FlatNode["backend"]; capabilities?: FlatNode["capabilities"] }
+  | { type: "spawn_process"; name: string; objective: string; reads?: string[]; writes?: string[]; model?: string; priority?: number; backend?: FlatNode["backend"]; capabilities?: FlatNode["capabilities"]; tags?: Record<string, string> }
   | { type: "kill_process"; pid: string; name: string }
   | { type: "drain_process"; pid: string; name: string }
   | { type: "update_process"; pid: string; priority?: number; objective?: string }
@@ -127,6 +127,7 @@ export function reconcile(
         priority: node.priority,
         backend: node.backend,
         capabilities: node.capabilities,
+        tags: node.tags,
       });
       effects.push({ type: "activate_process", name: node.name });
     }
